@@ -1,0 +1,187 @@
+# QBO Skill — Patch for SKILL.md
+#
+# Instructions: This file contains the new "Bulk Corrections" section to add
+# to /mnt/skills/user/qbo/SKILL.md under the "Common Workflows" heading.
+# Copy the content below into that file from a Cowork session.
+# ─────────────────────────────────────────────────────────────────────────────
+
+## Common Workflows
+
+### Bulk Corrections
+
+Two tools eliminate the painful round-trip reshaping that bulk corrections
+previously required.
+
+---
+
+#### 1. `get_<entity>` → modify → `update_<entity>` round-trip pattern
+
+Every entity now has a corresponding `get_` tool that returns the record in
+the **exact same JSON shape** the matching `update_` tool accepts as input.
+No reshaping. No reconstructing `ItemRef.value` from native QBO fields.
+
+Available get tools:
+`get_sales_receipt`, `get_invoice`, `get_bill`, `get_journal_entry`,
+`get_expense`, `get_deposit`, `get_credit_memo`, `get_estimate`,
+`get_purchase_order`
+
+**Output shape of get_ tools:**
+
+```json
+{
+  "id": "123",
+  "sync_token": "5",
+  "customer_id": "42",
+  "customer_name": "Acme Corp",
+  "txn_date": "2026-03-15",
+  "private_note": "Q1 fee",
+  "lines": [
+    {
+      "amount": 500,
+      "description": "Consulting fee",
+      "detail_type": "SalesItemLineDetail",
+      "item_id": "old-item-id",
+      "item_name": "Old Service",
+      "quantity": 1,
+      "unit_price": 500
+    }
+  ]
+}
+```
+
+**Workflow — change one field on one line:**
+
+```python
+# 1. Fetch update-ready shape
+record = get_sales_receipt(client_name="Acme Corp", sales_receipt_id="456")
+
+# 2. Modify exactly what you need
+record["lines"][0]["item_id"] = "new-item-id"
+record["lines"][0]["item_name"] = "New Service"
+
+# 3. Push back — no reshaping
+update_sales_receipt(
+    client_name="Acme Corp",
+    sales_receipt_id="456",
+    lines=record["lines"]
+)
+```
+
+**Special case — `get_deposit`:** Deposits return two separate arrays,
+`linked_payment_ids` and `deposit_lines`, which map directly to the
+`create_deposit`/update deposit input shape. The `linked_payment_ids` field
+is critical — omitting it would move payments back to Undeposited Funds.
+
+```python
+record = get_deposit(client_name="Acme Corp", deposit_id="789")
+# record["linked_payment_ids"] = [{"payment_id": "pmt-1", "amount": 400.0}, ...]
+# record["deposit_lines"] = [{"amount": 150.0, "account_id": "acct-7", ...}, ...]
+```
+
+---
+
+#### 2. `swap_item_or_account` — bulk swap across many transactions
+
+Use when the same item or account reference needs to change across a list of
+transactions. One call handles any number of transactions.
+
+**Signature:**
+
+```
+swap_item_or_account(
+    client_name,
+    old_id,           # item or account ID to replace
+    new_id,           # item or account ID to use instead
+    id_type,          # "item" or "account"
+    transaction_ids,  # list of txn IDs
+    entity_types,     # one type for all, or paired list (same length)
+    dry_run=False,    # preview without writing
+    stop_on_error=True
+)
+```
+
+**Supported entity types:** SalesReceipt, Invoice, Bill, Expense,
+JournalEntry, CreditMemo, Deposit
+
+**Invalid combos (rejected up front):**
+- `id_type="item"` + `JournalEntry` — journal entries use accounts, not items
+- `id_type="item"` + `Deposit` — deposit lines use account refs, not items
+
+**Return shape — per-transaction result list:**
+
+```json
+[
+  {"txn_id": "sr-1",  "entity_type": "SalesReceipt", "status": "updated",      "lines_changed": 1},
+  {"txn_id": "sr-2",  "entity_type": "SalesReceipt", "status": "no_match",     "lines_changed": 0},
+  {"txn_id": "sr-3",  "entity_type": "SalesReceipt", "status": "failed",       "lines_changed": 0, "error": "..."},
+  {"txn_id": "sr-4",  "entity_type": "SalesReceipt", "status": "would_update", "lines_changed": 2}
+]
+```
+
+---
+
+#### Worked example: swap item A for item B across 60 sales receipts
+
+**Step 1 — dry run to preview blast radius:**
+
+```
+swap_item_or_account(
+    client_name="Acme Corp",
+    old_id="OLD-FEE-ITEM-ID",
+    new_id="NEW-FEE-ITEM-ID",
+    id_type="item",
+    transaction_ids=["sr-1", "sr-2", ..., "sr-60"],
+    entity_types=["SalesReceipt"],   # single type applies to all IDs
+    dry_run=True,
+    stop_on_error=True
+)
+```
+
+Review the output: check `would_update` count vs `no_match`. If the numbers
+look right (e.g. 60 `would_update`, 0 `no_match`, 0 `failed`), proceed.
+
+**Step 2 — commit the swap:**
+
+```
+swap_item_or_account(
+    client_name="Acme Corp",
+    old_id="OLD-FEE-ITEM-ID",
+    new_id="NEW-FEE-ITEM-ID",
+    id_type="item",
+    transaction_ids=["sr-1", "sr-2", ..., "sr-60"],
+    entity_types=["SalesReceipt"],
+    dry_run=False,
+    stop_on_error=True    # halt on first failure (see guidance below)
+)
+```
+
+---
+
+#### When to use `stop_on_error=True` vs `False`
+
+**`stop_on_error=True` (default) — use when partial state is worse than
+total failure:**
+
+- Corrections that must be all-or-nothing (e.g. reclassifying a set of
+  transactions that feed a specific report — partial reclassification
+  produces wrong totals on both sides)
+- When you want to investigate the first failure before letting any more
+  writes happen
+- Default for any correction you haven't dry-run tested yet
+
+If a failure occurs, the tool returns results so far (including which txn_id
+failed and why), and stops. You can fix the issue and re-run with the
+remaining IDs.
+
+**`stop_on_error=False` — use when each fix is independent and making
+progress matters more than atomicity:**
+
+- Large lists where individual records may have been deleted, voided, or
+  already corrected — you want to fix what you can
+- When you've already dry-run tested and know most records will succeed
+- Non-financial metadata fixes (descriptions, memos) where a partial update
+  doesn't create accounting inconsistencies
+
+With `stop_on_error=False`, every failed transaction gets `status="failed"`
+with the error message, and the tool continues. Review the output for the
+full picture before reporting completion to the user.

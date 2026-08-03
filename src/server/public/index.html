@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Multi-Connect</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23256d47'/%3E%3Ctext x='16' y='21' font-family='sans-serif' font-size='13' font-weight='bold' fill='white' text-anchor='middle'%3EQB%3C/text%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+  <script>
+    // Apply the saved theme before first paint to avoid a light/dark flash.
+    (function () {
+      try {
+        var t = localStorage.getItem('qbo_theme');
+        if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <!-- Sign-in screen (shown when no API key) -->
+  <div id="auth-screen" class="auth-screen" hidden>
+    <button type="button" class="icon-btn theme-toggle auth-theme-toggle" aria-label="Toggle theme" title="Toggle light/dark theme"></button>
+    <div class="auth-card">
+      <div class="auth-logo">QB</div>
+      <h1>Multi-Connect</h1>
+      <p class="auth-subtitle">Sign in to manage QuickBooks connections</p>
+      <form id="auth-form">
+        <input
+          type="text"
+          name="username"
+          placeholder="Username"
+          required
+          autocomplete="username"
+          autofocus
+        >
+        <input
+          type="password"
+          name="password"
+          placeholder="Password"
+          required
+          autocomplete="current-password"
+        >
+        <button type="submit" class="btn btn-primary btn-block">Sign in</button>
+      </form>
+      <form id="auth-key-form" hidden>
+        <input
+          type="password"
+          name="apiKey"
+          placeholder="Paste your API key"
+          autocomplete="off"
+        >
+        <button type="submit" class="btn btn-primary btn-block">Sign in with key</button>
+      </form>
+      <p id="auth-error" class="auth-error" hidden></p>
+      <button type="button" class="btn-link auth-mode-toggle" id="auth-mode-toggle">Sign in with an API key instead</button>
+      <p class="auth-hint">
+        Team members: use the username &amp; password your admin set up for you.<br>
+        First-time setup: sign in with the master key from <code>.env</code>
+        (<code>QBO_API_KEY</code>), then create your admin account on the Team view.
+      </p>
+    </div>
+  </div>
+
+  <!-- Main app: command-center shell (client rail / detail pane / activity) -->
+  <div id="app" class="shell" hidden>
+    <aside class="rail">
+      <div class="rail-header">
+        <div class="rail-logo">QB</div>
+        <span class="rail-wordmark">Multi-Connect</span>
+      </div>
+      <div class="rail-toggle" id="rail-toggle">
+        <button type="button" class="seg-btn" data-action="switch-view" data-view="clients">Clients</button>
+        <button type="button" class="seg-btn admin-only" data-action="switch-view" data-view="team">Team</button>
+      </div>
+      <div class="rail-search" id="rail-search">
+        <input id="search-input" type="text" placeholder="Find a client…" autocomplete="off" aria-label="Find a client">
+      </div>
+      <div class="rail-list" id="rail-list"></div>
+      <button type="button" class="rail-add" id="rail-add" data-action="add-company">+ Connect a client</button>
+      <div class="rail-footer">
+        <span class="whoami" id="whoami"></span>
+        <button type="button" class="icon-btn" data-action="settings" aria-label="Settings" title="Settings">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
+        <button type="button" class="icon-btn theme-toggle" aria-label="Toggle theme" title="Toggle light/dark theme"></button>
+      </div>
+    </aside>
+
+    <main class="detail" id="detail"></main>
+
+    <aside class="activity">
+      <div class="card-label activity-label" id="activity-label">Activity</div>
+      <div class="activity-list" id="activity-list"></div>
+    </aside>
+  </div>
+
+  <!-- Generic modal -->
+  <div id="modal-backdrop" class="modal-backdrop" hidden>
+    <div class="modal" id="modal" role="dialog" aria-modal="true">
+      <div class="modal-header">
+        <h3 id="modal-title"></h3>
+        <button class="modal-close" id="modal-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body" id="modal-body"></div>
+    </div>
+  </div>
+
+  <div id="toast-container" class="toast-container"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

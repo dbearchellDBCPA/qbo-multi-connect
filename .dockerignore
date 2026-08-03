@@ -1,0 +1,16 @@
+node_modules
+dist
+.git
+.gitignore
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.local
+tests
+coverage
+*.log
+docs
+scratchpad
+Dockerfile
+.dockerignore

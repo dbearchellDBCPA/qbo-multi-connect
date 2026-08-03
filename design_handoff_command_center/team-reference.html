@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Team view — command center design reference</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>body{margin:0;background:#eceae5;font-family:'Instrument Sans',-apple-system,sans-serif;display:flex;justify-content:center;padding:40px 20px}</style>
+</head>
+<body>
+<div class="dv-card" style="width:1160px;background:#fbfbfa;color:#20241f;font-family:'Instrument Sans',-apple-system,sans-serif;display:grid;grid-template-columns:280px 1fr 270px;min-height:640px">
+    <aside style="border-right:1px solid #e8e8e4;display:flex;flex-direction:column">
+      <div style="padding:18px 18px 12px;display:flex;align-items:center;gap:10px;border-bottom:1px solid #eeeeea">
+        <div style="width:28px;height:28px;border-radius:8px;background:#256d47;color:#fff;font-weight:700;font-size:11px;display:flex;align-items:center;justify-content:center">QB</div>
+        <span style="font-weight:700;font-size:14px">Multi-Connect</span>
+      </div>
+      <div style="display:flex;gap:3px;margin:12px 14px 6px;background:#efefeb;border-radius:8px;padding:3px">
+        <span style="flex:1;text-align:center;padding:6px 0;border-radius:6px;font-size:12.5px;font-weight:500;color:#6d766f">Clients</span>
+        <span style="flex:1;text-align:center;padding:6px 0;border-radius:6px;background:#fff;font-size:12.5px;font-weight:650;box-shadow:0 1px 2px rgba(32,36,31,.08)">Team</span>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:2px;padding:6px 10px">
+        <div style="display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:9px;background:#eaf2ed;border:1px solid #d6e6dc">
+          <span style="width:26px;height:26px;border-radius:50%;background:#e5f2ea;color:#22754c;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center">PR</span>
+          <span style="font-size:13px;font-weight:650;flex:1">Priya Raman</span>
+          <span style="font-size:10.5px;color:#7d8a80">3 clients</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:9px">
+          <span style="width:26px;height:26px;border-radius:50%;background:#e7ebf3;color:#40587e;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center">ML</span>
+          <span style="font-size:13px;font-weight:500;flex:1;color:#4b544d">Marcus Lee</span>
+          <span style="font-size:10.5px;color:#7d8a80">admin</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:9px">
+          <span style="width:26px;height:26px;border-radius:50%;background:#efe9e0;color:#8a6d3d;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center">SA</span>
+          <span style="font-size:13px;font-weight:500;flex:1;color:#4b544d">Sofia Alvarez</span>
+          <span style="font-size:10.5px;color:#c0564f;font-weight:700">disabled</span>
+        </div>
+      </div>
+      <button style="margin:auto 14px 16px;border:1.5px dashed #d4d4cd;border-radius:9px;background:transparent;color:#6d766f;cursor:pointer;font-family:inherit;font-size:12.5px;font-weight:600;padding:10px">+ Add a member</button>
+    </aside>
+    <main style="padding:26px 30px">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:20px">
+        <div>
+          <div style="display:flex;align-items:center;gap:10px">
+            <h2 style="margin:0;font-size:23px;font-weight:700;letter-spacing:-.02em">Priya Raman</h2>
+            <span style="display:inline-flex;align-items:center;font-size:10.5px;font-weight:700;letter-spacing:.06em;border-radius:999px;padding:4px 11px;background:#e7ebf3;color:#40587e">MEMBER</span>
+          </div>
+          <div style="margin-top:4px;font-size:12.5px;color:#7d8a80">priya@yourfirm.com · added Mar 2026</div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button style="border:1px solid #e3e3de;border-radius:8px;padding:8px 15px;font-size:12.5px;font-weight:600;cursor:pointer;background:#fff;color:#3f463f;font-family:inherit">Edit</button>
+          <button style="border:1px solid #e3e3de;border-radius:8px;padding:8px 15px;font-size:12.5px;font-weight:600;cursor:pointer;background:#fff;color:#3f463f;font-family:inherit">Disable</button>
+          <button style="border:1px solid #d99a9a;border-radius:8px;padding:8px 15px;font-size:12.5px;font-weight:600;cursor:pointer;background:#fff;color:#b04343;font-family:inherit">Remove</button>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px">
+        <div style="background:#fff;border:1px solid #e8e8e4;border-radius:12px;padding:18px 20px">
+          <div style="font-size:11.5px;font-weight:700;color:#7d8a80;text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px">API key</div>
+          <div style="display:grid;gap:9px;font-size:13px">
+            <div style="display:flex;justify-content:space-between;align-items:center"><span style="color:#5a635b">Key</span><span style="font-family:'IBM Plex Mono',monospace;font-size:12px;background:#f6f6f3;border-radius:5px;padding:2px 8px">qbo_k7Jw…</span></div>
+            <div style="display:flex;justify-content:space-between;align-items:center"><span style="color:#5a635b">Last used</span><span style="font-weight:650">2 hours ago</span></div>
+            <div style="display:flex;justify-content:space-between;align-items:center"><span style="color:#5a635b">Status</span><span style="display:inline-flex;align-items:center;gap:6px;font-weight:650;color:#22754c"><span style="width:6px;height:6px;border-radius:50%;background:#2a9560"></span>Active</span></div>
+            <button style="border:1px solid #e3e3de;border-radius:8px;padding:7px;font-size:12px;font-weight:600;cursor:pointer;background:#fff;color:#3f463f;font-family:inherit;margin-top:2px">Rotate key</button>
+          </div>
+        </div>
+        <div style="background:#fff;border:1px solid #e8e8e4;border-radius:12px;padding:18px 20px">
+          <div style="font-size:11.5px;font-weight:700;color:#7d8a80;text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px">Assigned clients — 3 of 10</div>
+          <div style="display:flex;flex-wrap:wrap;gap:7px">
+            <span style="display:inline-flex;align-items:center;gap:6px;background:#eaf2ed;border:1px solid #d6e6dc;color:#22754c;font-size:12px;font-weight:600;border-radius:999px;padding:4px 12px"><span style="width:6px;height:6px;border-radius:50%;background:#2a9560"></span>Harbor &amp; Finch</span>
+            <span style="display:inline-flex;align-items:center;gap:6px;background:#eaf2ed;border:1px solid #d6e6dc;color:#22754c;font-size:12px;font-weight:600;border-radius:999px;padding:4px 12px"><span style="width:6px;height:6px;border-radius:50%;background:#2a9560"></span>Vesper Coffee Co.</span>
+            <span style="display:inline-flex;align-items:center;gap:6px;background:#eaf2ed;border:1px solid #d6e6dc;color:#22754c;font-size:12px;font-weight:600;border-radius:999px;padding:4px 12px"><span style="width:6px;height:6px;border-radius:50%;background:#2a9560"></span>Cato Ridge Farms</span>
+          </div>
+          <button style="border:1px dashed #d4d4cd;border-radius:8px;background:transparent;color:#6d766f;cursor:pointer;font-family:inherit;font-size:12px;font-weight:600;padding:7px;margin-top:12px;width:100%">Edit assignments</button>
+        </div>
+      </div>
+      <div style="background:#20241f;color:#e8ebe6;border-radius:12px;padding:18px 20px">
+        <div style="font-size:11.5px;font-weight:700;color:#9aa59b;text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px">Priya's MCP connector</div>
+        <div style="display:flex;align-items:center;gap:10px;background:#2b302a;border-radius:8px;padding:9px 13px">
+          <code style="font-family:'IBM Plex Mono',monospace;font-size:12px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#c4dcc9">https://qbo.yourfirm.com/mcp?key=qbo_k7Jw••••••••</code>
+          <button style="border:none;border-radius:6px;padding:5px 12px;font-size:11.5px;font-weight:600;cursor:pointer;background:#3c443b;color:#e8ebe6;font-family:inherit">Copy</button>
+        </div>
+        <div style="font-size:11.5px;color:#9aa59b;margin-top:8px">Scoped to her 3 assigned clients — she can't see or reach the other 7.</div>
+      </div>
+    </main>
+    <aside style="border-left:1px solid #e8e8e4;padding:22px 20px;background:#f6f6f3">
+      <div style="font-size:11.5px;font-weight:700;color:#7d8a80;text-transform:uppercase;letter-spacing:.06em;margin-bottom:14px">Priya's activity</div>
+      <div style="display:flex;flex-direction:column;gap:14px">
+        <div style="display:flex;gap:10px">
+          <span style="width:7px;height:7px;border-radius:50%;background:#40587e;margin-top:5px;flex-shrink:0"></span>
+          <div><div style="font-size:12.5px;font-weight:600">P&amp;L pulled via MCP</div><div style="font-size:11.5px;color:#7d8a80">Vesper Coffee · 22 min ago</div></div>
+        </div>
+        <div style="display:flex;gap:10px">
+          <span style="width:7px;height:7px;border-radius:50%;background:#40587e;margin-top:5px;flex-shrink:0"></span>
+          <div><div style="font-size:12.5px;font-weight:600">Invoice query · 100 rows</div><div style="font-size:11.5px;color:#7d8a80">Harbor &amp; Finch · 2 hr ago</div></div>
+        </div>
+        <div style="display:flex;gap:10px">
+          <span style="width:7px;height:7px;border-radius:50%;background:#2a9560;margin-top:5px;flex-shrink:0"></span>
+          <div><div style="font-size:12.5px;font-weight:600">Assigned to Cato Ridge</div><div style="font-size:11.5px;color:#7d8a80">by Marcus · 1 day ago</div></div>
+        </div>
+        <div style="display:flex;gap:10px">
+          <span style="width:7px;height:7px;border-radius:50%;background:#40587e;margin-top:5px;flex-shrink:0"></span>
+          <div><div style="font-size:12.5px;font-weight:600">14 expenses reclassified</div><div style="font-size:11.5px;color:#7d8a80">Cato Ridge · 2 days ago</div></div>
+        </div>
+      </div>
+    </aside>
+  </div>
+</body>
+</html>

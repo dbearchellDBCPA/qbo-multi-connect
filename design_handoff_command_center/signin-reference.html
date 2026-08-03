@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sign-in — command center design reference</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>body{margin:0;background:#eceae5;font-family:'Instrument Sans',-apple-system,sans-serif;display:flex;justify-content:center;padding:40px 20px}</style>
+</head>
+<body>
+<div class="dv-card" style="width:620px;background:#fbfbfa;color:#20241f;font-family:'Instrument Sans',-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;padding:70px 24px">
+    <div style="background:#ffffff;border:1px solid #e8e8e4;border-radius:12px;padding:40px 36px;width:100%;max-width:400px;text-align:center">
+      <div style="width:40px;height:40px;border-radius:10px;background:#256d47;color:#fff;font-weight:700;font-size:14px;display:inline-flex;align-items:center;justify-content:center;margin-bottom:16px">QB</div>
+      <h1 style="margin:0 0 6px;font-size:20px;font-weight:700;letter-spacing:-.02em">Multi-Connect</h1>
+      <p style="margin:0 0 24px;color:#6d766f;font-size:13.5px">Sign in with your API key to manage QuickBooks connections</p>
+      <input type="password" placeholder="Paste your API key" style="width:100%;box-sizing:border-box;padding:10px 13px;border:1px solid #e3e3de;border-radius:8px;background:#f6f6f3;color:#20241f;font-size:13.5px;margin-bottom:10px;font-family:'IBM Plex Mono',monospace"></input>
+      <button style="width:100%;border:none;border-radius:8px;padding:10px 16px;font-size:13.5px;font-weight:600;cursor:pointer;background:#256d47;color:#fff;font-family:inherit">Sign in</button>
+      <p style="margin:20px 0 0;font-size:11.5px;color:#7d8a80;line-height:1.7">Admins: use the master key from <code style="font-family:'IBM Plex Mono',monospace;background:#f6f6f3;padding:1px 5px;border-radius:4px">.env</code>. Team members: use the personal key your admin gave you.</p>
+    </div>
+  </div>
+</body>
+</html>

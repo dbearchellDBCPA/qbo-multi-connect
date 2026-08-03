@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Modals — command center design reference</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>body{margin:0;background:#eceae5;font-family:'Instrument Sans',-apple-system,sans-serif;display:flex;justify-content:center;padding:40px 20px}</style>
+</head>
+<body>
+<div class="dv-card" style="width:1160px;background:rgba(28,32,27,.55);font-family:'Instrument Sans',-apple-system,sans-serif;color:#20241f;display:flex;gap:32px;align-items:flex-start;justify-content:center;padding:56px 40px">
+    <div style="background:#ffffff;border:1px solid #e8e8e4;border-radius:12px;width:440px;overflow:hidden">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 22px;border-bottom:1px solid #eeeeea">
+        <h3 style="margin:0;font-size:15px;font-weight:700">Connect a client</h3>
+        <span style="color:#7d8a80;font-size:20px;line-height:1;cursor:pointer">×</span>
+      </div>
+      <div style="padding:22px">
+        <div style="display:grid;gap:6px">
+          <span style="font-size:12.5px;font-weight:650">Company name</span>
+          <input type="text" placeholder="e.g. Acme Corp" style="padding:9px 12px;border:1px solid #e3e3de;border-radius:8px;background:#f6f6f3;color:#20241f;font-size:13.5px;font-family:inherit"></input>
+          <span style="font-size:11.5px;color:#7d8a80">A friendly label to identify this company in tools and reports.</span>
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:22px">
+          <button style="border:1px solid #e3e3de;border-radius:8px;padding:8px 15px;font-size:12.5px;font-weight:600;cursor:pointer;background:#fff;color:#3f463f;font-family:inherit">Cancel</button>
+          <button style="border:none;border-radius:8px;padding:8px 16px;font-size:12.5px;font-weight:600;cursor:pointer;background:#256d47;color:#fff;font-family:inherit">Continue to QuickBooks →</button>
+        </div>
+      </div>
+    </div>
+    <div style="background:#ffffff;border:1px solid #e8e8e4;border-radius:12px;width:520px;overflow:hidden">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 22px;border-bottom:1px solid #eeeeea">
+        <h3 style="margin:0;font-size:15px;font-weight:700">Member created</h3>
+        <span style="color:#7d8a80;font-size:20px;line-height:1;cursor:pointer">×</span>
+      </div>
+      <div style="padding:22px">
+        <div style="border:1px solid #f0dfc0;border-radius:10px;background:#fbf5e8;padding:14px 16px">
+          <div style="font-size:13px;font-weight:700;color:#8a6420;margin-bottom:3px">Save this key now</div>
+          <div style="font-size:12.5px;color:#8a7548">This is the only time it will be shown — it's stored hashed and can only be rotated, never recovered.</div>
+        </div>
+        <div style="display:grid;gap:6px;margin-top:16px">
+          <span style="font-size:12.5px;font-weight:650">API key for Priya Raman</span>
+          <div style="display:flex;align-items:center;gap:8px">
+            <code style="font-family:'IBM Plex Mono',monospace;background:#f6f6f3;border:1px solid #e3e3de;border-radius:8px;padding:9px 12px;font-size:12px;word-break:break-all;flex:1">qbo_k7Jw2mN9pQxR4tVs8yBzE1cAuD6fHgL3</code>
+            <button style="border:1px solid #e3e3de;border-radius:8px;padding:8px 14px;font-size:12px;font-weight:600;cursor:pointer;background:#fff;color:#3f463f;font-family:inherit">Copy</button>
+          </div>
+        </div>
+        <div style="display:grid;gap:6px;margin-top:14px">
+          <span style="font-size:12.5px;font-weight:650">Claude connector URL</span>
+          <div style="display:flex;align-items:center;gap:10px;background:#20241f;border-radius:8px;padding:9px 13px">
+            <code style="font-family:'IBM Plex Mono',monospace;font-size:12px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#c4dcc9">https://qbo.yourfirm.com/mcp?key=qbo_k7Jw2mN9…</code>
+            <button style="border:none;border-radius:6px;padding:5px 12px;font-size:11.5px;font-weight:600;cursor:pointer;background:#3c443b;color:#e8ebe6;font-family:inherit">Copy</button>
+          </div>
+          <span style="font-size:11.5px;color:#7d8a80">Add as a custom connector in Claude — it signs requests with Priya's key automatically.</span>
+        </div>
+        <div style="display:flex;justify-content:flex-end;margin-top:22px">
+          <button style="border:none;border-radius:8px;padding:8px 18px;font-size:12.5px;font-weight:600;cursor:pointer;background:#256d47;color:#fff;font-family:inherit">Done</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
