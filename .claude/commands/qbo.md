@@ -42,6 +42,7 @@ When the user gives you a task, use the QBO MCP tools to complete it. Always thi
 - `create_payment` — customer payments (can link to specific invoices)
 - `create_bill_payment` — vendor payments (Check or CreditCard, can link to specific bills)
 - `create_expense` / `update_expense` — expenses/purchases (Cash, Check, or CreditCard from a bank/CC account); update edits the original Purchase in place
+- `create_deposit` / `update_deposit` — bank deposits; on update, `linked_payment_ids`/`deposit_lines` REPLACE all existing lines, so fetch with `get_deposit` and pass the complete set (never a delta), and never retry a write whose verification failed
 - `create_account` / `update_account` — Chart of Accounts management
 - `create_vendor` / `create_customer` — entity creation
 

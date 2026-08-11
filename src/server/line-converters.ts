@@ -147,12 +147,19 @@ export function qboPoLinesToUpdateShape(lines: any[]): any[] {
 
 export interface DepositUpdateShape {
   linked_payment_ids: Array<{ payment_id: string; amount: number }>;
-  deposit_lines: Array<{ amount: number; account_id: string; description?: string; customer_id?: string }>;
+  deposit_lines: Array<{
+    amount: number;
+    account_id: string;
+    description?: string;
+    customer_id?: string;
+    entity_id?: string;
+    entity_type?: 'Vendor' | 'Employee';
+  }>;
 }
 
 export function qboDepositLinesToUpdateShape(lines: any[]): DepositUpdateShape {
-  const linked_payment_ids: Array<{ payment_id: string; amount: number }> = [];
-  const deposit_lines: Array<{ amount: number; account_id: string; description?: string; customer_id?: string }> = [];
+  const linked_payment_ids: DepositUpdateShape['linked_payment_ids'] = [];
+  const deposit_lines: DepositUpdateShape['deposit_lines'] = [];
 
   for (const l of (lines ?? [])) {
     if (l.LinkedTxn?.length && l.LinkedTxn[0].TxnType === 'Payment') {
@@ -161,7 +168,19 @@ export function qboDepositLinesToUpdateShape(lines: any[]): DepositUpdateShape {
       const d = l.DepositLineDetail;
       const dl: any = { amount: l.Amount ?? 0, account_id: d.AccountRef?.value ?? '' };
       if (l.Description) dl.description = l.Description;
-      if (d.Entity?.EntityRef?.value) dl.customer_id = d.Entity.EntityRef.value;
+      // QBO returns the line entity either nested ({ type, EntityRef: { value } },
+      // the shape create_deposit writes) or flat ({ value, name, type: 'VENDOR' }).
+      const entityId = d.Entity?.EntityRef?.value ?? d.Entity?.value;
+      if (entityId) {
+        const rawType = String(d.Entity?.type ?? d.Entity?.Type ?? 'Customer');
+        const entityType = rawType.charAt(0).toUpperCase() + rawType.slice(1).toLowerCase();
+        if (entityType === 'Vendor' || entityType === 'Employee') {
+          dl.entity_id = entityId;
+          dl.entity_type = entityType;
+        } else {
+          dl.customer_id = entityId;
+        }
+      }
       deposit_lines.push(dl);
     }
   }

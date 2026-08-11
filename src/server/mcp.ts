@@ -17,6 +17,13 @@ import {
   swapAccountInLines,
 } from './line-converters.js';
 import {
+  buildDepositQboLines,
+  buildDepositUpdatePayload,
+  verifyDepositWrite,
+  formatDepositVerificationFailure,
+  type DepositRollbackOutcome,
+} from './deposit-update.js';
+import {
   addressInput,
   contactInputShape,
   toQboAddress,
@@ -3520,27 +3527,9 @@ export async function registerMcpRoutes(
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
         try {
-          const lines: any[] = [];
-          for (const lp of linked_payment_ids ?? []) {
-            lines.push({
-              Amount: lp.amount,
-              LinkedTxn: [{ TxnId: lp.payment_id, TxnType: 'Payment' }],
-            });
-          }
-          for (const dl of deposit_lines ?? []) {
-            lines.push({
-              Amount: dl.amount,
-              Description: dl.description,
-              DetailType: 'DepositLineDetail',
-              DepositLineDetail: {
-                AccountRef: { value: dl.account_id },
-                ...(dl.customer_id ? { Entity: { type: 'Customer', EntityRef: { value: dl.customer_id } } } : {}),
-              },
-            });
-          }
           const payload: any = {
             DepositToAccountRef: { value: deposit_account_id },
-            Line: lines,
+            Line: buildDepositQboLines(linked_payment_ids, deposit_lines),
           };
           if (txn_date) payload.TxnDate = txn_date;
           if (department_id) payload.DepartmentRef = { value: department_id };
@@ -3553,6 +3542,82 @@ export async function registerMcpRoutes(
           return { content: [{ type: 'text', text: summary }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error creating deposit: ${err?.message ?? err}` }] };
+        }
+      }
+    );
+
+    // ── update_deposit ────────────────────────────────────────────────────────
+    server.tool(
+      'update_deposit',
+      'Update an existing bank deposit. Read-modify-write: fetches the current Deposit, merges only what you pass, and writes the full object back with a fresh SyncToken — untouched fields are preserved. If linked_payment_ids and/or deposit_lines are provided they together REPLACE ALL existing lines: the deposit ends up with exactly the submitted lines, never the submitted lines appended to the old ones. Fetch with get_deposit and pass BOTH arrays to keep existing linked payments — replacing lines without linked_payment_ids returns those payments to Undeposited Funds. If neither array is provided, existing lines are preserved untouched. Every write is verified against QBO afterward; on mismatch the tool attempts to roll the deposit back to its pre-update state and reports exactly what QBO shows.',
+      {
+        client_name: z.string().describe('The name of the client company'),
+        deposit_id: z.string().describe('QBO Deposit ID to update'),
+        deposit_account_id: z.string().optional().describe('New bank account ID to deposit into'),
+        txn_date: z.string().optional().describe('New deposit date YYYY-MM-DD'),
+        private_note: z.string().optional().describe('New memo'),
+        department_id: z.string().optional().describe('New header DepartmentRef.value'),
+        linked_payment_ids: z.array(z.object({
+          payment_id: z.string().describe('Payment ID to include in this deposit (from Undeposited Funds)'),
+          amount: z.number().describe('Amount of this payment to deposit'),
+        })).optional().describe('Replacement set of linked payments. When this and/or deposit_lines is provided, the two arrays together REPLACE ALL existing lines.'),
+        deposit_lines: z.array(z.object({
+          amount: z.number().describe('Amount'),
+          account_id: z.string().describe('Income or liability account ID'),
+          description: z.string().optional().describe('Line memo'),
+          customer_id: z.string().optional().describe('Customer ID for this line'),
+          entity_id: z.string().optional().describe('Entity ID for this line (use instead of customer_id when the name is a vendor or employee)'),
+          entity_type: z.enum(['Customer', 'Vendor', 'Employee']).optional().describe('Entity type for entity_id (defaults to Customer)'),
+        })).optional().describe('Replacement set of direct deposit lines. When this and/or linked_payment_ids is provided, the two arrays together REPLACE ALL existing lines.'),
+      },
+      async ({ client_name, deposit_id, deposit_account_id, txn_date, private_note, department_id, linked_payment_ids, deposit_lines }) => {
+        const realmId = await findRealmId(qboManager, client_name);
+        if (!realmId) return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
+        try {
+          const raw = await qboManager.banking.getDeposit(realmId, deposit_id) as any;
+          const dep = raw?.Deposit;
+          if (!dep) return { content: [{ type: 'text', text: `Deposit ${deposit_id} not found.` }] };
+
+          const { payload, linesReplaced } = buildDepositUpdatePayload(dep, {
+            deposit_account_id, txn_date, private_note, department_id, linked_payment_ids, deposit_lines,
+          });
+          if (linesReplaced && payload.Line.length === 0) {
+            return { content: [{ type: 'text', text: 'Refusing to update: linked_payment_ids/deposit_lines together REPLACE ALL existing lines, and the arrays passed would leave the deposit with zero lines (QBO requires at least one). Omit both arrays to keep existing lines, or pass the complete replacement set.' }] };
+          }
+
+          const result = await qboManager.banking.updateDeposit(realmId, payload) as any;
+          let written = result?.Deposit;
+          if (!written) {
+            written = ((await qboManager.banking.getDeposit(realmId, deposit_id)) as any)?.Deposit;
+          }
+          if (!written) {
+            return { content: [{ type: 'text', text: `Deposit ${deposit_id}: the write was submitted but QBO's response could not be read and re-fetching failed, so the result is UNVERIFIED. DO NOT RETRY — retrying an unverified line replacement can duplicate lines. Run get_deposit and inspect the current lines first.` }] };
+          }
+
+          const verification = verifyDepositWrite(payload, dep, written);
+          if (!verification.ok) {
+            let rollback: DepositRollbackOutcome;
+            try {
+              const restore = { ...dep, SyncToken: written.SyncToken ?? dep.SyncToken };
+              const rbResult = await qboManager.banking.updateDeposit(realmId, restore) as any;
+              const rbWritten = rbResult?.Deposit
+                ?? ((await qboManager.banking.getDeposit(realmId, deposit_id)) as any)?.Deposit;
+              rollback = verifyDepositWrite(dep, dep, rbWritten).ok
+                ? { status: 'restored' }
+                : { status: 'mismatched' };
+            } catch (rbErr: any) {
+              rollback = { status: 'failed', error: rbErr?.message ?? String(rbErr) };
+            }
+            return { content: [{ type: 'text', text: formatDepositVerificationFailure(verification, rollback) }] };
+          }
+
+          const summary =
+            `Deposit #${written.DocNumber ?? written.Id} updated.\n` +
+            `ID: ${written.Id} | SyncToken: ${written.SyncToken} | Date: ${written.TxnDate} | Total: ${formatCurrency(written.TotalAmt)}\n` +
+            `Verified: QBO shows ${verification.actual_line_count} line(s) totaling ${formatCurrency(verification.actual_total)} — matches what was submitted${linesReplaced ? ' (existing lines replaced)' : ' (existing lines preserved)'}.`;
+          return { content: [{ type: 'text', text: summary }] };
+        } catch (err: any) {
+          return { content: [{ type: 'text', text: `Error updating deposit: ${err?.message ?? err}` }] };
         }
       }
     );
@@ -3885,7 +3950,7 @@ export async function registerMcpRoutes(
     // ── get_deposit ───────────────────────────────────────────────────────────
     server.tool(
       'get_deposit',
-      'Fetch a deposit in update-ready shape. Returns linked_payment_ids (payments from Undeposited Funds) and deposit_lines (direct income lines) — both preserved on round-trip.',
+      'Fetch a deposit in update-ready shape. Returns linked_payment_ids (payments from Undeposited Funds) and deposit_lines (direct income lines). Pass BOTH arrays back to update_deposit on round-trip — they together replace all lines, so omitting linked_payment_ids would return those payments to Undeposited Funds.',
       {
         client_name: z.string().describe('The name of the client company'),
         deposit_id: z.string().describe('QBO Deposit ID'),

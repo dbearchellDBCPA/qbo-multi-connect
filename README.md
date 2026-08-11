@@ -428,6 +428,18 @@ update_sales_receipt(client_name="Acme Corp", sales_receipt_id="456", lines=reco
 Funds) and `deposit_lines` (direct income lines). Both must be passed on
 round-trip to avoid accidentally returning payments to Undeposited Funds.
 
+`get_deposit` pairs with `update_deposit`, which follows the same
+read-modify-write pattern: header fields are sparse-merged, and when
+`linked_payment_ids` and/or `deposit_lines` is provided the two arrays
+together **replace all** existing lines — the deposit ends up with exactly
+the submitted lines, never the submitted lines appended to the old ones.
+(Appending would silently inflate a posted deposit, and QBO has no API to
+remove a deposit line afterwards.) When neither array is passed, existing
+lines are preserved untouched. Every write is verified against QBO after the
+fact (line count + line total); on mismatch the tool rolls the deposit back
+to its pre-update state, reports exactly what QBO shows, and warns not to
+retry.
+
 `get_expense` pairs with `update_expense`, which edits the original Purchase
 in place (same ID, incremented SyncToken) rather than creating a correcting
 entry. It auto-fetches the current record + SyncToken by ID, applies sparse
