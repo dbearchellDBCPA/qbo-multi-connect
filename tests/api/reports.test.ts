@@ -63,13 +63,52 @@ describe('ReportsAPI param threading', () => {
     });
   });
 
-  it('balanceSheet threads asOfDate → date and class/department', async () => {
+  // Regression (2026-08-13): asOfDate used to be sent as `date`, which the
+  // BalanceSheet report does not accept — QBO silently ignored it and returned
+  // TODAY'S balance sheet for every requested date. The as-of date must go out
+  // as `end_date`, and no `date` param may ever be sent.
+  it('balanceSheet threads asOfDate → end_date (never `date`) and class/department', async () => {
     await reports.balanceSheet('r', { asOfDate: '2026-12-31', classId: '5', accountingMethod: 'Accrual' });
     expect(client.get).toHaveBeenCalledWith('r', 'reports/BalanceSheet', {
-      date: '2026-12-31',
+      end_date: '2026-12-31',
       class: '5',
       accounting_method: 'Accrual',
     });
+    const query = client.get.mock.calls[0][2];
+    expect(query).not.toHaveProperty('date');
+  });
+
+  it('balanceSheet threads startDate for summarize_column_by series', async () => {
+    await reports.balanceSheet('r', {
+      asOfDate: '2026-06-30',
+      startDate: '2026-01-01',
+      summarizeColumnBy: 'Month',
+    });
+    expect(client.get).toHaveBeenCalledWith('r', 'reports/BalanceSheet', {
+      start_date: '2026-01-01',
+      end_date: '2026-06-30',
+      summarize_column_by: 'Month',
+    });
+  });
+
+  it('balanceSheet returns different data for different as-of dates (date drives the request)', async () => {
+    // The bug this guards against: three different as_of_dates all returned
+    // identical current-day figures because the date never reached QBO.
+    const byEndDate: Record<string, any> = {
+      '2025-06-30': { Rows: { Row: [] }, cash: 12_000, investments: 1_079_000 },
+      '2026-08-13': { Rows: { Row: [] }, cash: 245_796, investments: 0 },
+    };
+    client.get = vi.fn().mockImplementation((_realm: string, _path: string, query: any) =>
+      Promise.resolve(byEndDate[query.end_date] ?? { error: `unexpected end_date ${query.end_date}` })
+    );
+    reports = new ReportsAPI(client);
+
+    const yearEnd: any = await reports.balanceSheet('r', { asOfDate: '2025-06-30' });
+    const today: any = await reports.balanceSheet('r', { asOfDate: '2026-08-13' });
+
+    expect(yearEnd.cash).toBe(12_000);
+    expect(today.cash).toBe(245_796);
+    expect(yearEnd).not.toEqual(today);
   });
 
   it('budgetVsActuals threads budgetId', async () => {

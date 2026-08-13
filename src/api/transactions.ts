@@ -301,6 +301,16 @@ export class TransactionsAPI {
   }
 
   /**
+   * Delete an expense (Purchase — QBO hard delete)
+   */
+  async deleteExpense(realmId: string, expenseId: string, syncToken: string): Promise<unknown> {
+    return this.client.post(realmId, 'purchase?operation=delete', {
+      Id: expenseId,
+      SyncToken: syncToken,
+    });
+  }
+
+  /**
    * Create a vendor
    */
   async createVendor(realmId: string, vendor: any): Promise<unknown> {
@@ -416,6 +426,16 @@ export class TransactionsAPI {
       throw new Error('BillPayment must have Id and SyncToken for updates');
     }
     return this.client.post(realmId, 'billpayment', billPayment);
+  }
+
+  /**
+   * Delete a bill payment (QBO hard delete — reopens the linked bill's balance)
+   */
+  async deleteBillPayment(realmId: string, billPaymentId: string, syncToken: string): Promise<unknown> {
+    return this.client.post(realmId, 'billpayment?operation=delete', {
+      Id: billPaymentId,
+      SyncToken: syncToken,
+    });
   }
 
   /**

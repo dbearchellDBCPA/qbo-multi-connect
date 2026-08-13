@@ -43,7 +43,6 @@ function buildReportQuery(
   supports: ReadonlyArray<
     | 'start_date'
     | 'end_date'
-    | 'date'
     | 'report_date'
     | 'accounting_method'
     | 'summarize_column_by'
@@ -58,7 +57,6 @@ function buildReportQuery(
   const map: Record<string, string | undefined> = {
     start_date: options.startDate,
     end_date: options.endDate,
-    date: options.asOfDate,
     report_date: options.asOfDate,
     accounting_method: options.accountingMethod,
     summarize_column_by: options.summarizeColumnBy,
@@ -99,16 +97,25 @@ export class ReportsAPI {
   }
 
   /**
-   * Get Balance Sheet report
+   * Get Balance Sheet report.
+   * The as-of date maps to Intuit's `end_date` param — BalanceSheet has NO
+   * `date` param, and QBO silently ignores unknown query params, so sending
+   * `date` returns TODAY'S balance sheet regardless of the requested date.
+   * `start_date` only matters for multi-column summarize_column_by series
+   * (QBO defaults it to the fiscal-year start containing end_date).
    */
   async balanceSheet(realmId: string, options: ReportOptions = {}): Promise<unknown> {
-    const query = buildReportQuery(options, [
-      'date',
-      'accounting_method',
-      'summarize_column_by',
-      'class',
-      'department',
-    ]);
+    const query = buildReportQuery(
+      { ...options, endDate: options.endDate ?? options.asOfDate },
+      [
+        'start_date',
+        'end_date',
+        'accounting_method',
+        'summarize_column_by',
+        'class',
+        'department',
+      ]
+    );
     return this.client.get(realmId, 'reports/BalanceSheet', query);
   }
 

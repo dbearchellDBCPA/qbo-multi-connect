@@ -13,9 +13,18 @@ import {
   qboExpenseLinesToUpdateShape,
   qboPoLinesToUpdateShape,
   qboDepositLinesToUpdateShape,
+  buildDepositTxnLines,
+  buildDepositUpdatePayload,
+  depositLineEntityError,
   swapItemInLines,
   swapAccountInLines,
 } from './line-converters.js';
+import {
+  resolveAccountFilterTerms,
+  summarizeGeneralLedger,
+  filterBudgets,
+  budgetToSummary,
+} from './report-shaping.js';
 import {
   addressInput,
   contactInputShape,
@@ -548,6 +557,9 @@ const DESTRUCTIVE_TOOLS = new Set<string>([
   'delete_vendor',
   'delete_account',
   'delete_attachment',
+  'delete_deposit',
+  'delete_expense',
+  'delete_bill_payment',
 ]);
 
 // Read-only tools never mutate QBO state. All get_*/list_* tools plus the query tool.
@@ -657,7 +669,7 @@ export async function registerMcpRoutes(
     // ── get_profit_and_loss ───────────────────────────────────────────────────
     server.tool(
       'get_profit_and_loss',
-      'Get Profit & Loss report for a QBO client. Optionally filter by class/department for segment reporting, or summarize columns by Month/Quarter/Year/Class/etc. Defaults to Accrual basis.',
+      'Get Profit & Loss report for a QBO client. Optionally filter by class/department for segment reporting, or summarize columns by Month/Quarter/Year/Class/etc. Defaults to Accrual basis. SIZE: summarize_by other than Total returns raw QBO JSON — a Month series over a full year can run ~400k characters; prefer Quarter or a shorter period when monthly column detail is not needed.',
       {
         client_name: z.string().describe('The name of the client company'),
         start_date: z.string().describe('Start date in YYYY-MM-DD format'),
@@ -696,16 +708,17 @@ export async function registerMcpRoutes(
     // ── get_balance_sheet ─────────────────────────────────────────────────────
     server.tool(
       'get_balance_sheet',
-      'Get Balance Sheet report for a QBO client. Defaults to Accrual basis.',
+      'Get Balance Sheet report for a QBO client as of as_of_date (sent to Intuit as the report end_date). Defaults to Accrual basis. When summarize_by is set (any value, including Total) the raw QBO report JSON is returned instead of formatted text — a Month series over a year can run ~100-400k characters, so prefer Quarter/Year when column detail is not needed.',
       {
         client_name: z.string().describe('The name of the client company'),
         as_of_date: z.string().describe('As-of date in YYYY-MM-DD format'),
         accounting_method: z.enum(['Cash', 'Accrual']).optional().describe('Cash or Accrual basis. Defaults to Accrual.'),
         summarize_by: z.enum(['Total', 'Month', 'Quarter', 'Year', 'Classes', 'Departments']).optional().describe('Optional: how to summarize columns. Returns raw JSON when set.'),
+        start_date: z.string().optional().describe('Optional: series start (YYYY-MM-DD) for multi-column summarize_by reports. Defaults to QBO\'s fiscal-year start containing as_of_date.'),
         class_id: z.string().optional().describe('Optional: QBO Class ID (or comma-separated IDs) to filter by class.'),
         department_id: z.string().optional().describe('Optional: QBO Department/Location ID (or comma-separated IDs).'),
       },
-      async ({ client_name, as_of_date, accounting_method, summarize_by, class_id, department_id }) => {
+      async ({ client_name, as_of_date, accounting_method, summarize_by, start_date, class_id, department_id }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) {
           return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
@@ -713,12 +726,15 @@ export async function registerMcpRoutes(
         try {
           const report = await qboManager.reports.balanceSheet(realmId, {
             asOfDate: as_of_date,
+            startDate: start_date,
             accountingMethod: accounting_method,
             summarizeColumnBy: summarize_by,
             classId: class_id,
             departmentId: department_id,
           });
-          if (summarize_by && summarize_by !== 'Total') {
+          if (summarize_by) {
+            // Description promises raw JSON whenever summarize_by is set —
+            // including Total, so callers can see the Header QBO actually applied.
             return { content: [{ type: 'text', text: JSON.stringify(report, null, 2) }] };
           }
           const formatted = formatBalanceSheet(report, client_name, as_of_date);
@@ -1133,72 +1149,43 @@ export async function registerMcpRoutes(
     // ── get_general_ledger ───────────────────────────────────────────────────
     server.tool(
       'get_general_ledger',
-      'Get General Ledger report for a QBO client. Returns structured transaction-level detail by account. The accounts filter accepts QBO Account IDs, account numbers ("5012"), names ("Wages Pastoral"), or "number name" strings ("5012 Wages Pastoral") — names/numbers are resolved to IDs and passed to Intuit\'s native account filter (which only accepts IDs), so filtered pulls stay small and fast. Defaults to Accrual basis.',
+      'Get General Ledger report for a QBO client. Returns structured transaction-level detail by account. The account filter (`accounts` array, or `account_filter` as a comma-separated string) accepts QBO Account IDs, account numbers ("5012"), names ("Wages Pastoral"), or "number name" strings ("5012 Wages Pastoral"). Number terms match by prefix at a sub-account boundary — "4404" catches 4404, 4404-1 and 4404.2, but not 44040. Everything resolves to Account IDs server-side and rides Intuit\'s native account filter (which only accepts IDs), so filtered pulls stay small and fast; terms that match nothing are reported back in unresolved_account_filters, never silently dropped. SIZE: an unfiltered full-year GL can exceed 1.5M characters — filter to specific accounts and/or set summary_only=true unless you truly need everything. Defaults to Accrual basis.',
       {
         client_name: z.string().describe('The name of the client company'),
         start_date: z.string().describe('Start date in YYYY-MM-DD format'),
         end_date: z.string().describe('End date in YYYY-MM-DD format'),
-        accounts: z.array(z.string()).optional().describe('Optional: filter to specific accounts. Accepts QBO Account IDs, account numbers (e.g. "5012"), names (e.g. "Wages Pastoral"), or "number name" strings (e.g. "5012 Wages Pastoral"). Resolved to IDs server-side before calling Intuit.'),
+        accounts: z.array(z.string()).optional().describe('Optional: filter to specific accounts. Accepts QBO Account IDs, account numbers (e.g. "5012" — prefix-matches sub-accounts like 5012-1), names (e.g. "Wages Pastoral"), or "number name" strings. Resolved to IDs server-side before calling Intuit.'),
+        account_filter: z.string().optional().describe('Optional: the same account filter as `accounts`, as a single string — one account or a comma-separated list (e.g. "4404" or "1200,4404"). Merged with `accounts` when both are provided.'),
+        summary_only: z.boolean().optional().describe('If true, omit transaction rows and return one row per account (number, name, transaction_count, total_debits, total_credits, ending_balance). Use for size control on wide pulls.'),
         accounting_method: z.enum(['Cash', 'Accrual']).optional().describe('Cash or Accrual basis. Defaults to Accrual.'),
         class_id: z.string().optional().describe('Optional: QBO Class ID (or comma-separated IDs) to filter by class.'),
         department_id: z.string().optional().describe('Optional: QBO Department/Location ID (or comma-separated IDs).'),
       },
-      async ({ client_name, start_date, end_date, accounts: accountFilter, accounting_method, class_id, department_id }) => {
+      async ({ client_name, start_date, end_date, accounts, account_filter, summary_only, accounting_method, class_id, department_id }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) {
           return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
         }
         try {
-          // Resolve account filter (names/numbers) to QBO Account IDs. Intuit's
-          // GL account param only accepts IDs — passing names/numbers returns
-          // an empty report silently.
+          // Merge both filter spellings into one term list. Intuit's GL
+          // `account` param only accepts IDs — names/numbers sent raw would
+          // silently return an empty report, so resolve them here first.
+          const filterTerms = [
+            ...(accounts ?? []),
+            ...(account_filter ? account_filter.split(',') : []),
+          ].map((t) => t.trim()).filter(Boolean);
+
           let resolvedAccountIds: string | undefined;
           let unresolved: string[] = [];
-          if (accountFilter && accountFilter.length > 0) {
+          if (filterTerms.length > 0) {
             const accountsResp: any = await qboManager.accounts.getAll(realmId);
             const accountList: any[] = accountsResp?.QueryResponse?.Account ?? [];
-            const byId = new Map<string, any>();
-            const byNum = new Map<string, any>();
-            const byName = new Map<string, any>();
-            for (const a of accountList) {
-              if (a.Id) byId.set(String(a.Id), a);
-              if (a.AcctNum) byNum.set(String(a.AcctNum).toLowerCase(), a);
-              if (a.Name) byName.set(String(a.Name).toLowerCase(), a);
-              if (a.FullyQualifiedName) byName.set(String(a.FullyQualifiedName).toLowerCase(), a);
+            const resolution = resolveAccountFilterTerms(accountList, filterTerms);
+            unresolved = resolution.unresolved;
+            if (resolution.ids.length === 0) {
+              return { content: [{ type: 'text', text: `No accounts matched the provided filter(s): ${filterTerms.join(', ')}. Use get_accounts to see available account IDs / names / numbers.` }] };
             }
-            const ids = new Set<string>();
-            for (const raw of accountFilter) {
-              const term = raw.trim();
-              if (!term) continue;
-              const lower = term.toLowerCase();
-              // 1) exact ID match
-              if (byId.has(term)) { ids.add(term); continue; }
-              // 2) exact account number match
-              if (byNum.has(lower)) { ids.add(String(byNum.get(lower)!.Id)); continue; }
-              // 3) exact name match
-              if (byName.has(lower)) { ids.add(String(byName.get(lower)!.Id)); continue; }
-              // 4) "<num> <name>" — split and try number first
-              const parts = term.split(/\s+/);
-              if (parts.length > 1 && /^\d+$/.test(parts[0]) && byNum.has(parts[0].toLowerCase())) {
-                ids.add(String(byNum.get(parts[0].toLowerCase())!.Id));
-                continue;
-              }
-              // 5) substring on name (last resort, may match multiple)
-              const matches = accountList.filter((a: any) => {
-                const n = String(a.Name ?? '').toLowerCase();
-                const fq = String(a.FullyQualifiedName ?? '').toLowerCase();
-                return n.includes(lower) || fq.includes(lower);
-              });
-              if (matches.length > 0) {
-                for (const m of matches) ids.add(String(m.Id));
-              } else {
-                unresolved.push(raw);
-              }
-            }
-            if (ids.size === 0) {
-              return { content: [{ type: 'text', text: `No accounts matched the provided filter(s): ${accountFilter.join(', ')}. Use get_accounts to see available account IDs / names / numbers.` }] };
-            }
-            resolvedAccountIds = Array.from(ids).join(',');
+            resolvedAccountIds = resolution.ids.join(',');
           }
 
           const report = await qboManager.reports.generalLedger(realmId, {
@@ -1209,9 +1196,12 @@ export async function registerMcpRoutes(
             departmentId: department_id,
             accountIds: resolvedAccountIds,
           });
-          // Account filtering is now done server-side by Intuit, so pass undefined
+          // Account filtering is done server-side by Intuit, so pass undefined
           // to skip the client-side substring filter.
-          const parsed = parseGeneralLedger(report, client_name, start_date, end_date, undefined);
+          let parsed = parseGeneralLedger(report, client_name, start_date, end_date, undefined);
+          if (summary_only) {
+            parsed = summarizeGeneralLedger(parsed);
+          }
           if (unresolved.length > 0) {
             (parsed as any).unresolved_account_filters = unresolved;
           }
@@ -1247,13 +1237,16 @@ export async function registerMcpRoutes(
     // ── get_budget ────────────────────────────────────────────────────────────
     server.tool(
       'get_budget',
-      'Get budget(s) for a QBO client. Returns one row per (budget × account × period) with account_id, account_name, period (start/end), and amount. Each budget includes BudgetType (ProfitAndLoss or BalanceSheet) and BudgetEntryType (Yearly, Quarterly, Monthly).',
+      'Get budget(s) for a QBO client. DEFAULT (no budget_id): returns a SUMMARY list — one row per budget with budget_id, name, budget_type (ProfitAndLoss or BalanceSheet), budget_entry_type (Yearly | Quarterly | Monthly), start/end dates, active, and entry_count — so the right budget can be found without pulling everything. Pass budget_id for full (account × period) entries of one budget, or summary_only=false to force full entries for every matched budget. SIZE: a full-detail all-budgets pull can exceed 3M characters for companies with many budgets — stay in summary mode until you know which budget you need. Narrow with name_contains and/or active_on.',
       {
         client_name: z.string().describe('The name of the client company'),
-        budget_id: z.string().optional().describe('Optional: a specific Budget ID. If omitted, returns all budgets.'),
+        budget_id: z.string().optional().describe('Optional: a specific Budget ID. When provided, full entries are returned by default.'),
         active_only: z.boolean().optional().describe('If true, only return active budgets (default: true).'),
+        name_contains: z.string().optional().describe('Optional: case-insensitive substring filter on the budget name (e.g. "FY26").'),
+        active_on: z.string().optional().describe('Optional: a date (YYYY-MM-DD) — only return budgets whose start/end range covers it.'),
+        summary_only: z.boolean().optional().describe('Metadata only, no entries. Defaults to true when budget_id is omitted, false when it is provided; pass explicitly to override either default.'),
       },
-      async ({ client_name, budget_id, active_only = true }) => {
+      async ({ client_name, budget_id, active_only = true, name_contains, active_on, summary_only }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) {
           return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
@@ -1264,10 +1257,24 @@ export async function registerMcpRoutes(
           if (active_only) conditions.push(`Active = true`);
           const where = conditions.length ? ` WHERE ${conditions.join(' AND ')}` : '';
           const result: any = await qboManager.transactions.rawQuery(realmId, `SELECT * FROM Budget${where} MAXRESULTS 1000`);
-          const budgets: any[] = result?.QueryResponse?.Budget ?? [];
+          const allBudgets: any[] = result?.QueryResponse?.Budget ?? [];
+          const budgets = filterBudgets(allBudgets, { nameContains: name_contains, activeOn: active_on });
 
           if (budgets.length === 0) {
-            return { content: [{ type: 'text', text: `No budgets found for ${client_name}${budget_id ? ` with id ${budget_id}` : ''}. Note: budgets are read-only via the QBO API — they must be created in the QBO web UI.` }] };
+            const filterNote = [
+              budget_id ? `id ${budget_id}` : '',
+              name_contains ? `name containing "${name_contains}"` : '',
+              active_on ? `active on ${active_on}` : '',
+            ].filter(Boolean).join(', ');
+            return { content: [{ type: 'text', text: `No budgets found for ${client_name}${filterNote ? ` matching: ${filterNote}` : ''}${allBudgets.length > 0 ? ` (${allBudgets.length} budget(s) exist — loosen the filters or call without them for the summary list)` : ''}. Note: budgets are read-only via the QBO API — they must be created in the QBO web UI.` }] };
+          }
+
+          // Summary metadata unless full detail was requested — a lone
+          // get_budget(client_name) call must never dump every entry again.
+          const wantSummary = summary_only ?? !budget_id;
+          if (wantSummary) {
+            const output = budgets.map(budgetToSummary);
+            return { content: [{ type: 'text', text: JSON.stringify({ client: client_name, total_budgets: output.length, detail_level: 'summary', hint: 'Pass budget_id (or summary_only=false) for full account × period entries.', budgets: output }, null, 2) }] };
           }
 
           // Resolve account IDs → names from the chart of accounts
@@ -1294,19 +1301,12 @@ export async function registerMcpRoutes(
               });
             }
             return {
-              budget_id: String(b.Id ?? ''),
-              name: b.Name ?? '',
-              budget_type: b.BudgetType ?? '', // 'ProfitAndLoss' or 'BalanceSheet'
-              budget_entry_type: b.BudgetEntryType ?? '', // 'Yearly' | 'Quarterly' | 'Monthly'
-              start_date: b.StartDate ?? null,
-              end_date: b.EndDate ?? null,
-              active: b.Active !== false,
+              ...budgetToSummary(b),
               entries,
-              entry_count: entries.length,
             };
           });
 
-          return { content: [{ type: 'text', text: JSON.stringify({ client: client_name, total_budgets: output.length, budgets: output }, null, 2) }] };
+          return { content: [{ type: 'text', text: JSON.stringify({ client: client_name, total_budgets: output.length, detail_level: 'full', budgets: output }, null, 2) }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error fetching budget: ${err?.message ?? err}` }] };
         }
@@ -1999,6 +1999,99 @@ export async function registerMcpRoutes(
       }
     );
 
+    // ── update_bill_payment ──────────────────────────────────────────────────
+    server.tool(
+      'update_bill_payment',
+      'Update an existing bill payment in place — amount, date, ref number, memo, pay account, and/or the linked-bill line amounts. Read-modify-write: fetches the current BillPayment, merges only what you pass, writes the full object back with a fresh SyncToken; untouched fields are preserved. Changing the amount adjusts the linked bill\'s open balance by the difference (the fix for a payment recorded at the wrong amount vs. the actual bank wire). If total_amt is changed and the payment has exactly ONE linked bill line, that line amount is synced automatically; with multiple linked bills pass `lines` explicitly so the split is deliberate.',
+      {
+        client_name: z.string().describe('The name of the client company'),
+        bill_payment_id: z.string().describe('The QBO BillPayment ID to update'),
+        total_amt: z.number().optional().describe('New total payment amount'),
+        txn_date: z.string().optional().describe('New payment date (YYYY-MM-DD)'),
+        doc_number: z.string().max(21).optional().describe('New reference / check number'),
+        private_note: z.string().optional().describe('New private memo'),
+        pay_account_id: z.string().optional().describe('New pay-from account: a bank account for Check payments, a credit card account for CreditCard payments (matched to the payment\'s existing PayType)'),
+        lines: z.array(z.object({
+          bill_id: z.string().describe('Linked Bill ID this portion pays'),
+          amount: z.number().describe('Amount applied to that bill'),
+        })).optional().describe('Replacement application lines (replaces ALL existing linked-bill lines if provided). Line amounts should sum to total_amt.'),
+      },
+      async ({ client_name, bill_payment_id, total_amt, txn_date, doc_number, private_note, pay_account_id, lines }) => {
+        const realmId = await findRealmId(qboManager, client_name);
+        if (!realmId) return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
+        try {
+          const existing = await qboManager.transactions.getBillPayment(realmId, bill_payment_id) as any;
+          const bp = existing?.BillPayment;
+          if (!bp) return { content: [{ type: 'text', text: `Bill Payment ${bill_payment_id} not found.` }] };
+
+          const payload: any = { ...bp };
+          if (txn_date) payload.TxnDate = txn_date;
+          if (doc_number) payload.DocNumber = doc_number;
+          if (private_note !== undefined) payload.PrivateNote = private_note;
+          if (pay_account_id) {
+            if (bp.PayType === 'CreditCard') {
+              payload.CreditCardPayment = { CCAccountRef: { value: pay_account_id } };
+            } else {
+              payload.CheckPayment = { BankAccountRef: { value: pay_account_id } };
+            }
+          }
+
+          if (lines) {
+            payload.Line = lines.map(l => ({
+              Amount: l.amount,
+              LinkedTxn: [{ TxnId: l.bill_id, TxnType: 'Bill' }],
+            }));
+            const lineSum = lines.reduce((s, l) => s + l.amount, 0);
+            if (total_amt !== undefined && Math.abs(lineSum - total_amt) > 0.01) {
+              return { content: [{ type: 'text', text: `Line amounts (${formatCurrency(lineSum)}) must sum to total_amt (${formatCurrency(total_amt)}). Nothing was posted.` }] };
+            }
+            payload.TotalAmt = total_amt ?? lineSum;
+          } else if (total_amt !== undefined) {
+            const existingLines: any[] = bp.Line ?? [];
+            if (existingLines.length === 1) {
+              payload.Line = [{ ...existingLines[0], Amount: total_amt }];
+            } else if (existingLines.length > 1) {
+              return { content: [{ type: 'text', text: `Bill Payment ${bill_payment_id} pays ${existingLines.length} bills — pass \`lines\` explicitly so the new split across bills is deliberate. Nothing was posted.` }] };
+            }
+            payload.TotalAmt = total_amt;
+          }
+
+          const result = await qboManager.transactions.updateBillPayment(realmId, payload);
+          const updated = (result as any)?.BillPayment;
+          const summary = updated
+            ? `Bill Payment #${updated.DocNumber ?? updated.Id} updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken} | Vendor: ${updated.VendorRef?.name ?? updated.VendorRef?.value} | Amount: ${formatCurrency(updated.TotalAmt)}`
+            : JSON.stringify(result, null, 2);
+          return { content: [{ type: 'text', text: summary }] };
+        } catch (err: any) {
+          return { content: [{ type: 'text', text: `Error updating bill payment: ${err?.message ?? err}` }] };
+        }
+      }
+    );
+
+    // ── delete_bill_payment ──────────────────────────────────────────────────
+    server.tool(
+      'delete_bill_payment',
+      'Permanently delete a bill payment from QuickBooks Online. This is a QBO HARD delete — recoverable only via the QBO Audit Log — and the linked bill\'s open balance reopens by the deleted payment\'s amount. The response echoes what was deleted for the conversation audit trail.',
+      {
+        client_name: z.string().describe('The name of the client company'),
+        bill_payment_id: z.string().describe('The QBO BillPayment ID to delete'),
+      },
+      async ({ client_name, bill_payment_id }) => {
+        const realmId = await findRealmId(qboManager, client_name);
+        if (!realmId) return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
+        try {
+          const existing = await qboManager.transactions.getBillPayment(realmId, bill_payment_id) as any;
+          const bp = existing?.BillPayment;
+          if (!bp) return { content: [{ type: 'text', text: `Bill Payment ${bill_payment_id} not found.` }] };
+          await qboManager.transactions.deleteBillPayment(realmId, bill_payment_id, bp.SyncToken);
+          const summary = `Deleted bill payment ${bill_payment_id}: ${bp.TxnDate}, ${formatCurrency(bp.TotalAmt)} to ${bp.VendorRef?.name ?? bp.VendorRef?.value ?? 'unknown vendor'}${bp.DocNumber ? ` (ref ${bp.DocNumber})` : ''}.\nQBO hard delete — recoverable only via the Audit Log; the linked bill's open balance reopens by this amount.`;
+          return { content: [{ type: 'text', text: summary }] };
+        } catch (err: any) {
+          return { content: [{ type: 'text', text: `Error deleting bill payment: ${err?.message ?? err}` }] };
+        }
+      }
+    );
+
     // ── create_expense ───────────────────────────────────────────────────────
     server.tool(
       'create_expense',
@@ -2172,6 +2265,30 @@ export async function registerMcpRoutes(
           return { content: [{ type: 'text', text: summary }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error updating expense: ${err?.message ?? err}` }] };
+        }
+      }
+    );
+
+    // ── delete_expense ───────────────────────────────────────────────────────
+    server.tool(
+      'delete_expense',
+      'Permanently delete an expense (Purchase) from QuickBooks Online. This is a QBO HARD delete — the transaction is removed from the books and recoverable only via the QBO Audit Log. The response echoes what was deleted (id, date, amount, payee, account) for the conversation audit trail.',
+      {
+        client_name: z.string().describe('The name of the client company'),
+        expense_id: z.string().describe('The QBO Expense (Purchase) ID to delete'),
+      },
+      async ({ client_name, expense_id }) => {
+        const realmId = await findRealmId(qboManager, client_name);
+        if (!realmId) return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
+        try {
+          const existing = await qboManager.transactions.getExpense(realmId, expense_id) as any;
+          const exp = existing?.Purchase;
+          if (!exp) return { content: [{ type: 'text', text: `Expense ${expense_id} not found.` }] };
+          await qboManager.transactions.deleteExpense(realmId, expense_id, exp.SyncToken);
+          const summary = `Deleted expense ${expense_id}: ${exp.TxnDate}, ${formatCurrency(exp.TotalAmt)} paid from ${exp.AccountRef?.name ?? exp.AccountRef?.value ?? 'unknown account'}${exp.EntityRef ? ` to ${exp.EntityRef.name ?? exp.EntityRef.value}` : ' (no payee)'}${exp.DocNumber ? ` (ref ${exp.DocNumber})` : ''}.\nQBO hard delete — recoverable only via the Audit Log.`;
+          return { content: [{ type: 'text', text: summary }] };
+        } catch (err: any) {
+          return { content: [{ type: 'text', text: `Error deleting expense: ${err?.message ?? err}` }] };
         }
       }
     );
@@ -3498,7 +3615,7 @@ export async function registerMcpRoutes(
     // ── create_deposit ────────────────────────────────────────────────────────
     server.tool(
       'create_deposit',
-      'Create a bank deposit in QuickBooks Online. Can deposit existing customer payments from Undeposited Funds (via linked_payment_ids) or record direct income deposits. Supports class, department, and (where applicable) sales terms at the appropriate QBO level (header or line).',
+      'Create a bank deposit in QuickBooks Online. Can deposit existing customer payments from Undeposited Funds (via linked_payment_ids) or record direct deposits. Each direct line accepts a "Received From" entity (entity_id + entity_type: Vendor | Customer | Employee) — use a Vendor entity for vendor-refund deposits so the refund is attributed to the vendor. customer_id remains supported as a Customer alias.',
       {
         client_name: z.string().describe('The name of the client company'),
         deposit_account_id: z.string().describe('Bank account ID to deposit into'),
@@ -3513,34 +3630,20 @@ export async function registerMcpRoutes(
           amount: z.number().describe('Amount'),
           account_id: z.string().describe('Income or liability account ID'),
           description: z.string().optional().describe('Line memo'),
-          customer_id: z.string().optional().describe('Customer ID for this line'),
+          customer_id: z.string().optional().describe('Alias for entity_id with entity_type "Customer" (kept for backward compatibility)'),
+          entity_id: z.string().optional().describe('"Received From" entity ID — the vendor, customer, or employee the funds came from. Requires entity_type. Use this to attribute vendor-refund deposits to the vendor.'),
+          entity_type: z.enum(['Vendor', 'Customer', 'Employee']).optional().describe('Type of entity_id'),
         })).optional().describe('Direct deposit lines (when not using Undeposited Funds)'),
       },
       async ({ client_name, deposit_account_id, txn_date, private_note, department_id, linked_payment_ids, deposit_lines }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
         try {
-          const lines: any[] = [];
-          for (const lp of linked_payment_ids ?? []) {
-            lines.push({
-              Amount: lp.amount,
-              LinkedTxn: [{ TxnId: lp.payment_id, TxnType: 'Payment' }],
-            });
-          }
-          for (const dl of deposit_lines ?? []) {
-            lines.push({
-              Amount: dl.amount,
-              Description: dl.description,
-              DetailType: 'DepositLineDetail',
-              DepositLineDetail: {
-                AccountRef: { value: dl.account_id },
-                ...(dl.customer_id ? { Entity: { type: 'Customer', EntityRef: { value: dl.customer_id } } } : {}),
-              },
-            });
-          }
+          const entityError = depositLineEntityError(deposit_lines);
+          if (entityError) return { content: [{ type: 'text', text: entityError }] };
           const payload: any = {
             DepositToAccountRef: { value: deposit_account_id },
-            Line: lines,
+            Line: buildDepositTxnLines(linked_payment_ids, deposit_lines),
           };
           if (txn_date) payload.TxnDate = txn_date;
           if (department_id) payload.DepartmentRef = { value: department_id };
@@ -3553,6 +3656,103 @@ export async function registerMcpRoutes(
           return { content: [{ type: 'text', text: summary }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error creating deposit: ${err?.message ?? err}` }] };
+        }
+      }
+    );
+
+    // ── update_deposit ────────────────────────────────────────────────────────
+    server.tool(
+      'update_deposit',
+      'Update an existing bank deposit in place. Read-modify-write: fetches the current Deposit, merges only what you pass, and writes the FULL object back with a fresh SyncToken — untouched fields are preserved. If linked_payment_ids and/or deposit_lines are provided they together REPLACE ALL existing lines — fetch with get_deposit first and pass BOTH arrays back (modified as needed); omitting the linked payments would return those payments to Undeposited Funds. Deposit lines accept a "Received From" entity (entity_id + entity_type: Vendor | Customer | Employee) so vendor-refund deposits can be attributed to the vendor.',
+      {
+        client_name: z.string().describe('The name of the client company'),
+        deposit_id: z.string().describe('The QBO Deposit ID to update'),
+        deposit_account_id: z.string().optional().describe('New bank account ID the deposit goes into'),
+        txn_date: z.string().optional().describe('New deposit date (YYYY-MM-DD)'),
+        private_note: z.string().optional().describe('New memo'),
+        linked_payment_ids: z.array(z.object({
+          payment_id: z.string().describe('Payment ID included in this deposit (from Undeposited Funds)'),
+          amount: z.number().describe('Amount of this payment'),
+        })).optional().describe('Replacement set of linked customer payments (part of the full line replacement)'),
+        deposit_lines: z.array(z.object({
+          amount: z.number().describe('Amount'),
+          account_id: z.string().describe('Income or liability account ID'),
+          description: z.string().optional().describe('Line memo'),
+          customer_id: z.string().optional().describe('Alias for entity_id with entity_type "Customer" (kept for backward compatibility)'),
+          entity_id: z.string().optional().describe('"Received From" entity ID — the vendor, customer, or employee the funds came from. Requires entity_type. Use this to attribute vendor-refund deposits to the vendor.'),
+          entity_type: z.enum(['Vendor', 'Customer', 'Employee']).optional().describe('Type of entity_id'),
+        })).optional().describe('Replacement set of direct deposit lines (part of the full line replacement)'),
+      },
+      async ({ client_name, deposit_id, deposit_account_id, txn_date, private_note, linked_payment_ids, deposit_lines }) => {
+        const realmId = await findRealmId(qboManager, client_name);
+        if (!realmId) return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
+        try {
+          const entityError = depositLineEntityError(deposit_lines);
+          if (entityError) return { content: [{ type: 'text', text: entityError }] };
+
+          const existing = await qboManager.banking.getDeposit(realmId, deposit_id) as any;
+          const dep = existing?.Deposit;
+          if (!dep) return { content: [{ type: 'text', text: `Deposit ${deposit_id} not found.` }] };
+
+          const replacingLines = Boolean(linked_payment_ids || deposit_lines);
+          const payload = buildDepositUpdatePayload(dep, {
+            deposit_account_id,
+            txn_date,
+            private_note,
+            linked_payment_ids,
+            deposit_lines,
+          });
+
+          const result = await qboManager.banking.updateDeposit(realmId, payload);
+          const updated = (result as any)?.Deposit;
+          if (!updated) {
+            return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+          }
+
+          // Post-write verification: QBO full updates replace the Line array,
+          // so the write-back must reflect exactly what was submitted. Any
+          // drift (e.g. lines appended rather than replaced) is surfaced
+          // loudly instead of silently inflating the deposit.
+          if (replacingLines) {
+            const submittedCount = (linked_payment_ids?.length ?? 0) + (deposit_lines?.length ?? 0);
+            const submittedTotal =
+              (linked_payment_ids ?? []).reduce((s, l) => s + l.amount, 0) +
+              (deposit_lines ?? []).reduce((s, l) => s + l.amount, 0);
+            const actualCount = (updated.Line ?? []).length;
+            const actualTotal = parseFloat(updated.TotalAmt ?? '0') || 0;
+            if (actualCount !== submittedCount || Math.abs(actualTotal - submittedTotal) > 0.01) {
+              return { content: [{ type: 'text', text: `VERIFICATION FAILED — the write went through but the deposit does not match what was submitted. Expected ${submittedCount} line(s) totaling ${formatCurrency(submittedTotal)}; QBO now shows ${actualCount} line(s) totaling ${formatCurrency(actualTotal)}. Inspect deposit ${deposit_id} with get_deposit and correct it before relying on this update.` }] };
+            }
+          }
+
+          const summary = `Deposit ${updated.Id} updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken} | Date: ${updated.TxnDate} | Total: ${formatCurrency(updated.TotalAmt)}${replacingLines ? ` | Lines: ${(updated.Line ?? []).length} (replaced)` : ''}`;
+          return { content: [{ type: 'text', text: summary }] };
+        } catch (err: any) {
+          return { content: [{ type: 'text', text: `Error updating deposit: ${err?.message ?? err}` }] };
+        }
+      }
+    );
+
+    // ── delete_deposit ────────────────────────────────────────────────────────
+    server.tool(
+      'delete_deposit',
+      'Permanently delete a bank deposit from QuickBooks Online. This is a QBO HARD delete — recoverable only via the QBO Audit Log. Any customer payments that were in the deposit return to Undeposited Funds. The response echoes what was deleted for the conversation audit trail.',
+      {
+        client_name: z.string().describe('The name of the client company'),
+        deposit_id: z.string().describe('The QBO Deposit ID to delete'),
+      },
+      async ({ client_name, deposit_id }) => {
+        const realmId = await findRealmId(qboManager, client_name);
+        if (!realmId) return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
+        try {
+          const existing = await qboManager.banking.getDeposit(realmId, deposit_id) as any;
+          const dep = existing?.Deposit;
+          if (!dep) return { content: [{ type: 'text', text: `Deposit ${deposit_id} not found.` }] };
+          await qboManager.banking.deleteDeposit(realmId, deposit_id, dep.SyncToken);
+          const summary = `Deleted deposit ${deposit_id}: ${dep.TxnDate}, ${formatCurrency(dep.TotalAmt)} into ${dep.DepositToAccountRef?.name ?? dep.DepositToAccountRef?.value ?? 'unknown account'}, ${(dep.Line ?? []).length} line(s).\nQBO hard delete — recoverable only via the Audit Log.`;
+          return { content: [{ type: 'text', text: summary }] };
+        } catch (err: any) {
+          return { content: [{ type: 'text', text: `Error deleting deposit: ${err?.message ?? err}` }] };
         }
       }
     );
