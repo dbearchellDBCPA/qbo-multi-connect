@@ -3,9 +3,51 @@
  *  - resolving human account filters (numbers/names) → QBO Account IDs
  *  - collapsing report payloads to summary form for size control
  *  - filtering Budget entities by name / active date
+ *  - rendering the reports whose QBO row structure needs tolerant parsing
+ *    (TrialBalance, Aged*) plus the report-Header period helpers
  *
  * Kept free of I/O so the matching semantics are unit-testable.
  */
+
+export function formatCurrency(val: any): string {
+  const n = parseFloat(val ?? '0');
+  if (isNaN(n)) return '$0.00';
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n);
+}
+
+// ─── Report-Header period echo ────────────────────────────────────────────────
+// Rendered report output must state the period QBO ACTUALLY applied (the
+// response Header), never just echo the caller's request — a report that
+// says "As of 2026-06-30" over 2026-07-31 data is silent wrong data.
+
+export interface ReportPeriod {
+  start?: string;
+  end?: string;
+}
+
+export function headerPeriod(reportData: any): ReportPeriod {
+  const h = reportData?.Header;
+  return {
+    start: h?.StartPeriod || undefined,
+    end: h?.EndPeriod || undefined,
+  };
+}
+
+/**
+ * A loud one-line warning when QBO's applied period differs from what the
+ * caller requested; null when they agree (or either side is unknown).
+ */
+export function periodMismatchNote(requested: ReportPeriod, actual: ReportPeriod): string | null {
+  const issues: string[] = [];
+  if (requested.start && actual.start && requested.start !== actual.start) {
+    issues.push(`start ${actual.start} (requested ${requested.start})`);
+  }
+  if (requested.end && actual.end && requested.end !== actual.end) {
+    issues.push(`end ${actual.end} (requested ${requested.end})`);
+  }
+  if (issues.length === 0) return null;
+  return `⚠ QBO applied a different period than requested: ${issues.join(', ')} — the figures reflect QBO's period shown above.`;
+}
 
 export interface AccountFilterResolution {
   /** Distinct QBO Account IDs, in first-match order. */
@@ -142,4 +184,249 @@ export function budgetToSummary(b: any): any {
     active: b.Active !== false,
     entry_count: (b.BudgetDetail ?? []).length,
   };
+}
+
+// ─── Tolerant report-row walking ──────────────────────────────────────────────
+// QBO's report row `type` field is OPTIONAL. Summary-style reports
+// (TrialBalance, AgedReceivables/Payables) deliver leaf rows as bare ColData
+// objects — often nested under an unnamed wrapper Section — so any parser
+// that requires row.type === 'Data' drops every one of them and only the
+// wrapper's Summary "TOTAL" row survives. That is exactly how a full trial
+// balance rendered as zero accounts plus "✓ BALANCED" (2026-08-15), and how
+// AR aging rendered $837 of customers under QBO's own $5,281.52 total.
+
+function isSectionish(row: any): boolean {
+  return Boolean(row?.Rows || row?.Header || row?.Summary);
+}
+
+function moneyValue(v: any): number {
+  return parseFloat(String(v ?? '').replace(/,/g, '')) || 0;
+}
+
+// ─── Trial Balance ────────────────────────────────────────────────────────────
+
+export function formatTrialBalance(
+  reportData: any,
+  clientName: string,
+  startDate?: string,
+  endDate?: string
+): string {
+  const columns: any[] = reportData?.Columns?.Column ?? [];
+  let debitIdx = -1;
+  let creditIdx = -1;
+  columns.forEach((col: any, i: number) => {
+    const title = (col.ColTitle ?? '').toLowerCase();
+    if (title === 'debit') debitIdx = i;
+    if (title === 'credit') creditIdx = i;
+  });
+  // Blank column titles: fall back to the conventional [account, debit, credit] layout.
+  if (debitIdx < 0 && creditIdx < 0 && columns.length >= 3) {
+    debitIdx = 1;
+    creditIdx = 2;
+  }
+
+  const accountRows: Array<{ label: string; debit: number; credit: number }> = [];
+  let qboTotalDebit: number | null = null;
+  let qboTotalCredit: number | null = null;
+
+  // The report's own grand-total row is reconciliation data, not an account.
+  const captureGrandTotal = (cd: any[], group?: string): boolean => {
+    const label = String(cd?.[0]?.value ?? '').trim();
+    if (group !== 'GrandTotal' && label.toUpperCase() !== 'TOTAL') return false;
+    if (debitIdx >= 0) qboTotalDebit = moneyValue(cd[debitIdx]?.value);
+    if (creditIdx >= 0) qboTotalCredit = moneyValue(cd[creditIdx]?.value);
+    return true;
+  };
+
+  function walk(rowSet: any): void {
+    for (const row of rowSet?.Row ?? []) {
+      if (isSectionish(row)) {
+        walk(row.Rows);
+        if (row.Summary?.ColData) captureGrandTotal(row.Summary.ColData, row.group);
+        continue;
+      }
+      const cd: any[] = row.ColData ?? [];
+      const label = String(cd[0]?.value ?? '');
+      if (!label) continue;
+      if (captureGrandTotal(cd, row.group)) continue;
+      accountRows.push({
+        label,
+        debit: debitIdx >= 0 ? moneyValue(cd[debitIdx]?.value) : 0,
+        credit: creditIdx >= 0 ? moneyValue(cd[creditIdx]?.value) : 0,
+      });
+    }
+  }
+  walk(reportData?.Rows);
+
+  const actual = headerPeriod(reportData);
+  const lines: string[] = [`TRIAL BALANCE — ${clientName}`];
+  const start = actual.start ?? startDate;
+  const end = actual.end ?? endDate;
+  if (start || end) lines.push(`Period: ${start ?? '(company start)'} to ${end ?? '(today)'}`);
+  const note = periodMismatchNote({ start: startDate, end: endDate }, actual);
+  if (note) lines.push(note);
+
+  const hasQboTotal = (qboTotalDebit ?? 0) !== 0 || (qboTotalCredit ?? 0) !== 0;
+
+  if (accountRows.length === 0) {
+    if (hasQboTotal) {
+      // A non-empty report we could not parse must fail LOUDLY — an empty
+      // rendering stamped "BALANCED" is how this bug hid in the first place.
+      lines.push(
+        '',
+        `⚠ PARSE ERROR: QBO returned a non-empty Trial Balance (its summary row reports ${formatCurrency(qboTotalDebit)} / ${formatCurrency(qboTotalCredit)}) but no account rows could be parsed from the response. Do not rely on this rendering. Raw report JSON follows:`,
+        '',
+        JSON.stringify(reportData, null, 2)
+      );
+    } else {
+      lines.push('─'.repeat(75), '(no account balances — the Trial Balance is empty for this period)');
+    }
+    return lines.join('\n');
+  }
+
+  lines.push('─'.repeat(75));
+  lines.push(`  ${'Account'.padEnd(45)} ${'Debit'.padStart(14)} ${'Credit'.padStart(14)}`);
+  lines.push('─'.repeat(75));
+
+  let totalDebit = 0;
+  let totalCredit = 0;
+  for (const r of accountRows) {
+    totalDebit += r.debit;
+    totalCredit += r.credit;
+    const dFmt = r.debit ? formatCurrency(r.debit) : '';
+    const cFmt = r.credit ? formatCurrency(r.credit) : '';
+    lines.push(`  ${r.label.padEnd(45)} ${dFmt.padStart(14)} ${cFmt.padStart(14)}`);
+  }
+
+  lines.push('─'.repeat(75));
+  lines.push(`  ${'TOTALS'.padEnd(45)} ${formatCurrency(totalDebit).padStart(14)} ${formatCurrency(totalCredit).padStart(14)}`);
+
+  // "Balanced" must mean the PARSED rows agree with QBO's own summary row —
+  // validating the tool's accumulation against itself let an empty parse
+  // read as a healthy report.
+  const balanced = Math.abs(totalDebit - totalCredit) < 0.01;
+  const matchesQbo =
+    !hasQboTotal ||
+    ((qboTotalDebit === null || Math.abs(totalDebit - qboTotalDebit) < 0.01) &&
+      (qboTotalCredit === null || Math.abs(totalCredit - qboTotalCredit) < 0.01));
+
+  if (!matchesQbo) {
+    lines.push(
+      '',
+      `⚠ PARSE MISMATCH: parsed account rows total ${formatCurrency(totalDebit)} / ${formatCurrency(totalCredit)} but QBO's summary row reports ${formatCurrency(qboTotalDebit)} / ${formatCurrency(qboTotalCredit)} — rows are missing from this rendering. Do not rely on it.`
+    );
+  } else if (balanced) {
+    lines.push('', hasQboTotal ? `✓ BALANCED (parsed rows match QBO's reported total ${formatCurrency(qboTotalDebit)})` : '✓ BALANCED');
+  } else {
+    lines.push('', `⚠ DIFFERENCE: ${formatCurrency(Math.abs(totalDebit - totalCredit))}`);
+  }
+
+  return lines.join('\n');
+}
+
+// ─── AR / AP Aging ────────────────────────────────────────────────────────────
+
+export function formatAgingReport(
+  reportData: any,
+  clientName: string,
+  type: 'AR' | 'AP',
+  asOfDate?: string
+): string {
+  const label = type === 'AR' ? 'AR AGING' : 'AP AGING';
+  const entityLabel = type === 'AR' ? 'Customer' : 'Vendor';
+
+  const columns: any[] = reportData?.Columns?.Column ?? [];
+  const colTitles: string[] = columns.map((c: any) => c.ColTitle ?? '');
+
+  const nameWidth = 30;
+  const colWidth = 12;
+  const lines: string[] = [`${label} — ${clientName}`];
+
+  const actual = headerPeriod(reportData);
+  const effectiveAsOf = actual.end ?? asOfDate;
+  if (effectiveAsOf) lines.push(`As of: ${effectiveAsOf}`);
+  const note = periodMismatchNote({ end: asOfDate }, actual);
+  if (note) lines.push(note);
+
+  const headerParts = [entityLabel.padEnd(nameWidth)];
+  for (let i = 1; i < colTitles.length; i++) {
+    headerParts.push(colTitles[i].padStart(colWidth));
+  }
+  const separator = '─'.repeat(nameWidth + colTitles.length * colWidth + 2);
+  lines.push(separator);
+  lines.push(headerParts.join(' '));
+  lines.push(separator);
+
+  const colTotals: number[] = new Array(colTitles.length).fill(0);
+  let dataRowCount = 0;
+  let qboGrandTotal: number | null = null; // last column of QBO's own TOTAL row
+
+  const isGrandTotal = (cd: any[], group?: string): boolean => {
+    const rowLabel = String(cd?.[0]?.value ?? '').trim();
+    return group === 'GrandTotal' || rowLabel.toUpperCase() === 'TOTAL';
+  };
+
+  const renderRow = (cd: any[], accumulate: boolean): void => {
+    const rowLabel = String(cd?.[0]?.value ?? '');
+    if (!rowLabel) return;
+    const parts = [rowLabel.padEnd(nameWidth)];
+    for (let i = 1; i < colTitles.length; i++) {
+      const num = moneyValue(cd[i]?.value);
+      if (accumulate) colTotals[i] += num;
+      parts.push((num ? formatCurrency(num) : '').padStart(colWidth));
+    }
+    lines.push(parts.join(' '));
+  };
+
+  function processRows(rows: any): void {
+    for (const row of rows?.Row ?? []) {
+      if (isSectionish(row)) {
+        if (row.Header?.ColData) {
+          const sectionLabel = row.Header.ColData[0]?.value ?? '';
+          if (sectionLabel) lines.push(`\n${sectionLabel.toUpperCase()}`);
+        }
+        processRows(row.Rows);
+        if (row.Summary?.ColData) {
+          if (isGrandTotal(row.Summary.ColData, row.group)) {
+            qboGrandTotal = moneyValue(row.Summary.ColData[colTitles.length - 1]?.value);
+          }
+          renderRow(row.Summary.ColData, false); // subtotal/total display only — never accumulated
+        }
+      } else if (row.ColData?.length) {
+        // Row `type` is optional in QBO report payloads — plain (un-sectioned)
+        // customers/vendors arrive as bare ColData rows; requiring
+        // type === 'Data' silently dropped them from the rendering.
+        if (isGrandTotal(row.ColData, row.group)) {
+          qboGrandTotal = moneyValue(row.ColData[colTitles.length - 1]?.value);
+          renderRow(row.ColData, false);
+          continue;
+        }
+        renderRow(row.ColData, true);
+        dataRowCount++;
+      }
+    }
+  }
+
+  processRows(reportData?.Rows);
+
+  lines.push(separator);
+  const totalParts = ['TOTAL'.padEnd(nameWidth)];
+  for (let i = 1; i < colTitles.length; i++) {
+    totalParts.push((colTotals[i] ? formatCurrency(colTotals[i]) : '$0.00').padStart(colWidth));
+  }
+  lines.push(totalParts.join(' '));
+
+  // Reconcile the computed grand total against QBO's own TOTAL row so a row
+  // that fails to parse can never vanish silently.
+  const computedGrand = colTotals[colTitles.length - 1] ?? 0;
+  if (qboGrandTotal !== null && Math.abs(computedGrand - qboGrandTotal) > 0.01) {
+    lines.push(
+      '',
+      `⚠ PARSE MISMATCH: parsed ${entityLabel.toLowerCase()} rows total ${formatCurrency(computedGrand)} but QBO's summary row reports ${formatCurrency(qboGrandTotal)} — rows are missing from this rendering. Do not rely on it.`
+    );
+  } else if (dataRowCount === 0 && (qboGrandTotal === null || qboGrandTotal === 0)) {
+    lines.push('', `(no open ${type === 'AR' ? 'receivables' : 'payables'} as of this date)`);
+  }
+
+  return lines.join('\n');
 }

@@ -111,6 +111,31 @@ describe('ReportsAPI param threading', () => {
     expect(yearEnd).not.toEqual(today);
   });
 
+  // Regression (2026-08-15): report_date alone is ignored by QBO's Aged*
+  // reports — the aging came back as-of "today" for any requested date.
+  // aging_method=Report_Date must accompany it.
+  it('arAging sends aging_method=Report_Date alongside report_date', async () => {
+    await reports.arAging('r', { asOfDate: '2026-06-30' });
+    expect(client.get).toHaveBeenCalledWith('r', 'reports/AgedReceivables', {
+      report_date: '2026-06-30',
+      aging_method: 'Report_Date',
+    });
+  });
+
+  it('arAging with no as-of date sends neither report_date nor aging_method (QBO defaults to today)', async () => {
+    await reports.arAging('r', {});
+    expect(client.get).toHaveBeenCalledWith('r', 'reports/AgedReceivables', {});
+  });
+
+  it('apAging sends aging_method=Report_Date alongside report_date', async () => {
+    await reports.apAging('r', { asOfDate: '2026-06-30', accountingMethod: 'Accrual' });
+    expect(client.get).toHaveBeenCalledWith('r', 'reports/AgedPayables', {
+      report_date: '2026-06-30',
+      accounting_method: 'Accrual',
+      aging_method: 'Report_Date',
+    });
+  });
+
   it('budgetVsActuals threads budgetId', async () => {
     await reports.budgetVsActuals('r', {
       startDate: '2026-01-01',

@@ -132,18 +132,24 @@ export class ReportsAPI {
   }
 
   /**
-   * Get Accounts Receivable Aging report
+   * Get Accounts Receivable Aging report.
+   * `report_date` alone is NOT honored by QBO (verified live 2026-08-15:
+   * two different as-of dates returned identical aging) — the report ages
+   * as of "today" unless aging_method=Report_Date accompanies it.
    */
   async arAging(realmId: string, options: ReportOptions = {}): Promise<unknown> {
     const query = buildReportQuery(options, ['report_date', 'accounting_method']);
+    if (query.report_date) query.aging_method = 'Report_Date';
     return this.client.get(realmId, 'reports/AgedReceivables', query);
   }
 
   /**
-   * Get Accounts Payable Aging report
+   * Get Accounts Payable Aging report (same aging_method requirement as
+   * AgedReceivables — see arAging).
    */
   async apAging(realmId: string, options: ReportOptions = {}): Promise<unknown> {
     const query = buildReportQuery(options, ['report_date', 'accounting_method']);
+    if (query.report_date) query.aging_method = 'Report_Date';
     return this.client.get(realmId, 'reports/AgedPayables', query);
   }
 

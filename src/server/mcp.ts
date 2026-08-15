@@ -24,6 +24,11 @@ import {
   summarizeGeneralLedger,
   filterBudgets,
   budgetToSummary,
+  formatCurrency,
+  headerPeriod,
+  periodMismatchNote,
+  formatTrialBalance,
+  formatAgingReport,
 } from './report-shaping.js';
 import {
   addressInput,
@@ -49,12 +54,9 @@ import {
 } from '../api/attachments.js';
 
 // ─── Report Formatters ────────────────────────────────────────────────────────
-
-function formatCurrency(val: any): string {
-  const n = parseFloat(val ?? '0');
-  if (isNaN(n)) return '$0.00';
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n);
-}
+// formatCurrency, formatTrialBalance, and formatAgingReport live in
+// report-shaping.ts (pure + unit-tested); the formatters here are the
+// Section-typed reports whose structure extractRows already handles.
 
 function padLine(label: string, value: string, width = 60): string {
   const dots = Math.max(2, width - label.length - value.length);
@@ -95,11 +97,15 @@ function extractRows(rows: any, indent = 0): Array<{ label: string; amount: stri
 
 function formatPnL(reportData: any, clientName: string, startDate: string, endDate: string): string {
   const rows = extractRows(reportData?.Rows);
+  // Echo the period QBO actually applied (response Header), not the request.
+  const actual = headerPeriod(reportData);
   const lines: string[] = [
     `PROFIT & LOSS — ${clientName}`,
-    `Period: ${startDate} to ${endDate}`,
-    '─'.repeat(60),
+    `Period: ${actual.start ?? startDate} to ${actual.end ?? endDate}`,
   ];
+  const mismatch = periodMismatchNote({ start: startDate, end: endDate }, actual);
+  if (mismatch) lines.push(mismatch);
+  lines.push('─'.repeat(60));
 
   for (const row of rows) {
     const indent = '  '.repeat(row.indent);
@@ -117,11 +123,17 @@ function formatPnL(reportData: any, clientName: string, startDate: string, endDa
 
 function formatBalanceSheet(reportData: any, clientName: string, asOfDate: string): string {
   const rows = extractRows(reportData?.Rows);
+  // Echo the as-of date QBO actually applied (Header.EndPeriod) — rendering
+  // the requested date over different-period data is what made the 2026-08
+  // as_of_date bugs silent.
+  const actual = headerPeriod(reportData);
   const lines: string[] = [
     `BALANCE SHEET — ${clientName}`,
-    `As of: ${asOfDate}`,
-    '─'.repeat(60),
+    `As of: ${actual.end ?? asOfDate}`,
   ];
+  const mismatch = periodMismatchNote({ end: asOfDate }, actual);
+  if (mismatch) lines.push(mismatch);
+  lines.push('─'.repeat(60));
 
   for (const row of rows) {
     const indent = '  '.repeat(row.indent);
@@ -131,74 +143,6 @@ function formatBalanceSheet(reportData: any, clientName: string, asOfDate: strin
       lines.push(padLine(`${indent}${row.label}`, formatCurrency(row.amount)));
     }
   }
-
-  return lines.join('\n');
-}
-
-function formatTrialBalance(reportData: any, clientName: string, startDate?: string, endDate?: string): string {
-  // Extract column indices for Debit and Credit
-  const columns: any[] = reportData?.Columns?.Column ?? [];
-  let debitIdx = -1;
-  let creditIdx = -1;
-  columns.forEach((col: any, i: number) => {
-    const title = (col.ColTitle ?? '').toLowerCase();
-    if (title === 'debit') debitIdx = i;
-    if (title === 'credit') creditIdx = i;
-  });
-
-  const lines: string[] = [
-    `TRIAL BALANCE — ${clientName}`,
-  ];
-  if (startDate && endDate) lines.push(`Period: ${startDate} to ${endDate}`);
-  lines.push('─'.repeat(75));
-  lines.push(`  ${'Account'.padEnd(45)} ${'Debit'.padStart(14)} ${'Credit'.padStart(14)}`);
-  lines.push('─'.repeat(75));
-
-  let totalDebit = 0;
-  let totalCredit = 0;
-
-  function processRows(rows: any): void {
-    if (!rows?.Row) return;
-    for (const row of rows.Row) {
-      if (row.type === 'Section') {
-        if (row.Header?.ColData) {
-          const label = row.Header.ColData[0]?.value ?? '';
-          if (label) lines.push(`\n${label.toUpperCase()}`);
-        }
-        processRows(row.Rows);
-        if (row.Summary?.ColData) {
-          const cd = row.Summary.ColData;
-          const label = cd[0]?.value ?? '';
-          const debit = debitIdx >= 0 ? (cd[debitIdx]?.value ?? '') : '';
-          const credit = creditIdx >= 0 ? (cd[creditIdx]?.value ?? '') : '';
-          const dFmt = debit ? formatCurrency(debit) : '';
-          const cFmt = credit ? formatCurrency(credit) : '';
-          lines.push(`  ${label.padEnd(45)} ${dFmt.padStart(14)} ${cFmt.padStart(14)}`);
-        }
-      } else if (row.type === 'Data') {
-        const cd = row.ColData ?? [];
-        const label = cd[0]?.value ?? '';
-        if (!label) continue;
-        const debit = debitIdx >= 0 ? (cd[debitIdx]?.value ?? '') : '';
-        const credit = creditIdx >= 0 ? (cd[creditIdx]?.value ?? '') : '';
-        const dVal = parseFloat(debit) || 0;
-        const cVal = parseFloat(credit) || 0;
-        totalDebit += dVal;
-        totalCredit += cVal;
-        const dFmt = dVal ? formatCurrency(debit) : '';
-        const cFmt = cVal ? formatCurrency(credit) : '';
-        lines.push(`  ${label.padEnd(45)} ${dFmt.padStart(14)} ${cFmt.padStart(14)}`);
-      }
-    }
-  }
-
-  processRows(reportData?.Rows);
-
-  lines.push('─'.repeat(75));
-  const balanced = Math.abs(totalDebit - totalCredit) < 0.01;
-  const balanceNote = balanced ? '✓ BALANCED' : `⚠ DIFFERENCE: ${formatCurrency(Math.abs(totalDebit - totalCredit))}`;
-  lines.push(`  ${'TOTALS'.padEnd(45)} ${formatCurrency(totalDebit).padStart(14)} ${formatCurrency(totalCredit).padStart(14)}`);
-  lines.push(`\n${balanceNote}`);
 
   return lines.join('\n');
 }
@@ -347,90 +291,16 @@ function parseGeneralLedger(reportData: any, clientName: string, startDate: stri
   };
 }
 
-function formatAgingReport(reportData: any, clientName: string, type: 'AR' | 'AP', asOfDate?: string): string {
-  const label = type === 'AR' ? 'AR AGING' : 'AP AGING';
-  const entityLabel = type === 'AR' ? 'Customer' : 'Vendor';
-
-  // Extract column titles dynamically
-  const columns: any[] = reportData?.Columns?.Column ?? [];
-  const colTitles: string[] = columns.map((c: any) => c.ColTitle ?? '');
-
-  // Build header
-  const nameWidth = 30;
-  const colWidth = 12;
-  const lines: string[] = [
-    `${label} — ${clientName}`,
-  ];
-  if (asOfDate) lines.push(`As of: ${asOfDate}`);
-
-  const headerParts = [entityLabel.padEnd(nameWidth)];
-  for (let i = 1; i < colTitles.length; i++) {
-    headerParts.push(colTitles[i].padStart(colWidth));
-  }
-  const separator = '─'.repeat(nameWidth + colTitles.length * colWidth + 2);
-  lines.push(separator);
-  lines.push(headerParts.join(' '));
-  lines.push(separator);
-
-  // Initialize column totals
-  const colTotals: number[] = new Array(colTitles.length).fill(0);
-
-  function processRows(rows: any): void {
-    if (!rows?.Row) return;
-    for (const row of rows.Row) {
-      if (row.type === 'Section') {
-        if (row.Header?.ColData) {
-          const label = row.Header.ColData[0]?.value ?? '';
-          if (label) lines.push(`\n${label.toUpperCase()}`);
-        }
-        processRows(row.Rows);
-        if (row.Summary?.ColData) {
-          const cd = row.Summary.ColData;
-          const rowLabel = cd[0]?.value ?? '';
-          const parts = [rowLabel.padEnd(nameWidth)];
-          for (let i = 1; i < colTitles.length; i++) {
-            const val = cd[i]?.value ?? '';
-            const num = parseFloat(val) || 0;
-            parts.push((num ? formatCurrency(num) : '').padStart(colWidth));
-          }
-          lines.push(parts.join(' '));
-        }
-      } else if (row.type === 'Data') {
-        const cd = row.ColData ?? [];
-        const rowLabel = cd[0]?.value ?? '';
-        if (!rowLabel) continue;
-        const parts = [rowLabel.padEnd(nameWidth)];
-        for (let i = 1; i < colTitles.length; i++) {
-          const val = cd[i]?.value ?? '';
-          const num = parseFloat(val) || 0;
-          colTotals[i] += num;
-          parts.push((num ? formatCurrency(num) : '').padStart(colWidth));
-        }
-        lines.push(parts.join(' '));
-      }
-    }
-  }
-
-  processRows(reportData?.Rows);
-
-  // Totals row
-  lines.push(separator);
-  const totalParts = ['TOTAL'.padEnd(nameWidth)];
-  for (let i = 1; i < colTitles.length; i++) {
-    totalParts.push((colTotals[i] ? formatCurrency(colTotals[i]) : '$0.00').padStart(colWidth));
-  }
-  lines.push(totalParts.join(' '));
-
-  return lines.join('\n');
-}
-
 function formatCashFlow(reportData: any, clientName: string, startDate: string, endDate: string): string {
   const rows = extractRows(reportData?.Rows);
+  const actual = headerPeriod(reportData);
   const lines: string[] = [
     `STATEMENT OF CASH FLOWS — ${clientName}`,
-    `Period: ${startDate} to ${endDate}`,
-    '─'.repeat(60),
+    `Period: ${actual.start ?? startDate} to ${actual.end ?? endDate}`,
   ];
+  const mismatch = periodMismatchNote({ start: startDate, end: endDate }, actual);
+  if (mismatch) lines.push(mismatch);
+  lines.push('─'.repeat(60));
 
   for (const row of rows) {
     const indent = '  '.repeat(row.indent);
