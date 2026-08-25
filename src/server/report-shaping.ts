@@ -174,6 +174,7 @@ export function summarizeGeneralLedger(parsed: any): any {
       transaction_count: (a.transactions ?? []).length,
       total_debits: a.total_debits,
       total_credits: a.total_credits,
+      opening_balance: a.opening_balance,
       ending_balance: a.ending_balance,
     })),
   };
@@ -198,6 +199,7 @@ export function parseGeneralLedger(
   endDate: string,
   accountList?: any[]
 ): any {
+  const parseWarnings: string[] = [];
   const columns: string[] = (reportData?.Columns?.Column ?? []).map((c: any) => c.ColTitle ?? '');
 
   const dateIdx = columns.findIndex(c => c.toLowerCase() === 'date');
@@ -253,7 +255,20 @@ export function parseGeneralLedger(
     const transactions: any[] = [];
     let totalDebits = 0;
     let totalCredits = 0;
+    // Running-balance tracking must distinguish "balance cell is blank" from
+    // "balance is 0.00". moneyValue() maps both to 0, and a `!== 0` guard
+    // here treated a genuine 0.00 as missing — an account whose final
+    // transaction netted it to exactly zero reported the SECOND-TO-LAST
+    // row's running balance as ending_balance (found 2026-08-25: 50.75
+    // reported on an account whose last credit landed it on 0.00). Blank
+    // cells must not move the tracker; real zeros must.
+    let openingBalance = 0;
     let endingBalance = 0;
+    let balanceSeen = false;
+    // Net movement in the account's natural-balance direction — backs the
+    // opening + activity = ending cross-check, and the derived ending
+    // balance when the report carries no balance column at all.
+    let naturalMovement = 0;
 
     for (const txnRow of row.Rows?.Row ?? []) {
       if (txnRow.Header || txnRow.Rows) {
@@ -264,8 +279,22 @@ export function parseGeneralLedger(
       const cd = txnRow.ColData ?? [];
       if (!cd.length) continue;
 
+      const balanceCell = moneyValueOrNull(colVal(cd, balIdx));
+
+      // QBO opens each balance-sheet account's section with a "Beginning
+      // Balance" row — label in the Date column, no amount, balance set.
+      // That is the period's opening balance, not a transaction.
+      const rowLabel = String(colVal(cd, dateIdx) || cd[0]?.value || '').trim().toLowerCase();
+      if (rowLabel === 'beginning balance') {
+        openingBalance = balanceCell ?? 0;
+        if (balanceCell !== null) {
+          endingBalance = balanceCell; // stands until a transaction moves it
+          balanceSeen = true;
+        }
+        continue;
+      }
+
       const amount = moneyValue(colVal(cd, amtIdx));
-      const balance = moneyValue(colVal(cd, balIdx));
 
       let debit = 0;
       let credit = 0;
@@ -284,7 +313,11 @@ export function parseGeneralLedger(
 
       totalDebits += debit;
       totalCredits += credit;
-      if (balance !== 0) endingBalance = balance; // track last non-zero balance
+      naturalMovement += amtIdx >= 0 ? amount : creditNormal ? credit - debit : debit - credit;
+      if (balanceCell !== null) {
+        endingBalance = balanceCell; // the LAST reported balance wins — zero included
+        balanceSeen = true;
+      }
 
       transactions.push({
         date: colVal(cd, dateIdx),
@@ -296,17 +329,44 @@ export function parseGeneralLedger(
         amount: amtIdx >= 0 ? amount : debit - credit,
         debit,
         credit,
-        balance,
+        balance: balanceCell ?? 0,
       });
     }
 
-    // Ending balance from Summary if available — prefer this over last transaction
+    // QBO's own Summary row ("Total for …") states the ending balance —
+    // honor it whenever the cell actually carries a value, an explicit
+    // 0.00 included. A blank cell is absence of data, never a zero.
     if (row.Summary?.ColData) {
       const cd = row.Summary.ColData;
-      const summaryBalance = balIdx >= 0 && cd[balIdx]?.value
-        ? moneyValue(cd[balIdx].value)
-        : moneyValue(cd[cd.length - 1]?.value ?? '0');
-      if (summaryBalance !== 0) endingBalance = summaryBalance;
+      const summaryBalance = balIdx >= 0
+        ? moneyValueOrNull(cd[balIdx]?.value)
+        : moneyValueOrNull(cd[cd.length - 1]?.value);
+      if (summaryBalance !== null) {
+        endingBalance = summaryBalance;
+        balanceSeen = true;
+      }
+    }
+
+    // The signed-amount column gives movement in the account's natural
+    // direction outright; without it, the direction comes from the chart's
+    // classification. With neither, naturalMovement is a debit-normal guess
+    // and cannot back a derived balance or a mismatch warning.
+    const movementReliable = amtIdx >= 0 || acct !== null;
+    if (!balanceSeen && movementReliable) {
+      // The section carried no balance data at all — derive the ending
+      // balance instead of silently reporting 0.
+      endingBalance = openingBalance + naturalMovement;
+    } else if (balanceSeen && movementReliable) {
+      // Invariant: ending_balance == opening_balance + net activity. A
+      // disagreement means rows were dropped or misread — say so loudly
+      // rather than return a summary that contradicts its own detail.
+      const expected = openingBalance + naturalMovement;
+      if (Math.abs(endingBalance - expected) > 0.01) {
+        const label = `${accountNumber ? `${accountNumber} ` : ''}${accountName}`;
+        parseWarnings.push(
+          `⚠ Account ${label}: ending_balance ${endingBalance.toFixed(2)} from the report disagrees with opening_balance ${openingBalance.toFixed(2)} + net transaction activity ${naturalMovement.toFixed(2)} (= ${expected.toFixed(2)}) — rows may be missing or misread. Verify this account before relying on its ending_balance.`
+        );
+      }
     }
 
     accounts.push({
@@ -316,6 +376,7 @@ export function parseGeneralLedger(
       transactions,
       total_debits: Math.round(totalDebits * 100) / 100,
       total_credits: Math.round(totalCredits * 100) / 100,
+      opening_balance: Math.round(openingBalance * 100) / 100,
       ending_balance: Math.round(endingBalance * 100) / 100,
     });
   }
@@ -331,6 +392,7 @@ export function parseGeneralLedger(
     accounts,
     total_accounts: accounts.length,
     total_transactions: accounts.reduce((sum: number, a: any) => sum + a.transactions.length, 0),
+    ...(parseWarnings.length > 0 ? { warnings: parseWarnings } : {}),
   };
 }
 
@@ -405,7 +467,20 @@ function isSectionish(row: any): boolean {
 }
 
 function moneyValue(v: any): number {
-  return parseFloat(String(v ?? '').replace(/,/g, '')) || 0;
+  return moneyValueOrNull(v) ?? 0;
+}
+
+/**
+ * Like moneyValue, but distinguishes "no value in this cell" (blank or
+ * unparseable → null) from a genuine 0.00. The GL running-balance tracker
+ * depends on this distinction: blank cells must not move it, real zeros must.
+ */
+function moneyValueOrNull(v: any): number | null {
+  const s = String(v ?? '').replace(/,/g, '').trim();
+  if (!s) return null;
+  const n = parseFloat(s);
+  if (isNaN(n)) return null;
+  return n === 0 ? 0 : n; // normalize -0
 }
 
 // ─── Trial Balance ────────────────────────────────────────────────────────────

@@ -157,6 +157,7 @@ describe('summarizeGeneralLedger', () => {
           transactions: [{ amount: 1 }, { amount: 2 }],
           total_debits: 3,
           total_credits: 0,
+          opening_balance: 0,
           ending_balance: 3,
         },
       ],
@@ -171,6 +172,7 @@ describe('summarizeGeneralLedger', () => {
       transaction_count: 2,
       total_debits: 3,
       total_credits: 0,
+      opening_balance: 0,
       ending_balance: 3,
     });
     expect(summary.accounts[0]).not.toHaveProperty('transactions');
@@ -193,9 +195,9 @@ const GL_DEFAULT_COLUMNS = {
   ],
 };
 
-function glRow(date: string, type: string, amount: string, balance: string, memo = ''): any {
+function glRow(date: string, type: string, amount: string, balance: string, memo = '', num = ''): any {
   return { ColData: [
-    { value: date }, { value: type }, { value: '' }, { value: '' },
+    { value: date }, { value: type }, { value: num }, { value: '' },
     { value: memo }, { value: 'Truist x2631' }, { value: amount }, { value: balance },
   ] };
 }
@@ -312,6 +314,257 @@ describe('parseGeneralLedger — dashed account numbers and AcctNum backfill', (
     expect(parsed.accounts[0].number).toBe('2400-01'); // backfilled from AcctNum
     expect(parsed.accounts[0].classification).toBe('Liability');
     expect(parsed.accounts[0].total_credits).toBe(100);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GL ending_balance (2026-08-25): the tracker skipped any row whose running
+// balance was exactly 0.00 (`if (balance !== 0)` — written to ignore BLANK
+// balance cells, which also parse to 0), so an account whose final credit
+// netted it to exactly zero reported the SECOND-TO-LAST row's balance
+// (50.75 instead of 0.00 on Samuel Bauer acct 114). The same guard threw
+// away QBO's own Summary-row balance of 0.00. Invariants held below:
+//   1. ending_balance == transactions[-1].balance            (non-empty)
+//   2. ending_balance == opening_balance + net activity in the account's
+//      normal-balance direction (debits-credits, or credits-debits)
+//   3. ending_balance == opening_balance + Σ transaction amounts (natural sign)
+//   4. empty transactions → ending_balance == opening_balance
+// ─────────────────────────────────────────────────────────────────────────────
+
+const CHART_SB = [
+  { Id: '114', Name: 'Inventory (Temporary)', AcctNum: '114', Classification: 'Asset' },
+  { Id: '510', Name: 'Freight & Delivery', AcctNum: '510', Classification: 'Expense' },
+  { Id: '400', Name: 'Sales', AcctNum: '400', Classification: 'Revenue' },
+];
+
+function glBeginningBalanceRow(balance: string): any {
+  return { ColData: [
+    { value: 'Beginning Balance' }, { value: '' }, { value: '' }, { value: '' },
+    { value: '' }, { value: '' }, { value: '' }, { value: balance },
+  ] };
+}
+
+function glSummary(label: string, balance: string): any {
+  return { ColData: [
+    { value: label }, { value: '' }, { value: '' }, { value: '' },
+    { value: '' }, { value: '' }, { value: '' }, { value: balance },
+  ] };
+}
+
+function glSection(header: string, id: string, rows: any[], summary?: any): any {
+  const section: any = {
+    Header: { ColData: [{ value: header, id }] },
+    Rows: { Row: rows },
+  };
+  if (summary) section.Summary = summary;
+  return section;
+}
+
+/** Invariants 1–3 (4 for the empty case), from the account's own fields. */
+function expectGlInvariants(a: any): void {
+  const sumAmount = a.transactions.reduce((s: number, t: any) => s + t.amount, 0);
+  expect(a.ending_balance).toBeCloseTo(a.opening_balance + sumAmount, 2);
+  const creditNormal = ['Liability', 'Equity', 'Revenue'].includes(a.classification);
+  const net = creditNormal ? a.total_credits - a.total_debits : a.total_debits - a.total_credits;
+  expect(a.ending_balance).toBeCloseTo(a.opening_balance + net, 2);
+  if (a.transactions.length > 0) {
+    expect(a.ending_balance).toBeCloseTo(a.transactions[a.transactions.length - 1].balance, 2);
+  } else {
+    expect(a.ending_balance).toBe(a.opening_balance);
+  }
+}
+
+// The Samuel Bauer acct-114 repro: the final Bill credit lands the running
+// balance on exactly 0.00, and the last two rows share doc_number 260711.
+const INVENTORY_ROWS = [
+  glRow('2026-07-30', 'Bill', '9058.53', '9058.53', '', 'CINV105699001'),
+  glRow('2026-07-31', 'Journal Entry', '-10265.08', '-1206.55'),
+  glRow('2026-07-31', 'Bill', '778.80', '-427.75', '', 'CINV105703702'),
+  glRow('2026-07-31', 'Bill', '478.50', '50.75', '', '260711'),
+  glRow('2026-07-31', 'Bill', '-50.75', '0.00', '', '260711'),
+];
+
+describe('parseGeneralLedger — ending_balance when the final row nets to zero', () => {
+  it('reports 0.00 (not the second-to-last balance) when the final credit lands the balance on exactly zero', () => {
+    const report = {
+      Columns: GL_DEFAULT_COLUMNS,
+      Rows: { Row: [
+        glSection('114 Inventory (Temporary)', '114', INVENTORY_ROWS,
+          glSummary('Total for 114 Inventory (Temporary)', '0.00')),
+      ] },
+    };
+    const parsed = parseGeneralLedger(report, 'Samuel Bauer', '2026-01-01', '2026-07-31', CHART_SB);
+    const a = parsed.accounts[0];
+    expect(a.ending_balance).toBe(0); // was 50.75 — the second-to-last row's balance
+    expect(a.opening_balance).toBe(0);
+    expect(a.total_debits).toBeCloseTo(10315.83, 2);
+    expect(a.total_credits).toBeCloseTo(10315.83, 2);
+    // Both same-date, same-doc_number 260711 rows stay in the array AND in the balance math.
+    expect(a.transactions).toHaveLength(5);
+    expect(a.transactions.filter((t: any) => t.doc_number === '260711')).toHaveLength(2);
+    expectGlInvariants(a);
+    expect(parsed.warnings).toBeUndefined(); // internally consistent — no mismatch warning
+  });
+
+  it('reports 0.00 from the last row even when the Summary row carries no balance', () => {
+    const report = {
+      Columns: GL_DEFAULT_COLUMNS,
+      Rows: { Row: [
+        glSection('114 Inventory (Temporary)', '114', INVENTORY_ROWS,
+          glSummary('Total for 114 Inventory (Temporary)', '')), // blank balance cell ≠ zero
+      ] },
+    };
+    const a = parseGeneralLedger(report, 'Samuel Bauer', '2026-01-01', '2026-07-31', CHART_SB).accounts[0];
+    expect(a.ending_balance).toBe(0);
+    expectGlInvariants(a);
+  });
+
+  it('honors an explicit Summary balance of 0.00 and warns when it contradicts the parsed rows', () => {
+    const report = {
+      Columns: GL_DEFAULT_COLUMNS,
+      Rows: { Row: [
+        // Final credit row missing → rows end at 50.75, but QBO's own total says 0.00.
+        glSection('114 Inventory (Temporary)', '114', INVENTORY_ROWS.slice(0, 4),
+          glSummary('Total for 114 Inventory (Temporary)', '0.00')),
+      ] },
+    };
+    const parsed = parseGeneralLedger(report, 'Samuel Bauer', '2026-01-01', '2026-07-31', CHART_SB);
+    expect(parsed.accounts[0].ending_balance).toBe(0); // QBO's stated total wins
+    expect(parsed.warnings).toHaveLength(1);
+    expect(parsed.warnings[0]).toContain('114 Inventory (Temporary)');
+    expect(parsed.warnings[0]).toContain('disagrees');
+  });
+
+  it('nets an opening balance to zero when the only transaction is the offsetting credit', () => {
+    const report = {
+      Columns: GL_DEFAULT_COLUMNS,
+      Rows: { Row: [
+        glSection('114 Inventory (Temporary)', '114', [
+          glBeginningBalanceRow('100.00'),
+          glRow('2026-07-31', 'Journal Entry', '-100.00', '0.00'),
+        ]),
+      ] },
+    };
+    const a = parseGeneralLedger(report, 'Samuel Bauer', '2026-01-01', '2026-07-31', CHART_SB).accounts[0];
+    expect(a.opening_balance).toBe(100);
+    expect(a.ending_balance).toBe(0); // was 100 — the beginning balance never overwritten
+    expect(a.transactions).toHaveLength(1); // the Beginning Balance row is not a transaction
+    expectGlInvariants(a);
+  });
+});
+
+describe('parseGeneralLedger — ending_balance across row and account shapes', () => {
+  it('final row is a debit: ending_balance is that row\'s running balance', () => {
+    const report = {
+      Columns: GL_DEFAULT_COLUMNS,
+      Rows: { Row: [
+        glSection('114 Inventory (Temporary)', '114', [
+          glRow('2026-03-01', 'Journal Entry', '-100.00', '-100.00'),
+          glRow('2026-03-15', 'Bill', '250.00', '150.00'),
+        ]),
+      ] },
+    };
+    const a = parseGeneralLedger(report, 'Samuel Bauer', '2026-01-01', '2026-07-31', CHART_SB).accounts[0];
+    expect(a.ending_balance).toBe(150);
+    expect(a.total_debits).toBe(250);
+    expect(a.total_credits).toBe(100);
+    expectGlInvariants(a);
+  });
+
+  it('all-credit account (credit-normal): ending_balance follows the natural-signed running balance', () => {
+    const report = {
+      Columns: GL_DEFAULT_COLUMNS,
+      Rows: { Row: [
+        glSection('400 Sales', '400', [
+          glRow('2026-02-01', 'Invoice', '100.00', '100.00'),
+          glRow('2026-02-15', 'Invoice', '250.50', '350.50'),
+          glRow('2026-02-28', 'Sales Receipt', '400.00', '750.50'),
+        ]),
+      ] },
+    };
+    const a = parseGeneralLedger(report, 'Samuel Bauer', '2026-01-01', '2026-07-31', CHART_SB).accounts[0];
+    expect(a.classification).toBe('Revenue');
+    expect(a.total_credits).toBeCloseTo(750.5, 2);
+    expect(a.total_debits).toBe(0);
+    expect(a.ending_balance).toBeCloseTo(750.5, 2);
+    expectGlInvariants(a);
+  });
+
+  it('empty period: no transactions → ending_balance == opening_balance (and survives summary mode)', () => {
+    const report = {
+      Columns: GL_DEFAULT_COLUMNS,
+      Rows: { Row: [
+        glSection('114 Inventory (Temporary)', '114', [glBeginningBalanceRow('1250.00')],
+          glSummary('Total for 114 Inventory (Temporary)', '1250.00')),
+      ] },
+    };
+    const parsed = parseGeneralLedger(report, 'Samuel Bauer', '2026-01-01', '2026-07-31', CHART_SB);
+    const a = parsed.accounts[0];
+    expect(a.transactions).toEqual([]);
+    expect(a.opening_balance).toBe(1250);
+    expect(a.ending_balance).toBe(1250);
+    expectGlInvariants(a);
+    const summary = summarizeGeneralLedger(parsed);
+    expect(summary.accounts[0]).toMatchObject({ transaction_count: 0, opening_balance: 1250, ending_balance: 1250 });
+  });
+
+  it('multi-account pull: each account\'s ending_balance is computed independently', () => {
+    const report = {
+      Columns: GL_DEFAULT_COLUMNS,
+      Rows: { Row: [
+        glSection('114 Inventory (Temporary)', '114', INVENTORY_ROWS,
+          glSummary('Total for 114 Inventory (Temporary)', '0.00')),
+        glSection('510 Freight & Delivery', '510', [
+          glRow('2026-04-02', 'Bill', '125.00', '125.00'),
+          glRow('2026-05-11', 'Expense', '75.10', '200.10'),
+        ], glSummary('Total for 510 Freight & Delivery', '200.10')),
+      ] },
+    };
+    const parsed = parseGeneralLedger(report, 'Samuel Bauer', '2026-01-01', '2026-07-31', CHART_SB);
+    expect(parsed.total_accounts).toBe(2);
+    const inv = parsed.accounts.find((a: any) => a.number === '114');
+    const freight = parsed.accounts.find((a: any) => a.number === '510');
+    expect(inv.ending_balance).toBe(0); // the zero does not bleed into 510…
+    expect(freight.ending_balance).toBeCloseTo(200.1, 2); // …and 510's balance does not bleed into 114
+    expect(freight.total_debits).toBeCloseTo(200.1, 2);
+    expectGlInvariants(inv);
+    expectGlInvariants(freight);
+    expect(parsed.warnings).toBeUndefined();
+  });
+
+  it('no Balance column at all: ending_balance is derived from opening + activity, not silently 0', () => {
+    const report = {
+      Columns: { Column: [
+        { ColTitle: 'Date' }, { ColTitle: 'Transaction Type' }, { ColTitle: 'Num' },
+        { ColTitle: 'Name' }, { ColTitle: 'Memo/Description' }, { ColTitle: 'Split' },
+        { ColTitle: 'Amount' },
+      ] },
+      Rows: { Row: [
+        glSection('114 Inventory (Temporary)', '114', [
+          glRow('2026-03-01', 'Bill', '100.00', ''),
+          glRow('2026-03-20', 'Journal Entry', '-25.50', ''),
+        ]),
+      ] },
+    };
+    const parsed = parseGeneralLedger(report, 'Samuel Bauer', '2026-01-01', '2026-07-31', CHART_SB);
+    expect(parsed.accounts[0].ending_balance).toBeCloseTo(74.5, 2);
+    expect(parsed.warnings).toBeUndefined();
+  });
+
+  it('a blank balance cell never clobbers the tracker, and the row/balance mismatch warns loudly', () => {
+    const report = {
+      Columns: GL_DEFAULT_COLUMNS,
+      Rows: { Row: [
+        glSection('114 Inventory (Temporary)', '114', [
+          glRow('2026-03-01', 'Bill', '100.00', '100.00'),
+          glRow('2026-03-20', 'Bill', '50.00', ''), // balance withheld by the report
+        ]),
+      ] },
+    };
+    const parsed = parseGeneralLedger(report, 'Samuel Bauer', '2026-01-01', '2026-07-31', CHART_SB);
+    expect(parsed.accounts[0].ending_balance).toBe(100); // last balance the report actually stated
+    expect(parsed.warnings).toHaveLength(1); // …but the disagreement with activity (150) is loud
+    expect(parsed.warnings[0]).toContain('disagrees');
   });
 });
 

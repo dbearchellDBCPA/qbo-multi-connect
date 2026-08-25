@@ -884,7 +884,7 @@ export async function registerMcpRoutes(
     // ── get_general_ledger ───────────────────────────────────────────────────
     server.tool(
       'get_general_ledger',
-      'Get General Ledger report for a QBO client. Returns structured transaction-level detail by account, with true per-transaction `debit` and `credit` fields (from the report\'s explicit Debit/Credit columns when QBO provides them, else derived from the signed amount and each account\'s normal balance — the signed `amount` is positive in the account\'s normal-balance direction, NOT always positive-means-debit). The account filter (`accounts` array, or `account_filter` as a comma-separated string) accepts QBO Account IDs, account numbers ("5012"), names ("Wages Pastoral"), or "number name" strings. Number terms match by prefix at a sub-account boundary — "4404" catches 4404, 4404-1 and 4404.2, but not 44040 — and matched parents expand to all their sub-accounts unless include_sub_accounts=false. Everything resolves to Account IDs server-side and rides Intuit\'s native account filter, so filtered pulls stay small and fast; terms that match nothing are listed in `warnings` (and unresolved_account_filters), never silently dropped. SIZE: an unfiltered full-year GL can exceed 1.5M characters — filter to specific accounts and/or set summary_only=true unless you truly need everything. Defaults to Accrual basis.',
+      'Get General Ledger report for a QBO client. Returns structured transaction-level detail by account, with true per-transaction `debit` and `credit` fields (from the report\'s explicit Debit/Credit columns when QBO provides them, else derived from the signed amount and each account\'s normal balance — the signed `amount` is positive in the account\'s normal-balance direction, NOT always positive-means-debit). The account filter (`accounts` array, or `account_filter` as a comma-separated string) accepts QBO Account IDs, account numbers ("5012"), names ("Wages Pastoral"), or "number name" strings. Number terms match by prefix at a sub-account boundary — "4404" catches 4404, 4404-1 and 4404.2, but not 44040 — and matched parents expand to all their sub-accounts unless include_sub_accounts=false. Everything resolves to Account IDs server-side and rides Intuit\'s native account filter, so filtered pulls stay small and fast; terms that match nothing are listed in `warnings` (and unresolved_account_filters), never silently dropped. Each account reports `opening_balance` (QBO\'s "Beginning Balance" row, surfaced as a field rather than a transaction) and `ending_balance` (the account\'s last reported running balance — an explicit 0.00 included); the parser cross-checks ending_balance == opening_balance + net activity per account and surfaces any disagreement in `warnings`. SIZE: an unfiltered full-year GL can exceed 1.5M characters — filter to specific accounts and/or set summary_only=true unless you truly need everything. Defaults to Accrual basis.',
       {
         client_name: z.string().describe('The name of the client company'),
         start_date: z.string().describe('Start date in YYYY-MM-DD format'),
@@ -892,7 +892,7 @@ export async function registerMcpRoutes(
         accounts: z.array(z.string()).optional().describe('Optional: filter to specific accounts. Accepts QBO Account IDs, account numbers (e.g. "5012" — prefix-matches sub-accounts like 5012-1), names (e.g. "Wages Pastoral"), or "number name" strings. Resolved to IDs server-side before calling Intuit.'),
         account_filter: z.string().optional().describe('Optional: the same account filter as `accounts`, as a single string — one account or a comma-separated list (e.g. "4404" or "1200,4404"). Merged with `accounts` when both are provided.'),
         include_sub_accounts: z.boolean().optional().describe('When an account filter matches a parent account, also include all of its sub-accounts (default: true). Set false to report on exactly the matched accounts.'),
-        summary_only: z.boolean().optional().describe('If true, omit transaction rows and return one row per account (number, name, classification, transaction_count, total_debits, total_credits, ending_balance). Use for size control on wide pulls.'),
+        summary_only: z.boolean().optional().describe('If true, omit transaction rows and return one row per account (number, name, classification, transaction_count, total_debits, total_credits, opening_balance, ending_balance). Use for size control on wide pulls.'),
         accounting_method: z.enum(['Cash', 'Accrual']).optional().describe('Cash or Accrual basis. Defaults to Accrual.'),
         class_id: z.string().optional().describe('Optional: QBO Class ID (or comma-separated IDs) to filter by class.'),
         department_id: z.string().optional().describe('Optional: QBO Department/Location ID (or comma-separated IDs).'),
@@ -970,8 +970,12 @@ export async function registerMcpRoutes(
           if (unresolved.length > 0) {
             (parsed as any).unresolved_account_filters = unresolved;
           }
-          if (warnings.length > 0) {
-            (parsed as any).warnings = warnings;
+          // Merge with any warnings the parser itself raised (e.g. an
+          // account whose ending balance disagrees with its own activity) —
+          // assignment here would silently drop them.
+          const parserWarnings: string[] = Array.isArray((parsed as any).warnings) ? (parsed as any).warnings : [];
+          if (warnings.length > 0 || parserWarnings.length > 0) {
+            (parsed as any).warnings = [...warnings, ...parserWarnings];
           }
           return { content: [{ type: 'text', text: JSON.stringify(parsed, null, 2) }] };
         } catch (err: any) {
