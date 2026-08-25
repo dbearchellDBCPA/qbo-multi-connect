@@ -246,11 +246,21 @@ export function depositLineEntityError(depositLines: DepositDirectLineInput[] = 
 /**
  * Build the full-update payload for a Deposit (read-modify-write).
  *
- * QBO full updates replace the entire Line array with whatever is posted, so
- * when the caller provides linked_payment_ids and/or deposit_lines the new
- * Line array is built ONLY from those inputs. Concatenating onto the fetched
- * lines here is exactly the bug that made update_deposit append instead of
- * replace (and inflate the deposit total on every call).
+ * QBO full updates replace the entire Line array with whatever is posted
+ * (lines with an Id update in place, lines without an Id are ADDED, omitted
+ * lines are removed), so the outgoing Line array is rebuilt from scratch —
+ * never the fetched line objects with their Ids, and never a concatenation
+ * onto them. Carrying the fetched lines into the body is exactly the bug
+ * that made update_deposit append instead of replace.
+ *
+ * Per-kind semantics (each array independently):
+ *  - provided (even []) → that kind is REPLACED with exactly what was passed;
+ *    linked_payment_ids: [] explicitly returns those payments to
+ *    Undeposited Funds.
+ *  - omitted (undefined) → that kind is PRESERVED, rebuilt cleanly (without
+ *    Id/LineNum) from the fetched deposit — so re-coding a direct line can
+ *    never silently unlink payments.
+ *  - both omitted → Line is left untouched entirely (scalar-only update).
  */
 export function buildDepositUpdatePayload(
   existing: any,
@@ -267,7 +277,10 @@ export function buildDepositUpdatePayload(
   if (args.txn_date) payload.TxnDate = args.txn_date;
   if (args.private_note !== undefined) payload.PrivateNote = args.private_note;
   if (args.linked_payment_ids || args.deposit_lines) {
-    payload.Line = buildDepositTxnLines(args.linked_payment_ids ?? [], args.deposit_lines ?? []);
+    const current = qboDepositLinesToUpdateShape(existing?.Line ?? []);
+    const linked = args.linked_payment_ids ?? current.linked_payment_ids;
+    const direct = args.deposit_lines ?? current.deposit_lines;
+    payload.Line = buildDepositTxnLines(linked, direct);
   }
   return payload;
 }

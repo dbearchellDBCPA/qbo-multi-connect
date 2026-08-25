@@ -157,8 +157,13 @@ export class ReportsAPI {
    * Get General Ledger report.
    * NOTE: `accountIds` must be QBO Account IDs (comma-separated). Names/numbers
    * are not accepted by Intuit and will silently return an empty report.
+   * `columns` optionally requests an explicit column set (e.g. debt_amt /
+   * credit_amt for true Debit/Credit columns instead of the signed net amount).
    */
-  async generalLedger(realmId: string, options: ReportOptions = {}): Promise<unknown> {
+  async generalLedger(
+    realmId: string,
+    options: ReportOptions & { columns?: string } = {}
+  ): Promise<unknown> {
     const query = buildReportQuery(options, [
       'start_date',
       'end_date',
@@ -169,6 +174,7 @@ export class ReportsAPI {
       'vendor',
       'account',
     ]);
+    if (options.columns) query.columns = options.columns;
     return this.client.get(realmId, 'reports/GeneralLedger', query);
   }
 

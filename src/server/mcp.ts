@@ -21,7 +21,10 @@ import {
 } from './line-converters.js';
 import {
   resolveAccountFilterTerms,
+  expandToDescendants,
+  parseGeneralLedger,
   summarizeGeneralLedger,
+  stripQboNoise,
   filterBudgets,
   budgetToSummary,
   formatCurrency,
@@ -30,6 +33,10 @@ import {
   formatTrialBalance,
   formatAgingReport,
 } from './report-shaping.js';
+import {
+  postedLineStats,
+  verifyLinesAndMaybeRollback,
+} from './update-verification.js';
 import {
   addressInput,
   contactInputShape,
@@ -147,149 +154,7 @@ function formatBalanceSheet(reportData: any, clientName: string, asOfDate: strin
   return lines.join('\n');
 }
 
-/**
- * Parse QBO General Ledger report into structured JSON.
- * Returns { client, period, accounts: [{ number, name, transactions: [...], total_debits, total_credits, ending_balance }] }
- */
-function parseGeneralLedger(reportData: any, clientName: string, startDate: string, endDate: string, accountFilter?: string[]): any {
-  const columns: string[] = (reportData?.Columns?.Column ?? []).map((c: any) => c.ColTitle ?? '');
-
-  const dateIdx = columns.findIndex(c => c.toLowerCase() === 'date');
-  const typeIdx = columns.findIndex(c => c.toLowerCase().includes('transaction type'));
-  const numIdx = columns.findIndex(c => c.toLowerCase() === 'num');
-  const nameIdx = columns.findIndex(c => c.toLowerCase() === 'name');
-  const memoIdx = columns.findIndex(c => c.toLowerCase().includes('memo'));
-  const splitIdx = columns.findIndex(c => c.toLowerCase() === 'split');
-  const amtIdx = columns.findIndex(c => c.toLowerCase() === 'amount');
-  const balIdx = columns.findIndex(c => c.toLowerCase() === 'balance');
-
-  function colVal(cd: any[], idx: number): string {
-    return idx >= 0 ? (cd?.[idx]?.value ?? '') : '';
-  }
-
-  function parseNumber(val: string): number {
-    return parseFloat(val?.replace(/,/g, '') ?? '0') || 0;
-  }
-
-  const accounts: any[] = [];
-
-  function processSection(row: any, _isNested = false): void {
-    const accountHeader = row.Header?.ColData?.[0]?.value ?? '';
-    // Parse account number and name (e.g. "1001 Checking" or just "Checking")
-    const match = accountHeader.match(/^(\d+)\s+(.+)$/);
-    const accountNumber = match ? match[1] : '';
-    const accountName = match ? match[2] : accountHeader;
-    const isLeafAccount = accountNumber !== ''; // Only leaf accounts have a number prefix
-
-    // Apply account filter if provided
-    if (accountFilter && accountFilter.length > 0) {
-      const filterLower = accountFilter.map(f => f.toLowerCase().trim());
-      const accountNameLower = accountName.toLowerCase();
-
-      // Check if any filter looks like a number search
-      const hasNumberFilter = filterLower.some(f => /^\d+$/.test(f));
-
-      if (hasNumberFilter) {
-        // Number filter: only match leaf accounts (those with account numbers)
-        // and only if the account number contains the filter number
-        if (!isLeafAccount) {
-          // Parent section — recurse into children but don't add parent itself
-          if (row.Rows?.Row) {
-            for (const child of row.Rows.Row) {
-              if (child.type === 'Section') processSection(child, true);
-            }
-          }
-          return;
-        }
-        const matchesNumber = filterLower.some(f => /^\d+$/.test(f) && accountNumber.includes(f));
-        const matchesName = filterLower.filter(f => !/^\d+$/.test(f)).some(f => accountNameLower.includes(f));
-        if (!matchesNumber && !matchesName) return;
-      } else {
-        // Name-only filter: match on account name or full header
-        const headerLower = accountHeader.toLowerCase();
-        const matchesFilter = filterLower.some(f =>
-          accountNameLower.includes(f) || headerLower.includes(f)
-        );
-        if (!matchesFilter && isLeafAccount) return;
-        if (!matchesFilter && !isLeafAccount) {
-          // Recurse into children
-          if (row.Rows?.Row) {
-            for (const child of row.Rows.Row) {
-              if (child.type === 'Section') processSection(child, true);
-            }
-          }
-          return;
-        }
-      }
-    }
-
-    const transactions: any[] = [];
-    let totalDebits = 0;
-    let totalCredits = 0;
-    let endingBalance = 0;
-
-    if (row.Rows?.Row) {
-      for (const txnRow of row.Rows.Row) {
-        if (txnRow.type === 'Data') {
-          const cd = txnRow.ColData ?? [];
-          const amount = parseNumber(colVal(cd, amtIdx));
-          const balance = parseNumber(colVal(cd, balIdx));
-          if (amount > 0) totalDebits += amount;
-          else totalCredits += Math.abs(amount);
-          if (balance !== 0) endingBalance = balance; // Track last non-zero balance
-
-          transactions.push({
-            date: colVal(cd, dateIdx),
-            type: colVal(cd, typeIdx),
-            doc_number: colVal(cd, numIdx),
-            name: colVal(cd, nameIdx),
-            memo: colVal(cd, memoIdx),
-            split_account: colVal(cd, splitIdx),
-            amount: amount,
-            balance: balance,
-          });
-        } else if (txnRow.type === 'Section') {
-          // Nested section — process as sub-account
-          processSection(txnRow, true);
-        }
-      }
-    }
-
-    // Get ending balance from Summary if available — prefer this over last transaction
-    if (row.Summary?.ColData) {
-      const cd = row.Summary.ColData;
-      // Try balance column first, fallback to last column
-      const summaryBalance = balIdx >= 0 && cd[balIdx]?.value
-        ? parseNumber(cd[balIdx].value)
-        : parseNumber(cd[cd.length - 1]?.value ?? '0');
-      if (summaryBalance !== 0) endingBalance = summaryBalance;
-    }
-
-    accounts.push({
-      number: accountNumber,
-      name: accountName,
-      transactions,
-      total_debits: Math.round(totalDebits * 100) / 100,
-      total_credits: Math.round(totalCredits * 100) / 100,
-      ending_balance: Math.round(endingBalance * 100) / 100,
-    });
-  }
-
-  // Process top-level rows
-  for (const row of (reportData?.Rows?.Row ?? [])) {
-    if (row.type === 'Section') {
-      processSection(row);
-    }
-  }
-
-  return {
-    client: clientName,
-    period: { start: startDate, end: endDate },
-    accounts,
-    total_accounts: accounts.length,
-    total_transactions: accounts.reduce((sum: number, a: any) => sum + a.transactions.length, 0),
-  };
-}
+// parseGeneralLedger lives in report-shaping.ts (pure + unit-tested).
 
 function formatCashFlow(reportData: any, clientName: string, startDate: string, endDate: string): string {
   const rows = extractRows(reportData?.Rows);
@@ -1019,24 +884,32 @@ export async function registerMcpRoutes(
     // ── get_general_ledger ───────────────────────────────────────────────────
     server.tool(
       'get_general_ledger',
-      'Get General Ledger report for a QBO client. Returns structured transaction-level detail by account. The account filter (`accounts` array, or `account_filter` as a comma-separated string) accepts QBO Account IDs, account numbers ("5012"), names ("Wages Pastoral"), or "number name" strings ("5012 Wages Pastoral"). Number terms match by prefix at a sub-account boundary — "4404" catches 4404, 4404-1 and 4404.2, but not 44040. Everything resolves to Account IDs server-side and rides Intuit\'s native account filter (which only accepts IDs), so filtered pulls stay small and fast; terms that match nothing are reported back in unresolved_account_filters, never silently dropped. SIZE: an unfiltered full-year GL can exceed 1.5M characters — filter to specific accounts and/or set summary_only=true unless you truly need everything. Defaults to Accrual basis.',
+      'Get General Ledger report for a QBO client. Returns structured transaction-level detail by account, with true per-transaction `debit` and `credit` fields (from the report\'s explicit Debit/Credit columns when QBO provides them, else derived from the signed amount and each account\'s normal balance — the signed `amount` is positive in the account\'s normal-balance direction, NOT always positive-means-debit). The account filter (`accounts` array, or `account_filter` as a comma-separated string) accepts QBO Account IDs, account numbers ("5012"), names ("Wages Pastoral"), or "number name" strings. Number terms match by prefix at a sub-account boundary — "4404" catches 4404, 4404-1 and 4404.2, but not 44040 — and matched parents expand to all their sub-accounts unless include_sub_accounts=false. Everything resolves to Account IDs server-side and rides Intuit\'s native account filter, so filtered pulls stay small and fast; terms that match nothing are listed in `warnings` (and unresolved_account_filters), never silently dropped. SIZE: an unfiltered full-year GL can exceed 1.5M characters — filter to specific accounts and/or set summary_only=true unless you truly need everything. Defaults to Accrual basis.',
       {
         client_name: z.string().describe('The name of the client company'),
         start_date: z.string().describe('Start date in YYYY-MM-DD format'),
         end_date: z.string().describe('End date in YYYY-MM-DD format'),
         accounts: z.array(z.string()).optional().describe('Optional: filter to specific accounts. Accepts QBO Account IDs, account numbers (e.g. "5012" — prefix-matches sub-accounts like 5012-1), names (e.g. "Wages Pastoral"), or "number name" strings. Resolved to IDs server-side before calling Intuit.'),
         account_filter: z.string().optional().describe('Optional: the same account filter as `accounts`, as a single string — one account or a comma-separated list (e.g. "4404" or "1200,4404"). Merged with `accounts` when both are provided.'),
-        summary_only: z.boolean().optional().describe('If true, omit transaction rows and return one row per account (number, name, transaction_count, total_debits, total_credits, ending_balance). Use for size control on wide pulls.'),
+        include_sub_accounts: z.boolean().optional().describe('When an account filter matches a parent account, also include all of its sub-accounts (default: true). Set false to report on exactly the matched accounts.'),
+        summary_only: z.boolean().optional().describe('If true, omit transaction rows and return one row per account (number, name, classification, transaction_count, total_debits, total_credits, ending_balance). Use for size control on wide pulls.'),
         accounting_method: z.enum(['Cash', 'Accrual']).optional().describe('Cash or Accrual basis. Defaults to Accrual.'),
         class_id: z.string().optional().describe('Optional: QBO Class ID (or comma-separated IDs) to filter by class.'),
         department_id: z.string().optional().describe('Optional: QBO Department/Location ID (or comma-separated IDs).'),
       },
-      async ({ client_name, start_date, end_date, accounts, account_filter, summary_only, accounting_method, class_id, department_id }) => {
+      async ({ client_name, start_date, end_date, accounts, account_filter, include_sub_accounts, summary_only, accounting_method, class_id, department_id }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) {
           return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
         }
         try {
+          // The chart of accounts backs three things here: filter-term
+          // resolution, parent → sub-account expansion, and the account
+          // classification that makes debit/credit attribution correct.
+          const accountsResp: any = await qboManager.accounts.getAll(realmId);
+          const accountList: any[] = accountsResp?.QueryResponse?.Account ?? [];
+          const warnings: string[] = [];
+
           // Merge both filter spellings into one term list. Intuit's GL
           // `account` param only accepts IDs — names/numbers sent raw would
           // silently return an empty report, so resolve them here first.
@@ -1048,32 +921,57 @@ export async function registerMcpRoutes(
           let resolvedAccountIds: string | undefined;
           let unresolved: string[] = [];
           if (filterTerms.length > 0) {
-            const accountsResp: any = await qboManager.accounts.getAll(realmId);
-            const accountList: any[] = accountsResp?.QueryResponse?.Account ?? [];
             const resolution = resolveAccountFilterTerms(accountList, filterTerms);
             unresolved = resolution.unresolved;
             if (resolution.ids.length === 0) {
               return { content: [{ type: 'text', text: `No accounts matched the provided filter(s): ${filterTerms.join(', ')}. Use get_accounts to see available account IDs / names / numbers.` }] };
             }
-            resolvedAccountIds = resolution.ids.join(',');
+            const ids = include_sub_accounts === false
+              ? resolution.ids
+              : expandToDescendants(accountList, resolution.ids);
+            resolvedAccountIds = ids.join(',');
+            for (const term of unresolved) {
+              warnings.push(`Account filter term "${term}" did not match any account — it was NOT applied. Use get_accounts to see available IDs / numbers / names.`);
+            }
           }
 
-          const report = await qboManager.reports.generalLedger(realmId, {
+          const glOptions = {
             startDate: start_date,
             endDate: end_date,
             accountingMethod: accounting_method,
             classId: class_id,
             departmentId: department_id,
             accountIds: resolvedAccountIds,
-          });
-          // Account filtering is done server-side by Intuit, so pass undefined
-          // to skip the client-side substring filter.
-          let parsed = parseGeneralLedger(report, client_name, start_date, end_date, undefined);
+          };
+
+          // Prefer explicit Debit/Credit columns from Intuit. If the
+          // columns-qualified request fails or comes back without them,
+          // fall back to the default report and classification-based
+          // attribution — never let the whole GL call die on a columns quirk.
+          const GL_EXPLICIT_COLUMNS = 'tx_date,txn_type,doc_num,name,memo,split_acc,debt_amt,credit_amt,subt_nat_amount,rbal_nat_amount';
+          const hasCol = (r: any, title: string): boolean =>
+            ((r?.Columns?.Column ?? []) as any[]).some((c: any) => (c.ColTitle ?? '').toLowerCase() === title);
+          let report: any = null;
+          try {
+            report = await qboManager.reports.generalLedger(realmId, { ...glOptions, columns: GL_EXPLICIT_COLUMNS });
+            if (!hasCol(report, 'debit') || !hasCol(report, 'credit') || !hasCol(report, 'date')) report = null;
+          } catch {
+            report = null;
+          }
+          if (!report) {
+            report = await qboManager.reports.generalLedger(realmId, glOptions);
+            warnings.push('Explicit Debit/Credit columns were unavailable from QBO for this pull — debit/credit are derived from the signed amount and each account\'s normal balance (classification).');
+          }
+
+          let parsed = parseGeneralLedger(report, client_name, start_date, end_date, accountList);
           if (summary_only) {
             parsed = summarizeGeneralLedger(parsed);
           }
           if (unresolved.length > 0) {
             (parsed as any).unresolved_account_filters = unresolved;
+          }
+          if (warnings.length > 0) {
+            (parsed as any).warnings = warnings;
           }
           return { content: [{ type: 'text', text: JSON.stringify(parsed, null, 2) }] };
         } catch (err: any) {
@@ -1085,19 +983,21 @@ export async function registerMcpRoutes(
     // ── query_transactions ────────────────────────────────────────────────────
     server.tool(
       'query_transactions',
-      'Execute a raw QBO SQL query for a client. Queryable entities include Invoice, Bill, Payment, BillPayment, Purchase, SalesReceipt, CreditMemo, RefundReceipt, JournalEntry, Deposit, Estimate, PurchaseOrder, Transfer, Customer, Vendor, Employee, Account, Class, Department, Item, Budget, CompanyInfo, Preferences, TaxCode, TaxRate, PaymentMethod, Term, Attachable. Column projection (SELECT Id, DisplayName FROM …) is supported for scalar fields; QBO itself may reject complex-typed fields (e.g. BillAddr) in a projection list — use SELECT *, or get_customers/get_vendors with detail:"full", when you need addresses.',
+      'Execute a raw QBO SQL query for a client. Queryable entities include Invoice, Bill, Payment, BillPayment, Purchase, SalesReceipt, CreditMemo, RefundReceipt, JournalEntry, Deposit, Estimate, PurchaseOrder, Transfer, Customer, Vendor, Employee, Account, Class, Department, Item, Budget, CompanyInfo, Preferences, TaxCode, TaxRate, PaymentMethod, Term, Attachable. Column projection (SELECT Id, DisplayName FROM …) is supported for scalar fields; QBO itself may reject complex-typed fields (e.g. BillAddr) in a projection list — use SELECT *, or get_customers/get_vendors with detail:"full", when you need addresses. Some fields are not queryable at all (e.g. TotalAmt on Deposit; TotalAmt does not exist on JournalEntry; Line-level fields) — QBO\'s validation error is surfaced verbatim. Results are cleaned of QBO wire noise (PurchaseEx-style JAXB blobs, empty CustomExtensions, domain, sparse) by default — MetaData create/update times are kept; pass raw=true for the untouched response.',
       {
         client_name: z.string().describe('The name of the client company'),
         query: z.string().describe('QBO SQL query, e.g. "SELECT * FROM Invoice WHERE TxnDate > \'2026-01-01\'" or "SELECT * FROM Budget"'),
+        raw: z.boolean().optional().describe('If true, return QBO\'s response untouched (including PurchaseEx blobs, CustomExtensions, domain, sparse). Default false.'),
       },
-      async ({ client_name, query }) => {
+      async ({ client_name, query, raw }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) {
           return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
         }
         try {
           const result = await qboManager.transactions.rawQuery(realmId, query);
-          return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+          const output = raw ? result : stripQboNoise(result);
+          return { content: [{ type: 'text', text: JSON.stringify(output, null, 2) }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error executing query: ${err?.message ?? err}` }] };
         }
@@ -1372,6 +1272,16 @@ export async function registerMcpRoutes(
 
           const result = await qboManager.journalEntries.update(realmId, payload);
           const updated = (result as any)?.JournalEntry;
+          if (updated && lines) {
+            const failure = await verifyLinesAndMaybeRollback({
+              entityLabel: 'Journal Entry',
+              original: je,
+              submitted: postedLineStats(payload.Line),
+              updated,
+              rollback: async (p) => ((await qboManager.journalEntries.update(realmId, p)) as any)?.JournalEntry ?? null,
+            });
+            if (failure) return { content: [{ type: 'text', text: failure }] };
+          }
           const summary = updated
             ? `Journal Entry #${updated.DocNumber ?? updated.Id} updated successfully.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken} | Date: ${updated.TxnDate}`
             : JSON.stringify(result, null, 2);
@@ -1539,6 +1449,16 @@ export async function registerMcpRoutes(
 
           const result = await qboManager.transactions.updateInvoice(realmId, payload);
           const updated = (result as any)?.Invoice;
+          if (updated && lines) {
+            const failure = await verifyLinesAndMaybeRollback({
+              entityLabel: 'Invoice',
+              original: inv,
+              submitted: postedLineStats(payload.Line),
+              updated,
+              rollback: async (p) => ((await qboManager.transactions.updateInvoice(realmId, p)) as any)?.Invoice ?? null,
+            });
+            if (failure) return { content: [{ type: 'text', text: failure }] };
+          }
           const summary = updated
             ? `Invoice #${updated.DocNumber ?? updated.Id} updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken} | Total: ${formatCurrency(updated.TotalAmt)}`
             : JSON.stringify(result, null, 2);
@@ -1710,6 +1630,16 @@ export async function registerMcpRoutes(
 
           const result = await qboManager.transactions.updateBill(realmId, payload);
           const updated = (result as any)?.Bill;
+          if (updated && lines) {
+            const failure = await verifyLinesAndMaybeRollback({
+              entityLabel: 'Bill',
+              original: bill,
+              submitted: postedLineStats(payload.Line),
+              updated,
+              rollback: async (p) => ((await qboManager.transactions.updateBill(realmId, p)) as any)?.Bill ?? null,
+            });
+            if (failure) return { content: [{ type: 'text', text: failure }] };
+          }
           const summary = updated
             ? `Bill #${updated.DocNumber ?? updated.Id} updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken} | Total: ${formatCurrency(updated.TotalAmt)}`
             : JSON.stringify(result, null, 2);
@@ -2129,6 +2059,16 @@ export async function registerMcpRoutes(
 
           const result = await qboManager.transactions.updateExpense(realmId, payload);
           const updated = (result as any)?.Purchase;
+          if (updated && lines) {
+            const failure = await verifyLinesAndMaybeRollback({
+              entityLabel: 'Expense',
+              original: exp,
+              submitted: postedLineStats(payload.Line),
+              updated,
+              rollback: async (p) => ((await qboManager.transactions.updateExpense(realmId, p)) as any)?.Purchase ?? null,
+            });
+            if (failure) return { content: [{ type: 'text', text: failure }] };
+          }
           const summary = updated
             ? `Expense #${updated.DocNumber ?? updated.Id} updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken} | Type: ${updated.PaymentType} | Date: ${updated.TxnDate} | Total: ${formatCurrency(updated.TotalAmt)}`
             : JSON.stringify(result, null, 2);
@@ -2909,6 +2849,16 @@ export async function registerMcpRoutes(
           }
           const result = await qboManager.transactions.updateSalesReceipt(realmId, payload);
           const updated = (result as any)?.SalesReceipt;
+          if (updated && lines) {
+            const failure = await verifyLinesAndMaybeRollback({
+              entityLabel: 'Sales Receipt',
+              original: sr,
+              submitted: postedLineStats(payload.Line),
+              updated,
+              rollback: async (p) => ((await qboManager.transactions.updateSalesReceipt(realmId, p)) as any)?.SalesReceipt ?? null,
+            });
+            if (failure) return { content: [{ type: 'text', text: failure }] };
+          }
           return { content: [{ type: 'text', text: updated ? `Sales Receipt #${updated.DocNumber ?? updated.Id} updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken} | Total: ${formatCurrency(updated.TotalAmt)}` : JSON.stringify(result, null, 2) }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error updating sales receipt: ${err?.message ?? err}` }] };
@@ -3053,6 +3003,16 @@ export async function registerMcpRoutes(
           }
           const result = await qboManager.transactions.updateCreditMemo(realmId, payload);
           const updated = (result as any)?.CreditMemo;
+          if (updated && lines) {
+            const failure = await verifyLinesAndMaybeRollback({
+              entityLabel: 'Credit Memo',
+              original: cm,
+              submitted: postedLineStats(payload.Line),
+              updated,
+              rollback: async (p) => ((await qboManager.transactions.updateCreditMemo(realmId, p)) as any)?.CreditMemo ?? null,
+            });
+            if (failure) return { content: [{ type: 'text', text: failure }] };
+          }
           return { content: [{ type: 'text', text: updated ? `Credit Memo #${updated.DocNumber ?? updated.Id} updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken}` : JSON.stringify(result, null, 2) }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error updating credit memo: ${err?.message ?? err}` }] };
@@ -3190,6 +3150,16 @@ export async function registerMcpRoutes(
           }
           const result = await qboManager.transactions.updateEstimate(realmId, payload);
           const updated = (result as any)?.Estimate;
+          if (updated && lines) {
+            const failure = await verifyLinesAndMaybeRollback({
+              entityLabel: 'Estimate',
+              original: est,
+              submitted: postedLineStats(payload.Line),
+              updated,
+              rollback: async (p) => ((await qboManager.transactions.updateEstimate(realmId, p)) as any)?.Estimate ?? null,
+            });
+            if (failure) return { content: [{ type: 'text', text: failure }] };
+          }
           return { content: [{ type: 'text', text: updated ? `Estimate #${updated.DocNumber ?? updated.Id} updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken} | Status: ${updated.TxnStatus}` : JSON.stringify(result, null, 2) }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error updating estimate: ${err?.message ?? err}` }] };
@@ -3334,6 +3304,16 @@ export async function registerMcpRoutes(
           }
           const result = await qboManager.transactions.updatePurchaseOrder(realmId, payload);
           const updated = (result as any)?.PurchaseOrder;
+          if (updated && lines) {
+            const failure = await verifyLinesAndMaybeRollback({
+              entityLabel: 'Purchase Order',
+              original: po,
+              submitted: postedLineStats(payload.Line),
+              updated,
+              rollback: async (p) => ((await qboManager.transactions.updatePurchaseOrder(realmId, p)) as any)?.PurchaseOrder ?? null,
+            });
+            if (failure) return { content: [{ type: 'text', text: failure }] };
+          }
           return { content: [{ type: 'text', text: updated ? `Purchase Order #${updated.DocNumber ?? updated.Id} updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken}` : JSON.stringify(result, null, 2) }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error updating purchase order: ${err?.message ?? err}` }] };
@@ -3533,7 +3513,7 @@ export async function registerMcpRoutes(
     // ── update_deposit ────────────────────────────────────────────────────────
     server.tool(
       'update_deposit',
-      'Update an existing bank deposit in place. Read-modify-write: fetches the current Deposit, merges only what you pass, and writes the FULL object back with a fresh SyncToken — untouched fields are preserved. If linked_payment_ids and/or deposit_lines are provided they together REPLACE ALL existing lines — fetch with get_deposit first and pass BOTH arrays back (modified as needed); omitting the linked payments would return those payments to Undeposited Funds. Deposit lines accept a "Received From" entity (entity_id + entity_type: Vendor | Customer | Employee) so vendor-refund deposits can be attributed to the vendor.',
+      'Update an existing bank deposit in place. Read-modify-write: fetches the current Deposit, merges only what you pass, and writes the FULL object back with a fresh SyncToken — untouched fields are preserved. Line semantics, per array independently: a PROVIDED array replaces that kind of line with exactly what you pass; an OMITTED array preserves the existing lines of that kind (so re-coding a direct line never silently unlinks payments); linked_payment_ids: [] explicitly removes the linked payments (they return to Undeposited Funds); omit both arrays for a metadata-only update that leaves lines untouched. Every line change is verified against QBO after the write and automatically rolled back to the original lines if the result does not match. Deposit lines accept a "Received From" entity (entity_id + entity_type: Vendor | Customer | Employee) so vendor-refund deposits can be attributed to the vendor.',
       {
         client_name: z.string().describe('The name of the client company'),
         deposit_id: z.string().describe('The QBO Deposit ID to update'),
@@ -3579,23 +3559,21 @@ export async function registerMcpRoutes(
             return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
           }
 
-          // Post-write verification: QBO full updates replace the Line array,
-          // so the write-back must reflect exactly what was submitted. Any
-          // drift (e.g. lines appended rather than replaced) is surfaced
-          // loudly instead of silently inflating the deposit.
+          // Post-write verification against what was actually sent (submitted
+          // + preserved lines). On drift, the original lines are re-posted so
+          // an appended/inflated deposit never survives silently.
           if (replacingLines) {
-            const submittedCount = (linked_payment_ids?.length ?? 0) + (deposit_lines?.length ?? 0);
-            const submittedTotal =
-              (linked_payment_ids ?? []).reduce((s, l) => s + l.amount, 0) +
-              (deposit_lines ?? []).reduce((s, l) => s + l.amount, 0);
-            const actualCount = (updated.Line ?? []).length;
-            const actualTotal = parseFloat(updated.TotalAmt ?? '0') || 0;
-            if (actualCount !== submittedCount || Math.abs(actualTotal - submittedTotal) > 0.01) {
-              return { content: [{ type: 'text', text: `VERIFICATION FAILED — the write went through but the deposit does not match what was submitted. Expected ${submittedCount} line(s) totaling ${formatCurrency(submittedTotal)}; QBO now shows ${actualCount} line(s) totaling ${formatCurrency(actualTotal)}. Inspect deposit ${deposit_id} with get_deposit and correct it before relying on this update.` }] };
-            }
+            const failure = await verifyLinesAndMaybeRollback({
+              entityLabel: 'Deposit',
+              original: dep,
+              submitted: postedLineStats(payload.Line),
+              updated,
+              rollback: async (p) => ((await qboManager.banking.updateDeposit(realmId, p)) as any)?.Deposit ?? null,
+            });
+            if (failure) return { content: [{ type: 'text', text: failure }] };
           }
 
-          const summary = `Deposit ${updated.Id} updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken} | Date: ${updated.TxnDate} | Total: ${formatCurrency(updated.TotalAmt)}${replacingLines ? ` | Lines: ${(updated.Line ?? []).length} (replaced)` : ''}`;
+          const summary = `Deposit ${updated.Id} updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken} | Date: ${updated.TxnDate} | Total: ${formatCurrency(updated.TotalAmt)}${replacingLines ? ` | Lines: ${(updated.Line ?? []).length} (verified line replacement)` : ''}`;
           return { content: [{ type: 'text', text: summary }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error updating deposit: ${err?.message ?? err}` }] };

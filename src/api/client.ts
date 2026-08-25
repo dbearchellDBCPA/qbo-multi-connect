@@ -127,6 +127,15 @@ export class QBOClient {
       ...options.headers,
     };
 
+    // Debug tap for write payloads (QBO_DEBUG_HTTP=1): the exact JSON body
+    // sent to Intuit, so a mis-built update (e.g. fetched lines leaking into
+    // a replacement Line array) is a 30-second diagnosis instead of a
+    // ledger forensics session. Off by default — bodies are client
+    // financial data and don't belong in logs unasked.
+    if (process.env.QBO_DEBUG_HTTP === '1' && method !== 'GET' && !isMultipart) {
+      console.error(`[qbo-http] ${method} ${endpoint} realm=${realmId} body=${JSON.stringify(body ?? null)}`);
+    }
+
     // Make request with retry logic for rate limits
     return await this.requestWithRetry(method, url.toString(), headers, body);
   }

@@ -113,7 +113,10 @@ export function resolveAccountFilterTerms(
 
     if (matched.size === 0) {
       const parts = term.split(/\s+/);
-      if (parts.length > 1 && /^\d+$/.test(parts[0])) {
+      // Number tokens include sub-account forms like "1700-00" — a bare
+      // \d+ gate silently skipped them ("1700-00 Partnerships Owned" then
+      // fell through to name-substring and could miss entirely).
+      if (parts.length > 1 && /^\d/.test(parts[0])) {
         for (const m of acctNumMatches(parts[0])) matched.add(String(m.Id));
       }
     }
@@ -134,6 +137,29 @@ export function resolveAccountFilterTerms(
 }
 
 /**
+ * Expand a set of account IDs to include every descendant sub-account
+ * (via ParentRef), so filtering on a parent account covers its children.
+ */
+export function expandToDescendants(accountList: any[], ids: string[]): string[] {
+  const childrenByParent = new Map<string, string[]>();
+  for (const a of accountList ?? []) {
+    const parent = a?.ParentRef?.value != null ? String(a.ParentRef.value) : null;
+    if (!parent || a?.Id == null) continue;
+    if (!childrenByParent.has(parent)) childrenByParent.set(parent, []);
+    childrenByParent.get(parent)!.push(String(a.Id));
+  }
+  const out = new Set<string>();
+  const queue = [...ids];
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    if (out.has(id)) continue;
+    out.add(id);
+    for (const child of childrenByParent.get(id) ?? []) queue.push(child);
+  }
+  return Array.from(out);
+}
+
+/**
  * Collapse a parsed General Ledger (see parseGeneralLedger) to per-account
  * totals — drops the transaction rows, keeps a transaction_count instead.
  */
@@ -144,12 +170,191 @@ export function summarizeGeneralLedger(parsed: any): any {
     accounts: (parsed?.accounts ?? []).map((a: any) => ({
       number: a.number,
       name: a.name,
+      classification: a.classification,
       transaction_count: (a.transactions ?? []).length,
       total_debits: a.total_debits,
       total_credits: a.total_credits,
       ending_balance: a.ending_balance,
     })),
   };
+}
+
+// ─── General Ledger parsing ───────────────────────────────────────────────────
+// QBO's GL report has no per-row debit/credit by default — its net-amount
+// column (subt_nat_amount) is signed POSITIVE IN THE ACCOUNT'S NORMAL-BALANCE
+// DIRECTION. "Positive = debit" is only true for debit-normal accounts, so a
+// parser that assumes it swaps debits and credits on every liability, equity,
+// and income account (found 2026-08-24: liability deposits reported as
+// debits, income reported as all-debit). Preferred source is the report's
+// explicit Debit/Credit columns (requested via columns=debt_amt,credit_amt);
+// when absent, the sign is interpreted through the account's Classification.
+
+const CREDIT_NORMAL_CLASSIFICATIONS = new Set(['Liability', 'Equity', 'Revenue']);
+
+export function parseGeneralLedger(
+  reportData: any,
+  clientName: string,
+  startDate: string,
+  endDate: string,
+  accountList?: any[]
+): any {
+  const columns: string[] = (reportData?.Columns?.Column ?? []).map((c: any) => c.ColTitle ?? '');
+
+  const dateIdx = columns.findIndex(c => c.toLowerCase() === 'date');
+  const typeIdx = columns.findIndex(c => c.toLowerCase().includes('transaction type'));
+  const numIdx = columns.findIndex(c => c.toLowerCase() === 'num');
+  const nameIdx = columns.findIndex(c => c.toLowerCase() === 'name');
+  const memoIdx = columns.findIndex(c => c.toLowerCase().includes('memo'));
+  const splitIdx = columns.findIndex(c => c.toLowerCase() === 'split');
+  const amtIdx = columns.findIndex(c => c.toLowerCase() === 'amount');
+  const balIdx = columns.findIndex(c => c.toLowerCase() === 'balance');
+  const debitIdx = columns.findIndex(c => c.toLowerCase() === 'debit');
+  const creditIdx = columns.findIndex(c => c.toLowerCase() === 'credit');
+  const hasDebitCreditColumns = debitIdx >= 0 && creditIdx >= 0;
+
+  // Chart-of-accounts lookups: authoritative AcctNum and Classification.
+  const byId = new Map<string, any>();
+  const byName = new Map<string, any>();
+  const byNum = new Map<string, any>();
+  for (const a of accountList ?? []) {
+    if (a?.Id != null) byId.set(String(a.Id), a);
+    if (a?.Name) byName.set(String(a.Name).toLowerCase(), a);
+    if (a?.FullyQualifiedName) byName.set(String(a.FullyQualifiedName).toLowerCase(), a);
+    if (a?.AcctNum) byNum.set(String(a.AcctNum).toLowerCase(), a);
+  }
+
+  function colVal(cd: any[], idx: number): string {
+    return idx >= 0 ? (cd?.[idx]?.value ?? '') : '';
+  }
+
+  const accounts: any[] = [];
+
+  function processSection(row: any): void {
+    const headerCd = row.Header?.ColData?.[0];
+    const accountHeader = String(headerCd?.value ?? '');
+    const headerId = headerCd?.id != null ? String(headerCd.id) : '';
+
+    // "2400-01 Advance From H2 Energy" → number "2400-01" (sub-account
+    // numbers contain separators, so \d+ alone never matched them).
+    const m = accountHeader.match(/^([0-9][\w.\-]*)\s+(.+)$/);
+    let accountNumber = m ? m[1] : '';
+    const accountName = m ? m[2] : accountHeader;
+
+    const acct =
+      (headerId && byId.get(headerId)) ||
+      byName.get(accountHeader.toLowerCase()) ||
+      byName.get(accountName.toLowerCase()) ||
+      (accountNumber && byNum.get(accountNumber.toLowerCase())) ||
+      null;
+    if (acct?.AcctNum) accountNumber = String(acct.AcctNum);
+    const classification = acct ? String(acct.Classification ?? '') : '';
+    const creditNormal = CREDIT_NORMAL_CLASSIFICATIONS.has(classification);
+
+    const transactions: any[] = [];
+    let totalDebits = 0;
+    let totalCredits = 0;
+    let endingBalance = 0;
+
+    for (const txnRow of row.Rows?.Row ?? []) {
+      if (txnRow.Header || txnRow.Rows) {
+        processSection(txnRow); // nested sub-account section
+        continue;
+      }
+      if (txnRow.Summary) continue; // section totals are not transactions
+      const cd = txnRow.ColData ?? [];
+      if (!cd.length) continue;
+
+      const amount = moneyValue(colVal(cd, amtIdx));
+      const balance = moneyValue(colVal(cd, balIdx));
+
+      let debit = 0;
+      let credit = 0;
+      if (hasDebitCreditColumns) {
+        debit = moneyValue(colVal(cd, debitIdx));
+        credit = moneyValue(colVal(cd, creditIdx));
+      } else if (creditNormal) {
+        // Signed amount is positive in the account's normal direction —
+        // for liability/equity/income accounts, positive means CREDIT.
+        if (amount >= 0) credit = amount;
+        else debit = -amount;
+      } else {
+        if (amount >= 0) debit = amount;
+        else credit = -amount;
+      }
+
+      totalDebits += debit;
+      totalCredits += credit;
+      if (balance !== 0) endingBalance = balance; // track last non-zero balance
+
+      transactions.push({
+        date: colVal(cd, dateIdx),
+        type: colVal(cd, typeIdx),
+        doc_number: colVal(cd, numIdx),
+        name: colVal(cd, nameIdx),
+        memo: colVal(cd, memoIdx),
+        split_account: colVal(cd, splitIdx),
+        amount: amtIdx >= 0 ? amount : debit - credit,
+        debit,
+        credit,
+        balance,
+      });
+    }
+
+    // Ending balance from Summary if available — prefer this over last transaction
+    if (row.Summary?.ColData) {
+      const cd = row.Summary.ColData;
+      const summaryBalance = balIdx >= 0 && cd[balIdx]?.value
+        ? moneyValue(cd[balIdx].value)
+        : moneyValue(cd[cd.length - 1]?.value ?? '0');
+      if (summaryBalance !== 0) endingBalance = summaryBalance;
+    }
+
+    accounts.push({
+      number: accountNumber,
+      name: accountName,
+      classification,
+      transactions,
+      total_debits: Math.round(totalDebits * 100) / 100,
+      total_credits: Math.round(totalCredits * 100) / 100,
+      ending_balance: Math.round(endingBalance * 100) / 100,
+    });
+  }
+
+  for (const row of reportData?.Rows?.Row ?? []) {
+    if (row.Header || row.Rows) processSection(row);
+  }
+
+  return {
+    client: clientName,
+    period: { start: startDate, end: endDate },
+    debit_credit_source: hasDebitCreditColumns ? 'report_columns' : 'amount_sign_by_classification',
+    accounts,
+    total_accounts: accounts.length,
+    total_transactions: accounts.reduce((sum: number, a: any) => sum + a.transactions.length, 0),
+  };
+}
+
+// ─── QBO query-result noise stripping ─────────────────────────────────────────
+// SELECT * responses carry JAXB extension blobs (PurchaseEx, InvoiceEx, …),
+// empty CustomExtensions arrays, and domain/sparse flags on every record —
+// roughly doubling the payload with zero information. MetaData is kept
+// (Create/LastUpdated times are genuinely useful).
+
+const QBO_NOISE_KEY = /^(domain|sparse|CustomExtensions)$|^[A-Z][A-Za-z]*Ex$/;
+
+export function stripQboNoise<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map((v) => stripQboNoise(v)) as unknown as T;
+  }
+  if (value !== null && typeof value === 'object') {
+    const out: any = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (QBO_NOISE_KEY.test(k)) continue;
+      out[k] = stripQboNoise(v);
+    }
+    return out;
+  }
+  return value;
 }
 
 export interface BudgetFilters {

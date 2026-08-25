@@ -58,11 +58,6 @@ describe('update_deposit — lines REPLACE, never append', () => {
     expect(total).toBe(25); // NOT 175
   });
 
-  it('linked_payment_ids=[] alone still triggers the replace path (empty Line, loud QBO rejection beats silent append)', () => {
-    const payload = buildDepositUpdatePayload(existingDeposit, { linked_payment_ids: [] });
-    expect(payload.Line).toEqual([]);
-  });
-
   it('replaces with the union of linked payments and direct lines, payments first', () => {
     const payload = buildDepositUpdatePayload(existingDeposit, {
       linked_payment_ids: [{ payment_id: 'pmt-9', amount: 400 }],
@@ -77,6 +72,79 @@ describe('update_deposit — lines REPLACE, never append', () => {
     const payload = buildDepositUpdatePayload(existingDeposit, { private_note: 'metadata-only edit' });
     expect(payload.Line).toBe(existingDeposit.Line);
     expect(payload.PrivateNote).toBe('metadata-only edit');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-kind semantics (2026-08-24): each array independently — provided
+// replaces that kind, OMITTED preserves that kind (rebuilt without Ids),
+// linked_payment_ids: [] explicitly returns payments to Undeposited Funds.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const mixedDeposit = {
+  Id: '60',
+  SyncToken: '1',
+  DepositToAccountRef: { value: '35' },
+  TxnDate: '2026-07-07',
+  TotalAmt: 480.08,
+  Line: [
+    { Id: '1', LineNum: 1, Amount: 400, LinkedTxn: [{ TxnId: 'pmt-1', TxnType: 'Payment' }] },
+    {
+      Id: '2',
+      LineNum: 2,
+      Amount: 80.08,
+      DetailType: 'DepositLineDetail',
+      Description: 'vendor refund',
+      DepositLineDetail: { AccountRef: { value: '182' }, Entity: { value: '6', type: 'VENDOR' } },
+    },
+  ],
+};
+
+describe('update_deposit — per-kind preserve/replace semantics', () => {
+  it('deposit_lines passed + linked_payment_ids OMITTED preserves the linked payment (never silently unlinks it)', () => {
+    const payload = buildDepositUpdatePayload(mixedDeposit, {
+      deposit_lines: [{ amount: 80.08, account_id: '73', entity_id: '6', entity_type: 'Vendor' }],
+    });
+    expect(payload.Line).toHaveLength(2);
+    expect(payload.Line[0].LinkedTxn).toEqual([{ TxnId: 'pmt-1', TxnType: 'Payment' }]);
+    expect(payload.Line[0].Amount).toBe(400);
+    expect(payload.Line[1].DepositLineDetail.AccountRef.value).toBe('73'); // re-coded
+    expect(payload.Line[1].DepositLineDetail.Entity).toEqual({ value: '6', type: 'VENDOR' });
+  });
+
+  it('linked_payment_ids passed + deposit_lines OMITTED preserves the direct line', () => {
+    const payload = buildDepositUpdatePayload(mixedDeposit, {
+      linked_payment_ids: [{ payment_id: 'pmt-1', amount: 400 }],
+    });
+    expect(payload.Line).toHaveLength(2);
+    expect(payload.Line[1].DepositLineDetail.AccountRef.value).toBe('182'); // preserved as-is
+    expect(payload.Line[1].Description).toBe('vendor refund');
+  });
+
+  it('linked_payment_ids: [] explicitly removes the linked payment (returns it to Undeposited Funds)', () => {
+    const payload = buildDepositUpdatePayload(mixedDeposit, { linked_payment_ids: [] });
+    expect(payload.Line).toHaveLength(1); // only the preserved direct line
+    expect(payload.Line[0].DepositLineDetail.AccountRef.value).toBe('182');
+    expect(payload.Line[0].LinkedTxn).toBeUndefined();
+  });
+
+  it('never carries fetched Id/LineNum into the outgoing Line array (preserved lines are rebuilt clean)', () => {
+    const payload = buildDepositUpdatePayload(mixedDeposit, {
+      deposit_lines: [{ amount: 80.08, account_id: '73' }],
+    });
+    for (const line of payload.Line) {
+      expect(line.Id).toBeUndefined();
+      expect(line.LineNum).toBeUndefined();
+    }
+  });
+
+  it('entity-only change: same account, new Received-From entity', () => {
+    const payload = buildDepositUpdatePayload(mixedDeposit, {
+      linked_payment_ids: [],
+      deposit_lines: [{ amount: 80.08, account_id: '182', entity_id: '9', entity_type: 'Vendor' }],
+    });
+    expect(payload.Line).toHaveLength(1);
+    expect(payload.Line[0].DepositLineDetail.Entity).toEqual({ value: '9', type: 'VENDOR' });
   });
 });
 

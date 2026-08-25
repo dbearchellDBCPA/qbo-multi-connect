@@ -44,6 +44,19 @@ describe('ReportsAPI param threading', () => {
     });
   });
 
+  it('generalLedger threads an explicit columns request', async () => {
+    await reports.generalLedger('r', {
+      startDate: '2026-01-01',
+      endDate: '2026-03-31',
+      columns: 'tx_date,txn_type,debt_amt,credit_amt',
+    });
+    expect(client.get).toHaveBeenCalledWith('r', 'reports/GeneralLedger', {
+      start_date: '2026-01-01',
+      end_date: '2026-03-31',
+      columns: 'tx_date,txn_type,debt_amt,credit_amt',
+    });
+  });
+
   it('generalLedger threads account (IDs) and class/department', async () => {
     await reports.generalLedger('r', {
       startDate: '2026-01-01',

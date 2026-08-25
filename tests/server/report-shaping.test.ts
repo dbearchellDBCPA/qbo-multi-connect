@@ -1,7 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import {
   resolveAccountFilterTerms,
+  expandToDescendants,
+  parseGeneralLedger,
   summarizeGeneralLedger,
+  stripQboNoise,
   filterBudgets,
   budgetToSummary,
 } from '../../src/server/report-shaping.js';
@@ -74,6 +77,50 @@ describe('resolveAccountFilterTerms — name matching', () => {
   });
 });
 
+describe('resolveAccountFilterTerms — dashed sub-account numbers', () => {
+  // 2026-08-24: "1700-00" (and "1700-00 Partnerships Owned") failed to
+  // resolve and was silently dropped from a GL pull.
+  const chart = [
+    { Id: '34', Name: 'Partnerships Owned', AcctNum: '1700-00' },
+    { Id: '35', Name: 'Eastside Fund III', AcctNum: '1700-01' },
+  ];
+
+  it('resolves a dashed account number exactly, without bleeding into siblings', () => {
+    const { ids, unresolved } = resolveAccountFilterTerms(chart, ['1700-00']);
+    expect(ids).toEqual(['34']);
+    expect(unresolved).toEqual([]);
+  });
+
+  it('resolves "dashed-number name" strings via the number token', () => {
+    const { ids } = resolveAccountFilterTerms(chart, ['1700-00 Partnerships Owned']);
+    expect(ids).toEqual(['34']);
+  });
+
+  it('resolves the number even when the account has no AcctNum but embeds it in the Name', () => {
+    const numless = [{ Id: '34', Name: '1700-00 Partnerships Owned' }];
+    const { ids } = resolveAccountFilterTerms(numless, ['1700-00']);
+    expect(ids).toEqual(['34']); // name-substring fallback
+  });
+});
+
+describe('expandToDescendants', () => {
+  const chart = [
+    { Id: '34', Name: 'Partnerships Owned', AcctNum: '1700-00' },
+    { Id: '35', Name: 'Eastside Fund III', AcctNum: '1700-01', ParentRef: { value: '34' } },
+    { Id: '36', Name: 'Westside Fund', AcctNum: '1700-02', ParentRef: { value: '34' } },
+    { Id: '37', Name: 'Westside Fund B', AcctNum: '1700-02-1', ParentRef: { value: '36' } },
+    { Id: '99', Name: 'Unrelated' },
+  ];
+
+  it('expands a parent to itself plus all descendants (grandchildren included)', () => {
+    expect(expandToDescendants(chart, ['34']).sort()).toEqual(['34', '35', '36', '37']);
+  });
+
+  it('leaves leaf accounts alone and never adds unrelated accounts', () => {
+    expect(expandToDescendants(chart, ['35'])).toEqual(['35']);
+  });
+});
+
 describe('resolveAccountFilterTerms — never silent', () => {
   it('reports unmatched terms instead of dropping them', () => {
     const { ids, unresolved } = resolveAccountFilterTerms(CHART, ['9999', 'Checking']);
@@ -128,6 +175,189 @@ describe('summarizeGeneralLedger', () => {
     });
     expect(summary.accounts[0]).not.toHaveProperty('transactions');
     expect(summary.total_transactions).toBe(2);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GL debit/credit attribution (P1, 2026-08-24): QBO's signed amount column is
+// positive in the account's NORMAL-BALANCE direction — "positive = debit" is
+// only true for debit-normal accounts. Liability/equity/income came out
+// swapped (liability deposits reported as debits, income all-debit).
+// ─────────────────────────────────────────────────────────────────────────────
+
+const GL_DEFAULT_COLUMNS = {
+  Column: [
+    { ColTitle: 'Date' }, { ColTitle: 'Transaction Type' }, { ColTitle: 'Num' },
+    { ColTitle: 'Name' }, { ColTitle: 'Memo/Description' }, { ColTitle: 'Split' },
+    { ColTitle: 'Amount' }, { ColTitle: 'Balance' },
+  ],
+};
+
+function glRow(date: string, type: string, amount: string, balance: string, memo = ''): any {
+  return { ColData: [
+    { value: date }, { value: type }, { value: '' }, { value: '' },
+    { value: memo }, { value: 'Truist x2631' }, { value: amount }, { value: balance },
+  ] };
+}
+
+const CHART_FOR_GL = [
+  { Id: '88', Name: 'Advance From H2 Energy', AcctNum: '2400-01', Classification: 'Liability' },
+  { Id: '90', Name: 'Interest – Notes', AcctNum: '3130-00', Classification: 'Revenue' },
+  { Id: '91', Name: 'Directors Fees', AcctNum: '5090-00', Classification: 'Expense' },
+  { Id: '92', Name: 'H3K, LLLP', AcctNum: '1700-01', Classification: 'Asset' },
+];
+
+describe('parseGeneralLedger — classification-based debit/credit (no explicit columns)', () => {
+  const report = {
+    Columns: GL_DEFAULT_COLUMNS,
+    Rows: { Row: [
+      {
+        Header: { ColData: [{ value: '2400-01 Advance From H2 Energy', id: '88' }] },
+        Rows: { Row: [
+          glRow('2026-03-24', 'Deposit', '13100.00', '13100.00'),
+          glRow('2026-04-16', 'Deposit', '35000.00', '48100.00'),
+          glRow('2026-04-30', 'Journal Entry', '-6666.67', '41433.33', 'mgmt fee'),
+        ] },
+        Summary: { ColData: [{ value: 'Total for 2400-01' }, { value: '' }, { value: '' }, { value: '' }, { value: '' }, { value: '' }, { value: '' }, { value: '41433.33' }] },
+      },
+      {
+        Header: { ColData: [{ value: '5090-00 Directors Fees', id: '91' }] },
+        Rows: { Row: [glRow('2026-05-01', 'Bill', '20000.00', '20000.00')] },
+      },
+      {
+        Header: { ColData: [{ value: '1700-01 H3K, LLLP', id: '92' }] },
+        Rows: { Row: [glRow('2026-06-01', 'Journal Entry', '-190000.00', '-190000.00')] },
+      },
+    ] },
+  };
+  const parsed = parseGeneralLedger(report, 'H2 Capital', '2026-01-01', '2026-12-31', CHART_FOR_GL);
+
+  it('liability: positive amounts are CREDITS (increase the liability), negative are debits', () => {
+    const liab = parsed.accounts.find((a: any) => a.number === '2400-01');
+    expect(liab.total_credits).toBe(48100);
+    expect(liab.total_debits).toBe(6666.67);
+    expect(liab.transactions[0]).toMatchObject({ amount: 13100, debit: 0, credit: 13100 });
+    expect(liab.transactions[2]).toMatchObject({ amount: -6666.67, debit: 6666.67, credit: 0 });
+    expect(liab.classification).toBe('Liability');
+  });
+
+  it('expense: positive amounts stay DEBITS (unchanged behavior for debit-normal accounts)', () => {
+    const exp = parsed.accounts.find((a: any) => a.number === '5090-00');
+    expect(exp.total_debits).toBe(20000);
+    expect(exp.total_credits).toBe(0);
+  });
+
+  it('asset: negative amounts stay CREDITS (unchanged behavior)', () => {
+    const asset = parsed.accounts.find((a: any) => a.number === '1700-01');
+    expect(asset.total_credits).toBe(190000);
+    expect(asset.total_debits).toBe(0);
+  });
+
+  it('reports the attribution source and populates number from the header', () => {
+    expect(parsed.debit_credit_source).toBe('amount_sign_by_classification');
+    expect(parsed.accounts.map((a: any) => a.number).sort()).toEqual(['1700-01', '2400-01', '5090-00']);
+  });
+
+  it('falls back to debit-normal when the account is unknown (no chart provided)', () => {
+    const noChart = parseGeneralLedger(report, 'H2 Capital', '2026-01-01', '2026-12-31');
+    const liab = noChart.accounts.find((a: any) => a.number === '2400-01');
+    expect(liab.total_debits).toBe(48100); // old behavior — only without classification data
+  });
+});
+
+describe('parseGeneralLedger — explicit Debit/Credit report columns win', () => {
+  const report = {
+    Columns: { Column: [
+      { ColTitle: 'Date' }, { ColTitle: 'Transaction Type' }, { ColTitle: 'Num' },
+      { ColTitle: 'Name' }, { ColTitle: 'Memo/Description' }, { ColTitle: 'Split' },
+      { ColTitle: 'Debit' }, { ColTitle: 'Credit' }, { ColTitle: 'Amount' }, { ColTitle: 'Balance' },
+    ] },
+    Rows: { Row: [
+      {
+        Header: { ColData: [{ value: '3130-00 Interest – Notes', id: '90' }] },
+        Rows: { Row: [
+          { ColData: [
+            { value: '2026-02-01' }, { value: 'Deposit' }, { value: '' }, { value: '' },
+            { value: '' }, { value: 'Truist' }, { value: '' }, { value: '6807.10' }, { value: '6807.10' }, { value: '6807.10' },
+          ] },
+        ] },
+      },
+    ] },
+  };
+
+  it('uses the report columns directly and tags the source', () => {
+    const parsed = parseGeneralLedger(report, 'H2 Capital', '2026-01-01', '2026-12-31', CHART_FOR_GL);
+    expect(parsed.debit_credit_source).toBe('report_columns');
+    const income = parsed.accounts[0];
+    expect(income.transactions[0]).toMatchObject({ debit: 0, credit: 6807.1 });
+    expect(income.total_credits).toBe(6807.1);
+    expect(income.total_debits).toBe(0);
+  });
+});
+
+describe('parseGeneralLedger — dashed account numbers and AcctNum backfill', () => {
+  it('extracts dashed numbers from the header and prefers the chart\'s AcctNum', () => {
+    const report = {
+      Columns: GL_DEFAULT_COLUMNS,
+      Rows: { Row: [
+        {
+          // header without id and with a name-only label — number comes from
+          // the chart lookup by name
+          Header: { ColData: [{ value: 'Advance From H2 Energy' }] },
+          Rows: { Row: [glRow('2026-03-24', 'Deposit', '100.00', '100.00')] },
+        },
+      ] },
+    };
+    const parsed = parseGeneralLedger(report, 'H2 Capital', '2026-01-01', '2026-12-31', CHART_FOR_GL);
+    expect(parsed.accounts[0].number).toBe('2400-01'); // backfilled from AcctNum
+    expect(parsed.accounts[0].classification).toBe('Liability');
+    expect(parsed.accounts[0].total_credits).toBe(100);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// query_transactions noise stripping (P3)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('stripQboNoise', () => {
+  it('removes PurchaseEx/CustomExtensions/domain/sparse recursively but keeps MetaData', () => {
+    const noisy = {
+      QueryResponse: {
+        Purchase: [
+          {
+            Id: '54',
+            domain: 'QBO',
+            sparse: false,
+            TotalAmt: 100,
+            MetaData: { CreateTime: '2026-08-11T10:00:00-07:00', LastUpdatedTime: '2026-08-11T10:05:00-07:00' },
+            PurchaseEx: { any: [{ name: '{http://schema.intuit.com/finance/v3}NameValue', declaredType: 'x' }] },
+            Line: [
+              { Id: '1', Amount: 100, CustomExtensions: [], AccountBasedExpenseLineDetail: { AccountRef: { value: '62' } } },
+            ],
+          },
+        ],
+        maxResults: 1,
+      },
+      time: '2026-08-24T12:00:00-07:00',
+    };
+    const clean: any = stripQboNoise(noisy);
+    const purchase = clean.QueryResponse.Purchase[0];
+    expect(purchase.PurchaseEx).toBeUndefined();
+    expect(purchase.domain).toBeUndefined();
+    expect(purchase.sparse).toBeUndefined();
+    expect(purchase.Line[0].CustomExtensions).toBeUndefined();
+    expect(purchase.MetaData.CreateTime).toBe('2026-08-11T10:00:00-07:00');
+    expect(purchase.TotalAmt).toBe(100);
+    expect(purchase.Line[0].AccountBasedExpenseLineDetail.AccountRef.value).toBe('62');
+    expect(clean.time).toBe('2026-08-24T12:00:00-07:00');
+  });
+
+  it('strips other *Ex JAXB extension blobs too, without touching normal fields', () => {
+    const clean: any = stripQboNoise({ InvoiceEx: { x: 1 }, DepositEx: { y: 2 }, Description: 'keep', TaxCodeRef: { value: 'NON' } });
+    expect(clean.InvoiceEx).toBeUndefined();
+    expect(clean.DepositEx).toBeUndefined();
+    expect(clean.Description).toBe('keep');
+    expect(clean.TaxCodeRef).toEqual({ value: 'NON' });
   });
 });
 
