@@ -27,6 +27,9 @@ import {
   stripQboNoise,
   filterBudgets,
   budgetToSummary,
+  precheckBudgetVsActuals,
+  explainBudgetVsActualsFailure,
+  reportPeriodWarning,
   formatCurrency,
   headerPeriod,
   periodMismatchNote,
@@ -313,6 +316,15 @@ function annotationsForTool(name: string): ToolAnnotations {
   return { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true };
 }
 
+/**
+ * Build a strict argument schema from a raw shape. Unknown keys are rejected
+ * with a message that names them (see the registration shim below).
+ */
+function strictArgs(shape: Record<string, any>): z.ZodTypeAny {
+  // zod's own message names the offending key(s): 'Unrecognized key: "as_of_date"'.
+  return z.object(shape).strict();
+}
+
 // ─── MCP Server Setup ─────────────────────────────────────────────────────────
 
 export async function registerMcpRoutes(
@@ -331,11 +343,14 @@ export async function registerMcpRoutes(
       version: '1.0.0',
     });
 
-    // Inject safety annotations into every tool registration without touching
-    // the ~79 individual call sites. The existing calls use the 4-arg form
-    // tool(name, description, schema, cb); we splice the annotations object in
-    // just before the callback to upgrade them to the 5-arg overload
-    // tool(name, description, schema, annotations, cb).
+    // Every tool below registers with the 4-arg form tool(name, description,
+    // shape, cb). This shim routes each one through registerTool so we can
+    // (a) inject safety annotations without touching ~79 call sites and
+    // (b) make the argument schema STRICT. A plain z.object() strips unknown
+    // keys, which is how get_trial_balance(as_of_date=…) silently returned
+    // the default-period report (2026-09-05): the date never reached the
+    // handler and nothing said so. With .strict() an unrecognized argument
+    // fails the call and names the key, so the caller can fix it.
     const registerToolRaw = server.tool.bind(server);
     (server as any).tool = (name: string, ...rest: any[]) => {
       // Read-only keys never see write tools at all — skipping registration
@@ -345,8 +360,18 @@ export async function registerMcpRoutes(
       if (!scope.canWrite && !isReadOnlyTool(name)) return undefined;
       if (rest.length > 0 && typeof rest[rest.length - 1] === 'function') {
         const cb = rest[rest.length - 1];
-        const head = rest.slice(0, -1); // [description?, schema?]
-        return (registerToolRaw as any)(name, ...head, annotationsForTool(name), cb);
+        const head = rest.slice(0, -1); // [description?, shape?]
+        const description = typeof head[0] === 'string' ? head[0] : undefined;
+        const shape = head.find((h) => h && typeof h === 'object') ?? {};
+        return server.registerTool(
+          name,
+          {
+            description,
+            inputSchema: strictArgs(shape),
+            annotations: annotationsForTool(name),
+          } as any,
+          cb
+        );
       }
       return (registerToolRaw as any)(name, ...rest);
     };
@@ -443,12 +468,12 @@ export async function registerMcpRoutes(
     // ── get_balance_sheet ─────────────────────────────────────────────────────
     server.tool(
       'get_balance_sheet',
-      'Get Balance Sheet report for a QBO client as of as_of_date (sent to Intuit as the report end_date). Defaults to Accrual basis. When summarize_by is set (any value, including Total) the raw QBO report JSON is returned instead of formatted text — a Month series over a year can run ~100-400k characters, so prefer Quarter/Year when column detail is not needed.',
+      'Get Balance Sheet report for a QBO client as of as_of_date (sent to Intuit as the report end_date; the response Header.EndPeriod echoes the date QBO actually applied). Defaults to Accrual basis. TREND: start_date + as_of_date + summarize_by="Month" returns one column per month-end in one call (e.g. start_date=2025-08-01, as_of_date=2026-08-31 → 13 columns). When summarize_by is set (any value, including Total) the raw QBO report JSON is returned instead of formatted text — a Month series over a year can run ~100-400k characters, so prefer Quarter/Year when column detail is not needed.',
       {
         client_name: z.string().describe('The name of the client company'),
-        as_of_date: z.string().describe('As-of date in YYYY-MM-DD format'),
+        as_of_date: z.string().describe('As-of date in YYYY-MM-DD format (sent to Intuit as end_date)'),
         accounting_method: z.enum(['Cash', 'Accrual']).optional().describe('Cash or Accrual basis. Defaults to Accrual.'),
-        summarize_by: z.enum(['Total', 'Month', 'Quarter', 'Year', 'Classes', 'Departments']).optional().describe('Optional: how to summarize columns. Returns raw JSON when set.'),
+        summarize_by: z.enum(['Total', 'Month', 'Quarter', 'Year', 'Classes', 'Departments']).optional().describe('Optional: how to summarize columns. Returns raw JSON when set. Month/Quarter/Year give one balance column per period-end between start_date and as_of_date.'),
         start_date: z.string().optional().describe('Optional: series start (YYYY-MM-DD) for multi-column summarize_by reports. Defaults to QBO\'s fiscal-year start containing as_of_date.'),
         class_id: z.string().optional().describe('Optional: QBO Class ID (or comma-separated IDs) to filter by class.'),
         department_id: z.string().optional().describe('Optional: QBO Department/Location ID (or comma-separated IDs).'),
@@ -457,6 +482,12 @@ export async function registerMcpRoutes(
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) {
           return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
+        }
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(as_of_date)) {
+          return { content: [{ type: 'text', text: `as_of_date must be YYYY-MM-DD (got "${as_of_date}").` }] };
+        }
+        if (start_date && start_date > as_of_date) {
+          return { content: [{ type: 'text', text: `start_date ${start_date} is after as_of_date ${as_of_date}.` }] };
         }
         try {
           const report = await qboManager.reports.balanceSheet(realmId, {
@@ -470,7 +501,12 @@ export async function registerMcpRoutes(
           if (summarize_by) {
             // Description promises raw JSON whenever summarize_by is set —
             // including Total, so callers can see the Header QBO actually applied.
-            return { content: [{ type: 'text', text: JSON.stringify(report, null, 2) }] };
+            // A period the Header does not confirm is flagged ahead of the JSON.
+            const warning = reportPeriodWarning(report, { start: start_date, end: as_of_date }, 'Balance Sheet');
+            const content: Array<{ type: 'text'; text: string }> = [];
+            if (warning) content.push({ type: 'text', text: warning });
+            content.push({ type: 'text', text: JSON.stringify(report, null, 2) });
+            return { content };
           }
           const formatted = formatBalanceSheet(report, client_name, as_of_date);
           return { content: [{ type: 'text', text: formatted }] };
@@ -483,25 +519,38 @@ export async function registerMcpRoutes(
     // ── get_trial_balance ─────────────────────────────────────────────────────
     server.tool(
       'get_trial_balance',
-      'Get Trial Balance report for a QBO client with proper Debit/Credit column parsing. Defaults to Accrual basis.',
+      'Get Trial Balance report for a QBO client with proper Debit/Credit column parsing. Pass as_of_date for a point-in-time trial balance (sent to Intuit as end_date; the output echoes the period QBO actually applied). start_date/end_date are the equivalent explicit range. Defaults to Accrual basis.',
       {
         client_name: z.string().describe('The name of the client company'),
+        as_of_date: z.string().optional().describe('As-of date in YYYY-MM-DD format — balances through this date (sent to Intuit as end_date). Use this OR end_date.'),
         start_date: z.string().optional().describe('Start date in YYYY-MM-DD format (optional)'),
-        end_date: z.string().optional().describe('End date in YYYY-MM-DD format (optional)'),
+        end_date: z.string().optional().describe('End date in YYYY-MM-DD format (optional; same as as_of_date)'),
         accounting_method: z.enum(['Cash', 'Accrual']).optional().describe('Cash or Accrual basis. Defaults to Accrual.'),
       },
-      async ({ client_name, start_date, end_date, accounting_method }) => {
+      async ({ client_name, as_of_date, start_date, end_date, accounting_method }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) {
           return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
         }
+        if (as_of_date && end_date && as_of_date !== end_date) {
+          return { content: [{ type: 'text', text: `as_of_date (${as_of_date}) and end_date (${end_date}) disagree — pass one of them.` }] };
+        }
+        const through = end_date ?? as_of_date;
+        for (const [label, value] of [['as_of_date', as_of_date], ['start_date', start_date], ['end_date', end_date]] as const) {
+          if (value && !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+            return { content: [{ type: 'text', text: `${label} must be YYYY-MM-DD (got "${value}").` }] };
+          }
+        }
+        if (start_date && through && start_date > through) {
+          return { content: [{ type: 'text', text: `start_date ${start_date} is after ${end_date ? 'end_date' : 'as_of_date'} ${through}.` }] };
+        }
         try {
           const report = await qboManager.reports.trialBalance(realmId, {
             startDate: start_date,
-            endDate: end_date,
+            endDate: through,
             accountingMethod: accounting_method,
           });
-          const formatted = formatTrialBalance(report, client_name, start_date, end_date);
+          const formatted = formatTrialBalance(report, client_name, start_date, through);
           return { content: [{ type: 'text', text: formatted }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error fetching Trial Balance: ${err?.message ?? err}` }] };
@@ -1007,32 +1056,38 @@ export async function registerMcpRoutes(
     // ── get_budget ────────────────────────────────────────────────────────────
     server.tool(
       'get_budget',
-      'Get budget(s) for a QBO client. DEFAULT (no budget_id): returns a SUMMARY list — one row per budget with budget_id, name, budget_type (ProfitAndLoss or BalanceSheet), budget_entry_type (Yearly | Quarterly | Monthly), start/end dates, active, and entry_count — so the right budget can be found without pulling everything. Pass budget_id for full (account × period) entries of one budget, or summary_only=false to force full entries for every matched budget. SIZE: a full-detail all-budgets pull can exceed 3M characters for companies with many budgets — stay in summary mode until you know which budget you need. Narrow with name_contains and/or active_on.',
+      'Get budget(s) for a QBO client. DEFAULT (no budget_id): returns a lightweight LIST — one row per budget with budget_id, name, budget_type (ProfitAndLoss or BalanceSheet), budget_entry_type (Yearly | Quarterly | Monthly), start/end dates, active, and entry_count — so the right budget can be found without pulling everything. Pass budget_id for full (account × period) entries of one budget, or list_only=false to force full entries for every matched budget. SIZE: a full-detail all-budgets pull can exceed 3M characters for companies with many budgets — stay in list mode until you know which budget you need. Narrow with fiscal_year (e.g. 2026), name_contains and/or active_on.',
       {
         client_name: z.string().describe('The name of the client company'),
         budget_id: z.string().optional().describe('Optional: a specific Budget ID. When provided, full entries are returned by default.'),
         active_only: z.boolean().optional().describe('If true, only return active budgets (default: true).'),
+        fiscal_year: z.union([z.number().int(), z.string()]).optional().describe('Optional: a 4-digit year — only return budgets whose start/end range overlaps that calendar year (e.g. 2026 finds the FY2026 budget).'),
         name_contains: z.string().optional().describe('Optional: case-insensitive substring filter on the budget name (e.g. "FY26").'),
         active_on: z.string().optional().describe('Optional: a date (YYYY-MM-DD) — only return budgets whose start/end range covers it.'),
-        summary_only: z.boolean().optional().describe('Metadata only, no entries. Defaults to true when budget_id is omitted, false when it is provided; pass explicitly to override either default.'),
+        list_only: z.boolean().optional().describe('Metadata only (id / name / type / entry type / start / end / entry_count), no entries. Defaults to true when budget_id is omitted, false when it is provided; pass explicitly to override either default.'),
+        summary_only: z.boolean().optional().describe('Alias of list_only (kept for existing callers).'),
       },
-      async ({ client_name, budget_id, active_only = true, name_contains, active_on, summary_only }) => {
+      async ({ client_name, budget_id, active_only = true, fiscal_year, name_contains, active_on, list_only, summary_only }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) {
           return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
         }
         try {
+          if (list_only !== undefined && summary_only !== undefined && list_only !== summary_only) {
+            return { content: [{ type: 'text', text: 'list_only and summary_only are the same switch — pass one of them.' }] };
+          }
           const conditions: string[] = [];
-          if (budget_id) conditions.push(`Id = '${budget_id}'`);
+          if (budget_id) conditions.push(`Id = '${escapeQboString(budget_id)}'`);
           if (active_only) conditions.push(`Active = true`);
           const where = conditions.length ? ` WHERE ${conditions.join(' AND ')}` : '';
           const result: any = await qboManager.transactions.rawQuery(realmId, `SELECT * FROM Budget${where} MAXRESULTS 1000`);
           const allBudgets: any[] = result?.QueryResponse?.Budget ?? [];
-          const budgets = filterBudgets(allBudgets, { nameContains: name_contains, activeOn: active_on });
+          const budgets = filterBudgets(allBudgets, { nameContains: name_contains, activeOn: active_on, fiscalYear: fiscal_year });
 
           if (budgets.length === 0) {
             const filterNote = [
               budget_id ? `id ${budget_id}` : '',
+              fiscal_year !== undefined ? `fiscal year ${fiscal_year}` : '',
               name_contains ? `name containing "${name_contains}"` : '',
               active_on ? `active on ${active_on}` : '',
             ].filter(Boolean).join(', ');
@@ -1041,10 +1096,10 @@ export async function registerMcpRoutes(
 
           // Summary metadata unless full detail was requested — a lone
           // get_budget(client_name) call must never dump every entry again.
-          const wantSummary = summary_only ?? !budget_id;
+          const wantSummary = list_only ?? summary_only ?? !budget_id;
           if (wantSummary) {
             const output = budgets.map(budgetToSummary);
-            return { content: [{ type: 'text', text: JSON.stringify({ client: client_name, total_budgets: output.length, detail_level: 'summary', hint: 'Pass budget_id (or summary_only=false) for full account × period entries.', budgets: output }, null, 2) }] };
+            return { content: [{ type: 'text', text: JSON.stringify({ client: client_name, total_budgets: output.length, detail_level: 'summary', hint: 'Pass budget_id (or list_only=false) for full account × period entries.', budgets: output }, null, 2) }] };
           }
 
           // Resolve account IDs → names from the chart of accounts
@@ -1086,31 +1141,63 @@ export async function registerMcpRoutes(
     // ── get_budget_vs_actuals ─────────────────────────────────────────────────
     server.tool(
       'get_budget_vs_actuals',
-      'Get the Budget vs Actuals report for a QBO client. Returns variance between budgeted and actual amounts per account. Defaults to Accrual basis.',
+      'Get the Budget vs Actuals report for a QBO client (raw QBO JSON: Actual / Budget / over Budget / % of Budget per account). Period is start_date+end_date (must sit inside the budget\'s own fiscal year — checked against the budget before calling Intuit) or date_macro. Always pass budget_id (find it with get_budget). KNOWN INTUIT LIMITS (verified 2026-09-05): summarize_by Month/Quarter can fail inside Intuit\'s report engine (NullPointerException) — the error explains the workarounds; and a response whose Header lacks StartPeriod/EndPeriod is flagged, because such a report was not limited to the requested dates. For a month-by-month variance, combine get_budget(budget_id) with get_profit_and_loss(summarize_by="Month"). Defaults to Accrual basis.',
       {
         client_name: z.string().describe('The name of the client company'),
-        start_date: z.string().describe('Start date in YYYY-MM-DD format'),
-        end_date: z.string().describe('End date in YYYY-MM-DD format'),
-        budget_id: z.string().optional().describe('Optional: a specific Budget ID. If omitted, QBO uses the company default.'),
-        summarize_by: z.enum(['Total', 'Month', 'Quarter', 'Year']).optional().describe('Optional: how to summarize columns.'),
+        start_date: z.string().optional().describe('Start date in YYYY-MM-DD format. Required with end_date unless date_macro is given.'),
+        end_date: z.string().optional().describe('End date in YYYY-MM-DD format. Required with start_date unless date_macro is given.'),
+        date_macro: z.string().optional().describe('Optional alternative to start/end dates: an Intuit predefined period such as "This Fiscal Year-to-date", "This Fiscal Year", "Last Fiscal Year", "This Month", "Last Month", "This Fiscal Quarter".'),
+        budget_id: z.string().optional().describe('Budget ID (from get_budget). Strongly recommended — if omitted, QBO picks a default budget and the period cannot be validated.'),
+        summarize_by: z.enum(['Total', 'Month', 'Quarter', 'Year']).optional().describe('Optional: how to summarize columns. Total is the reliable choice; see the tool description for Month/Quarter.'),
         accounting_method: z.enum(['Cash', 'Accrual']).optional().describe('Cash or Accrual basis. Defaults to Accrual.'),
       },
-      async ({ client_name, start_date, end_date, budget_id, summarize_by, accounting_method }) => {
+      async ({ client_name, start_date, end_date, date_macro, budget_id, summarize_by, accounting_method }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) {
           return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
+        }
+        const request = {
+          budgetId: budget_id,
+          startDate: start_date,
+          endDate: end_date,
+          dateMacro: date_macro,
+          summarizeBy: summarize_by,
+          accountingMethod: accounting_method,
+        };
+        let budget: any | null = null;
+        try {
+          // Budget metadata only (no BudgetDetail) — a few hundred bytes per
+          // budget — so the request can be checked against the budget's own
+          // fiscal year before Intuit is asked for anything.
+          const result: any = await qboManager.transactions.rawQuery(
+            realmId,
+            'SELECT Id, Name, StartDate, EndDate, BudgetType, BudgetEntryType, Active FROM Budget MAXRESULTS 1000'
+          );
+          const budgets: any[] = result?.QueryResponse?.Budget ?? [];
+          const check = precheckBudgetVsActuals(request, budgets);
+          if (check.error) {
+            return { content: [{ type: 'text', text: check.error }] };
+          }
+          budget = check.budget;
+        } catch (err: any) {
+          return { content: [{ type: 'text', text: `Error looking up budgets before running Budget vs Actuals: ${err?.message ?? err}` }] };
         }
         try {
           const report = await qboManager.reports.budgetVsActuals(realmId, {
             startDate: start_date,
             endDate: end_date,
+            dateMacro: date_macro,
             budgetId: budget_id,
             summarizeColumnBy: summarize_by,
             accountingMethod: accounting_method,
           });
-          return { content: [{ type: 'text', text: JSON.stringify(report, null, 2) }] };
+          const content: Array<{ type: 'text'; text: string }> = [];
+          const warning = reportPeriodWarning(report, { start: start_date, end: end_date }, 'Budget vs Actuals');
+          if (warning) content.push({ type: 'text', text: warning });
+          content.push({ type: 'text', text: JSON.stringify(report, null, 2) });
+          return { content };
         } catch (err: any) {
-          return { content: [{ type: 'text', text: `Error fetching Budget vs Actuals: ${err?.message ?? err}` }] };
+          return { content: [{ type: 'text', text: explainBudgetVsActualsFailure(err, request, budget) }] };
         }
       }
     );

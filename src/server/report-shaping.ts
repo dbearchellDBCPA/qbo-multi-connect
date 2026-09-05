@@ -361,11 +361,23 @@ export interface BudgetFilters {
   nameContains?: string;
   /** YYYY-MM-DD — keep budgets whose StartDate..EndDate range covers this date. */
   activeOn?: string;
+  /**
+   * Calendar year (e.g. 2026) — keep budgets whose StartDate..EndDate range
+   * overlaps any part of that year. A budget on a non-calendar fiscal year
+   * (say Jul 2025–Jun 2026) therefore matches both 2025 and 2026.
+   */
+  fiscalYear?: number | string;
 }
 
 /** Apply name/date filters to raw QBO Budget entities. */
 export function filterBudgets(budgets: any[], filters: BudgetFilters): any[] {
   const needle = filters.nameContains?.toLowerCase().trim();
+  const fy = filters.fiscalYear !== undefined && filters.fiscalYear !== ''
+    ? String(filters.fiscalYear).trim()
+    : undefined;
+  if (fy !== undefined && !/^\d{4}$/.test(fy)) {
+    throw new Error(`fiscal_year must be a 4-digit year (got "${filters.fiscalYear}")`);
+  }
   return (budgets ?? []).filter((b: any) => {
     if (needle && !String(b.Name ?? '').toLowerCase().includes(needle)) return false;
     if (filters.activeOn) {
@@ -373,8 +385,154 @@ export function filterBudgets(budgets: any[], filters: BudgetFilters): any[] {
       if (b.StartDate && String(b.StartDate) > filters.activeOn) return false;
       if (b.EndDate && String(b.EndDate) < filters.activeOn) return false;
     }
+    if (fy !== undefined) {
+      // Overlap test against Jan 1..Dec 31 of the year; open bounds always overlap.
+      if (b.StartDate && String(b.StartDate) > `${fy}-12-31`) return false;
+      if (b.EndDate && String(b.EndDate) < `${fy}-01-01`) return false;
+    }
     return true;
   });
+}
+
+// ─── Budget vs Actuals guard rails ────────────────────────────────────────────
+// Verified live against Intuit on 2026-09-05 (Erick Erickson, LLC, three
+// different budgets): the BudgetVsActuals report answers summarize_column_by
+// Month/Quarter with an HTTP-200 Fault body ("SystemFailureError:
+// java.lang.NullPointerException", code 10000), and a Total request whose
+// dates are ignored comes back with NO StartPeriod/EndPeriod in the Header
+// and an Actual column that is all-time, not the requested period. Neither
+// failure is visible from the raw JSON unless someone looks for it, so the
+// tool checks the request before it goes out and the response when it comes
+// back.
+
+export interface BvaRequest {
+  budgetId?: string;
+  startDate?: string;
+  endDate?: string;
+  dateMacro?: string;
+  summarizeBy?: string;
+  accountingMethod?: string;
+}
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Validate a Budget vs Actuals request against the company's budgets BEFORE
+ * calling Intuit. Returns the matched budget (if any) and a human-readable
+ * error when the request cannot succeed.
+ */
+export function precheckBudgetVsActuals(
+  req: BvaRequest,
+  budgets: any[]
+): { budget: any | null; error: string | null } {
+  const summaries = (budgets ?? []).map(budgetToSummary);
+  const describe = (b: any) => `${b.budget_id} "${b.name}" (${b.budget_type}, ${b.budget_entry_type}, ${b.start_date} → ${b.end_date})`;
+
+  const hasDates = Boolean(req.startDate || req.endDate);
+  if (!hasDates && !req.dateMacro) {
+    return { budget: null, error: 'Provide either start_date + end_date or date_macro (e.g. "This Fiscal Year-to-date").' };
+  }
+  if (hasDates && (!req.startDate || !req.endDate)) {
+    return { budget: null, error: 'start_date and end_date must be given together (or use date_macro instead).' };
+  }
+  if (hasDates && req.dateMacro) {
+    return { budget: null, error: 'Pass either start_date/end_date or date_macro, not both — Intuit resolves the period from one of them and the other is ignored.' };
+  }
+  for (const [label, value] of [['start_date', req.startDate], ['end_date', req.endDate]] as const) {
+    if (value && !ISO_DATE.test(value)) {
+      return { budget: null, error: `${label} must be YYYY-MM-DD (got "${value}").` };
+    }
+  }
+  if (req.startDate && req.endDate && req.startDate > req.endDate) {
+    return { budget: null, error: `start_date ${req.startDate} is after end_date ${req.endDate}.` };
+  }
+
+  let budget: any | null = null;
+  if (req.budgetId) {
+    budget = (budgets ?? []).find((b) => String(b?.Id ?? '') === String(req.budgetId)) ?? null;
+    if (!budget) {
+      const list = summaries.length ? `Budgets in this company:\n  ${summaries.map(describe).join('\n  ')}` : 'This company has no budgets (they are created in the QBO web UI).';
+      return { budget: null, error: `Budget ${req.budgetId} not found. ${list}` };
+    }
+    const meta = budgetToSummary(budget);
+    if (req.startDate && req.endDate && meta.start_date && meta.end_date) {
+      const outside = req.startDate < String(meta.start_date) || req.endDate > String(meta.end_date);
+      if (outside) {
+        const covering = summaries.filter(
+          (b) => b.budget_id !== meta.budget_id && b.start_date && b.end_date && req.startDate! >= b.start_date && req.endDate! <= b.end_date
+        );
+        const hint = covering.length
+          ? `Budgets that do cover ${req.startDate}..${req.endDate}:\n  ${covering.map(describe).join('\n  ')}`
+          : `No budget covers ${req.startDate}..${req.endDate} in full — narrow the dates to one budget's fiscal year.`;
+        return {
+          budget,
+          error: `Requested period ${req.startDate}..${req.endDate} falls outside budget ${describe(meta)}. Intuit's BudgetVsActuals only reports inside the budget's own fiscal year. ${hint}`,
+        };
+      }
+    }
+  }
+  return { budget, error: null };
+}
+
+/** True when an error is Intuit's opaque report-engine failure (code 10000 / NullPointerException). */
+export function isIntuitSystemFailure(err: any): boolean {
+  const text = `${err?.message ?? ''} ${typeof err?.response === 'string' ? err.response : JSON.stringify(err?.response ?? '')}`;
+  return /SystemFailureError|NullPointerException|"code"\s*:\s*"10000"|code 10000/i.test(text);
+}
+
+/**
+ * Turn Intuit's opaque BudgetVsActuals failure into an actionable message:
+ * what was sent, which budget it hit, and the combinations known to work.
+ */
+export function explainBudgetVsActualsFailure(err: any, req: BvaRequest, budget: any | null): string {
+  const sent = Object.entries({
+    budget_id: req.budgetId,
+    start_date: req.startDate,
+    end_date: req.endDate,
+    date_macro: req.dateMacro,
+    summarize_column_by: req.summarizeBy,
+    accounting_method: req.accountingMethod,
+  })
+    .filter(([, v]) => v !== undefined && v !== '')
+    .map(([k, v]) => `${k}=${v}`)
+    .join(', ');
+  const lines: string[] = [];
+  if (isIntuitSystemFailure(err)) {
+    lines.push(`Intuit's report engine rejected this Budget vs Actuals request with an internal error (${err?.message ?? err}).`);
+    lines.push(`Sent: ${sent || '(no params)'}.`);
+    if (budget) {
+      const m = budgetToSummary(budget);
+      lines.push(`Budget: ${m.budget_id} "${m.name}" — ${m.budget_type}, ${m.budget_entry_type}, ${m.start_date} → ${m.end_date}.`);
+    }
+    lines.push(
+      'This failure is on Intuit\'s side, not a bad budget_id: it was reproduced on 2026-09-05 for every summarize_by other than Total (Month and Quarter, three separate budgets, dates fully inside each budget\'s year).',
+      'What works: (1) omit summarize_by (Total) — then check the Header for StartPeriod/EndPeriod, because a Total response that omits them is NOT limited to your dates; (2) use date_macro (e.g. "This Fiscal Year-to-date", "Last Month") instead of start_date/end_date; (3) for a month-by-month view, build it yourself: get_budget(budget_id=…) gives the monthly budget lines and get_profit_and_loss(summarize_by="Month") gives the actuals for the same accounts.'
+    );
+  } else {
+    lines.push(`Error fetching Budget vs Actuals: ${err?.message ?? err}`);
+    lines.push(`Sent: ${sent || '(no params)'}.`);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Warn when a report's Header does not confirm the requested period. For
+ * BudgetVsActuals a missing StartPeriod/EndPeriod meant the Actual column
+ * was all-time (verified 2026-09-05: $6.27M "actual" income against a $1.09M
+ * year-to-date P&L for the same dates). Returns null when the header agrees
+ * or nothing was requested.
+ */
+export function reportPeriodWarning(
+  reportData: any,
+  requested: { start?: string; end?: string },
+  reportLabel = 'report'
+): string | null {
+  if (!requested.start && !requested.end) return null;
+  const actual = headerPeriod(reportData);
+  if (!actual.start && !actual.end) {
+    return `⚠ QBO returned this ${reportLabel} without a StartPeriod/EndPeriod in its Header, so it did not confirm the requested period (${requested.start ?? '…'} to ${requested.end ?? '…'}). The figures may cover a different period (for Budget vs Actuals this has meant ALL-TIME actuals). Cross-check against get_profit_and_loss / get_balance_sheet for the same dates before relying on them, or retry with date_macro.`;
+  }
+  return periodMismatchNote(requested, actual);
 }
 
 /** Metadata-only view of a QBO Budget entity (no per-account entries). */
