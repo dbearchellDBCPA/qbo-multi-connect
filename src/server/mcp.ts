@@ -1056,7 +1056,7 @@ export async function registerMcpRoutes(
     // ── get_budget ────────────────────────────────────────────────────────────
     server.tool(
       'get_budget',
-      'Get budget(s) for a QBO client. DEFAULT (no budget_id): returns a lightweight LIST — one row per budget with budget_id, name, budget_type (ProfitAndLoss or BalanceSheet), budget_entry_type (Yearly | Quarterly | Monthly), start/end dates, active, and entry_count — so the right budget can be found without pulling everything. Pass budget_id for full (account × period) entries of one budget, or list_only=false to force full entries for every matched budget. SIZE: a full-detail all-budgets pull can exceed 3M characters for companies with many budgets — stay in list mode until you know which budget you need. Narrow with fiscal_year (e.g. 2026), name_contains and/or active_on.',
+      'Get budget(s) for a QBO client. DEFAULT (no budget_id): returns a lightweight LIST — one row per budget with budget_id, name, budget_type (ProfitAndLoss — the only type Intuit\'s API currently supports), budget_entry_type (Monthly | Quarterly | Annually), start/end dates, active, and entry_count — so the right budget can be found without pulling everything. Pass budget_id for full (account × period) entries of one budget, or list_only=false to force full entries for every matched budget. SIZE: a full-detail all-budgets pull can exceed 3M characters for companies with many budgets — stay in list mode until you know which budget you need. Narrow with fiscal_year (e.g. 2026), name_contains and/or active_on.',
       {
         client_name: z.string().describe('The name of the client company'),
         budget_id: z.string().optional().describe('Optional: a specific Budget ID. When provided, full entries are returned by default.'),
@@ -1091,7 +1091,7 @@ export async function registerMcpRoutes(
               name_contains ? `name containing "${name_contains}"` : '',
               active_on ? `active on ${active_on}` : '',
             ].filter(Boolean).join(', ');
-            return { content: [{ type: 'text', text: `No budgets found for ${client_name}${filterNote ? ` matching: ${filterNote}` : ''}${allBudgets.length > 0 ? ` (${allBudgets.length} budget(s) exist — loosen the filters or call without them for the summary list)` : ''}. Note: budgets are read-only via the QBO API — they must be created in the QBO web UI.` }] };
+            return { content: [{ type: 'text', text: `No budgets found for ${client_name}${filterNote ? ` matching: ${filterNote}` : ''}${allBudgets.length > 0 ? ` (${allBudgets.length} budget(s) exist — loosen the filters or call without them for the summary list)` : ''}. Budgets are created in the QBO web UI (or via the Budget API); this server only reads them.` }] };
           }
 
           // Summary metadata unless full detail was requested — a lone

@@ -451,7 +451,7 @@ export function precheckBudgetVsActuals(
   if (req.budgetId) {
     budget = (budgets ?? []).find((b) => String(b?.Id ?? '') === String(req.budgetId)) ?? null;
     if (!budget) {
-      const list = summaries.length ? `Budgets in this company:\n  ${summaries.map(describe).join('\n  ')}` : 'This company has no budgets (they are created in the QBO web UI).';
+      const list = summaries.length ? `Budgets in this company:\n  ${summaries.map(describe).join('\n  ')}` : 'This company has no budgets (create one in the QBO web UI first).';
       return { budget: null, error: `Budget ${req.budgetId} not found. ${list}` };
     }
     const meta = budgetToSummary(budget);
@@ -540,8 +540,8 @@ export function budgetToSummary(b: any): any {
   return {
     budget_id: String(b.Id ?? ''),
     name: b.Name ?? '',
-    budget_type: b.BudgetType ?? '', // 'ProfitAndLoss' or 'BalanceSheet'
-    budget_entry_type: b.BudgetEntryType ?? '', // 'Yearly' | 'Quarterly' | 'Monthly'
+    budget_type: b.BudgetType ?? '', // 'ProfitAndLoss' is the only value Intuit's API currently supports
+    budget_entry_type: b.BudgetEntryType ?? '', // 'Monthly' | 'Quarterly' | 'Annually' (per Intuit's Budget docs)
     start_date: b.StartDate ?? null,
     end_date: b.EndDate ?? null,
     active: b.Active !== false,
