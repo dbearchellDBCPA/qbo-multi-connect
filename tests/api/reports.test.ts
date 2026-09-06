@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { ReportsAPI } from '../../src/api/reports.js';
+import { ReportsAPI, qboFaultMessage } from '../../src/api/reports.js';
 
 function makeClient() {
   return { get: vi.fn().mockResolvedValue({ ok: true }) } as any;
@@ -186,5 +186,84 @@ describe('ReportsAPI param threading', () => {
       start_date: '2026-01-01',
       end_date: '2026-03-31',
     });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2026-09-05: get_trial_balance(as_of_date) returned the default-period report
+// and get_budget_vs_actuals lacked date_macro; Intuit also answers some report
+// failures with an HTTP 200 whose body is a Fault envelope.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('ReportsAPI — as-of dates, date_macro, and Fault bodies (2026-09-05)', () => {
+  let client: any;
+  let reports: ReportsAPI;
+
+  beforeEach(() => {
+    client = makeClient();
+    reports = new ReportsAPI(client);
+  });
+
+  it('trialBalance threads asOfDate → end_date (TrialBalance has no as-of param)', async () => {
+    await reports.trialBalance('r', { asOfDate: '2024-08-31', accountingMethod: 'Accrual' });
+    expect(client.get).toHaveBeenCalledWith('r', 'reports/TrialBalance', {
+      end_date: '2024-08-31',
+      accounting_method: 'Accrual',
+    });
+  });
+
+  it('trialBalance prefers an explicit endDate over asOfDate', async () => {
+    await reports.trialBalance('r', { startDate: '2025-01-01', endDate: '2025-12-31', asOfDate: '2024-08-31' });
+    expect(client.get).toHaveBeenCalledWith('r', 'reports/TrialBalance', {
+      start_date: '2025-01-01',
+      end_date: '2025-12-31',
+    });
+  });
+
+  it('trialBalance sends different end_dates for different as-of dates', async () => {
+    const seen: string[] = [];
+    client.get = vi.fn().mockImplementation((_r: string, _p: string, q: any) => {
+      seen.push(q.end_date);
+      return Promise.resolve({ Header: { StartPeriod: '2000-01-01', EndPeriod: q.end_date } });
+    });
+    reports = new ReportsAPI(client);
+    const a: any = await reports.trialBalance('r', { asOfDate: '2024-08-31' });
+    const b: any = await reports.trialBalance('r', { asOfDate: '2025-12-31' });
+    expect(seen).toEqual(['2024-08-31', '2025-12-31']);
+    expect(a.Header.EndPeriod).toBe('2024-08-31');
+    expect(b.Header.EndPeriod).toBe('2025-12-31');
+  });
+
+  it('budgetVsActuals threads dateMacro → date_macro', async () => {
+    await reports.budgetVsActuals('r', { dateMacro: 'This Fiscal Year-to-date', budgetId: '1000000021' });
+    expect(client.get).toHaveBeenCalledWith('r', 'reports/BudgetVsActuals', {
+      date_macro: 'This Fiscal Year-to-date',
+      budget_id: '1000000021',
+    });
+  });
+
+  it('throws a QBOError when Intuit answers 200 with a Fault body', async () => {
+    client.get = vi.fn().mockResolvedValue({
+      Fault: {
+        Error: [
+          {
+            Message: 'An application error has occurred while processing your request',
+            Detail: 'System Failure Error: java.lang.NullPointerException',
+            code: '10000',
+            element: 'SystemFailureError',
+          },
+        ],
+        type: 'SystemFault',
+      },
+      time: '2026-09-05T14:59:25.954-07:00',
+    });
+    reports = new ReportsAPI(client);
+    await expect(
+      reports.budgetVsActuals('r', { startDate: '2026-01-01', endDate: '2026-12-31', budgetId: '1000000021', summarizeColumnBy: 'Month' })
+    ).rejects.toThrow(/SystemFault.*NullPointerException.*SystemFailureError, code 10000/);
+  });
+
+  it('qboFaultMessage is null for a normal report body', () => {
+    expect(qboFaultMessage({ Header: {}, Rows: {} })).toBeNull();
+    expect(qboFaultMessage(null)).toBeNull();
   });
 });
