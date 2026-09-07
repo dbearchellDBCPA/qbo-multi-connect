@@ -156,6 +156,10 @@ export interface DepositDirectLineInput {
   /** "Received From" entity — requires entity_type. */
   entity_id?: string;
   entity_type?: DepositEntityType;
+  /** QBO Class ID → DepositLineDetail.ClassRef.value (class-tracked companies). */
+  class_id?: string;
+  /** QBO PaymentMethod ID → DepositLineDetail.PaymentMethodRef.value (e.g. Cash "1", Check "2"). */
+  payment_method_id?: string;
 }
 
 export interface DepositLinkedPaymentInput {
@@ -179,6 +183,13 @@ export function qboDepositLinesToUpdateShape(lines: any[]): DepositUpdateShape {
       const d = l.DepositLineDetail;
       const dl: DepositDirectLineInput = { amount: l.Amount ?? 0, account_id: d.AccountRef?.value ?? '' };
       if (l.Description) dl.description = l.Description;
+      // Class + Payment Method are per-LINE on deposits. They must round-trip:
+      // buildDepositUpdatePayload preserves an omitted line kind by re-reading
+      // it through here and rebuilding it, so dropping these would silently
+      // strip Class/Payment Method off every preserved line of a
+      // class-tracked deposit.
+      if (d.ClassRef?.value) dl.class_id = String(d.ClassRef.value);
+      if (d.PaymentMethodRef?.value) dl.payment_method_id = String(d.PaymentMethodRef.value);
       // QBO stores DepositLineDetail.Entity as a FLAT ref {value, name, type}
       // with an UPPERCASE type (CUSTOMER/VENDOR/EMPLOYEE). The nested
       // {Type, EntityRef} shape belongs to JournalEntryLineDetail only —
@@ -223,6 +234,8 @@ export function buildDepositTxnLines(
       DetailType: 'DepositLineDetail',
       DepositLineDetail: { AccountRef: { value: dl.account_id } },
     };
+    if (dl.class_id) line.DepositLineDetail.ClassRef = { value: dl.class_id };
+    if (dl.payment_method_id) line.DepositLineDetail.PaymentMethodRef = { value: dl.payment_method_id };
     const entityId = dl.entity_id ?? dl.customer_id;
     if (entityId) {
       const type = dl.entity_id ? dl.entity_type : 'Customer';

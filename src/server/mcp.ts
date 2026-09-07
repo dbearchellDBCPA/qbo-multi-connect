@@ -3465,7 +3465,7 @@ export async function registerMcpRoutes(
     // ── create_deposit ────────────────────────────────────────────────────────
     server.tool(
       'create_deposit',
-      'Create a bank deposit in QuickBooks Online. Can deposit existing customer payments from Undeposited Funds (via linked_payment_ids) or record direct deposits. Each direct line accepts a "Received From" entity (entity_id + entity_type: Vendor | Customer | Employee) — use a Vendor entity for vendor-refund deposits so the refund is attributed to the vendor. customer_id remains supported as a Customer alias.',
+      'Create a bank deposit in QuickBooks Online. Can deposit existing customer payments from Undeposited Funds (via linked_payment_ids) or record direct deposits. Each direct line accepts a "Received From" entity (entity_id + entity_type: Vendor | Customer | Employee) — use a Vendor entity for vendor-refund deposits so the refund is attributed to the vendor. customer_id remains supported as a Customer alias. Deposit lines also carry per-line class_id (ClassRef) and payment_method_id (PaymentMethodRef) for class-tracked companies and Cash/Check splits.',
       {
         client_name: z.string().describe('The name of the client company'),
         deposit_account_id: z.string().describe('Bank account ID to deposit into'),
@@ -3483,6 +3483,8 @@ export async function registerMcpRoutes(
           customer_id: z.string().optional().describe('Alias for entity_id with entity_type "Customer" (kept for backward compatibility)'),
           entity_id: z.string().optional().describe('"Received From" entity ID — the vendor, customer, or employee the funds came from. Requires entity_type. Use this to attribute vendor-refund deposits to the vendor.'),
           entity_type: z.enum(['Vendor', 'Customer', 'Employee']).optional().describe('Type of entity_id'),
+          class_id: z.string().optional().describe('QBO Class ID for this line (DepositLineDetail.ClassRef) — class-tracked companies set this per line. Use get_classes to find IDs.'),
+          payment_method_id: z.string().optional().describe('QBO PaymentMethod ID for this line (DepositLineDetail.PaymentMethodRef), e.g. Cash or Check. Use get_payment_methods to find IDs.'),
         })).optional().describe('Direct deposit lines (when not using Undeposited Funds)'),
       },
       async ({ client_name, deposit_account_id, txn_date, private_note, department_id, linked_payment_ids, deposit_lines }) => {
@@ -3513,7 +3515,7 @@ export async function registerMcpRoutes(
     // ── update_deposit ────────────────────────────────────────────────────────
     server.tool(
       'update_deposit',
-      'Update an existing bank deposit in place. Read-modify-write: fetches the current Deposit, merges only what you pass, and writes the FULL object back with a fresh SyncToken — untouched fields are preserved. Line semantics, per array independently: a PROVIDED array replaces that kind of line with exactly what you pass; an OMITTED array preserves the existing lines of that kind (so re-coding a direct line never silently unlinks payments); linked_payment_ids: [] explicitly removes the linked payments (they return to Undeposited Funds); omit both arrays for a metadata-only update that leaves lines untouched. Every line change is verified against QBO after the write and automatically rolled back to the original lines if the result does not match. Deposit lines accept a "Received From" entity (entity_id + entity_type: Vendor | Customer | Employee) so vendor-refund deposits can be attributed to the vendor.',
+      'Update an existing bank deposit in place. Read-modify-write: fetches the current Deposit, merges only what you pass, and writes the FULL object back with a fresh SyncToken — untouched fields are preserved. Line semantics, per array independently: a PROVIDED array replaces that kind of line with exactly what you pass; an OMITTED array preserves the existing lines of that kind (so re-coding a direct line never silently unlinks payments); linked_payment_ids: [] explicitly removes the linked payments (they return to Undeposited Funds); omit both arrays for a metadata-only update that leaves lines untouched. Every line change is verified against QBO after the write and automatically rolled back to the original lines if the result does not match. Deposit lines accept a "Received From" entity (entity_id + entity_type: Vendor | Customer | Employee) so vendor-refund deposits can be attributed to the vendor, plus per-line class_id (ClassRef) and payment_method_id (PaymentMethodRef) — both round-trip through get_deposit, and preserved lines keep the Class and Payment Method they already had.',
       {
         client_name: z.string().describe('The name of the client company'),
         deposit_id: z.string().describe('The QBO Deposit ID to update'),
@@ -3531,6 +3533,8 @@ export async function registerMcpRoutes(
           customer_id: z.string().optional().describe('Alias for entity_id with entity_type "Customer" (kept for backward compatibility)'),
           entity_id: z.string().optional().describe('"Received From" entity ID — the vendor, customer, or employee the funds came from. Requires entity_type. Use this to attribute vendor-refund deposits to the vendor.'),
           entity_type: z.enum(['Vendor', 'Customer', 'Employee']).optional().describe('Type of entity_id'),
+          class_id: z.string().optional().describe('QBO Class ID for this line (DepositLineDetail.ClassRef) — class-tracked companies set this per line. Use get_classes to find IDs.'),
+          payment_method_id: z.string().optional().describe('QBO PaymentMethod ID for this line (DepositLineDetail.PaymentMethodRef), e.g. Cash or Check. Use get_payment_methods to find IDs.'),
         })).optional().describe('Replacement set of direct deposit lines (part of the full line replacement)'),
       },
       async ({ client_name, deposit_id, deposit_account_id, txn_date, private_note, linked_payment_ids, deposit_lines }) => {
@@ -3933,7 +3937,7 @@ export async function registerMcpRoutes(
     // ── get_deposit ───────────────────────────────────────────────────────────
     server.tool(
       'get_deposit',
-      'Fetch a deposit in update-ready shape. Returns linked_payment_ids (payments from Undeposited Funds) and deposit_lines (direct income lines) — both preserved on round-trip.',
+      'Fetch a deposit in update-ready shape. Returns linked_payment_ids (payments from Undeposited Funds) and deposit_lines (direct income lines) — both preserved on round-trip. Each direct line includes account_id, description, the "Received From" entity, and per-line class_id / payment_method_id when QBO has them, in the exact shape update_deposit accepts.',
       {
         client_name: z.string().describe('The name of the client company'),
         deposit_id: z.string().describe('QBO Deposit ID'),

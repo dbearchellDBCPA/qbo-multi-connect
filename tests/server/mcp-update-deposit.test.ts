@@ -251,3 +251,173 @@ describe('get_deposit → update_deposit round-trip', () => {
     expect(total).toBe(150);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-line Class + Payment Method (Northway Church and other class-tracked
+// companies): every DepositLineDetail carries ClassRef and PaymentMethodRef.
+// Fixtures mirror Northway deposit 14048 (2026-08-30 Checks, realm
+// 9130353483179106) and its Cash twin 14047.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const CLASS_UNRESTRICTED = '1900000000000747661';
+const CLASS_DESIGNATED = '1900000000000747660';
+const PM_CASH = '1';
+const PM_CHECK = '2';
+
+const northwayDeposit = {
+  Id: '14048',
+  SyncToken: '0',
+  DepositToAccountRef: { value: '1150040003', name: 'Synovus Bank Checking' },
+  TxnDate: '2026-08-30',
+  TotalAmt: 15245,
+  Line: [
+    {
+      Id: '1',
+      LineNum: 1,
+      Amount: 15245,
+      DetailType: 'DepositLineDetail',
+      DepositLineDetail: {
+        AccountRef: { value: '150', name: '4100 Contributions' },
+        ClassRef: { value: CLASS_UNRESTRICTED, name: 'Unrestricted' },
+        PaymentMethodRef: { value: PM_CHECK, name: 'Check' },
+      },
+    },
+    {
+      Id: '2',
+      LineNum: 2,
+      Amount: 300,
+      DetailType: 'DepositLineDetail',
+      Description: 'Tax Refund',
+      DepositLineDetail: {
+        AccountRef: { value: '151', name: '4410 Misc' },
+        ClassRef: { value: CLASS_DESIGNATED, name: 'Designated' },
+        PaymentMethodRef: { value: PM_CHECK, name: 'Check' },
+      },
+    },
+    {
+      Id: '3',
+      LineNum: 3,
+      Amount: 125,
+      DetailType: 'DepositLineDetail',
+      DepositLineDetail: {
+        AccountRef: { value: '136', name: '2540 FFF' },
+        ClassRef: { value: CLASS_DESIGNATED, name: 'Designated' },
+        PaymentMethodRef: { value: PM_CHECK, name: 'Check' },
+      },
+    },
+  ],
+};
+
+describe('deposit lines — Class and Payment Method', () => {
+  it('writes ClassRef and PaymentMethodRef in the QBO wire shape', () => {
+    const [line] = buildDepositTxnLines([], [
+      { amount: 15245, account_id: '150', class_id: CLASS_UNRESTRICTED, payment_method_id: PM_CHECK },
+    ]);
+    expect(line).toEqual({
+      Amount: 15245,
+      Description: undefined,
+      DetailType: 'DepositLineDetail',
+      DepositLineDetail: {
+        AccountRef: { value: '150' },
+        ClassRef: { value: CLASS_UNRESTRICTED },
+        PaymentMethodRef: { value: PM_CHECK },
+      },
+    });
+  });
+
+  it('carries Class/PM alongside a Received From entity and description', () => {
+    const [line] = buildDepositTxnLines([], [
+      {
+        amount: 300,
+        account_id: '151',
+        description: 'Tax Refund',
+        class_id: CLASS_DESIGNATED,
+        payment_method_id: PM_CHECK,
+        entity_id: '6',
+        entity_type: 'Vendor',
+      },
+    ]);
+    expect(line.Description).toBe('Tax Refund');
+    expect(line.DepositLineDetail.ClassRef).toEqual({ value: CLASS_DESIGNATED });
+    expect(line.DepositLineDetail.PaymentMethodRef).toEqual({ value: PM_CHECK });
+    expect(line.DepositLineDetail.Entity).toEqual({ value: '6', type: 'VENDOR' });
+  });
+
+  it('omits both refs entirely when not supplied (backward compatible)', () => {
+    const [line] = buildDepositTxnLines([], [{ amount: 100, account_id: '82' }]);
+    expect(line.DepositLineDetail).toEqual({ AccountRef: { value: '82' } });
+    expect(line.DepositLineDetail).not.toHaveProperty('ClassRef');
+    expect(line.DepositLineDetail).not.toHaveProperty('PaymentMethodRef');
+  });
+
+  it('reads Class/PM back out of QBO in the update-ready shape (get_deposit)', () => {
+    const { deposit_lines } = qboDepositLinesToUpdateShape(northwayDeposit.Line);
+    expect(deposit_lines).toHaveLength(3);
+    expect(deposit_lines[0]).toEqual({
+      amount: 15245,
+      account_id: '150',
+      class_id: CLASS_UNRESTRICTED,
+      payment_method_id: PM_CHECK,
+    });
+    expect(deposit_lines[1]).toMatchObject({
+      account_id: '151',
+      description: 'Tax Refund',
+      class_id: CLASS_DESIGNATED,
+      payment_method_id: PM_CHECK,
+    });
+    expect(deposit_lines[2].class_id).toBe(CLASS_DESIGNATED);
+  });
+
+  it('round-trips a class-tracked deposit unchanged (read → build)', () => {
+    const shape = qboDepositLinesToUpdateShape(northwayDeposit.Line);
+    const rebuilt = buildDepositTxnLines(shape.linked_payment_ids, shape.deposit_lines);
+    expect(rebuilt).toHaveLength(3);
+    rebuilt.forEach((line: any, i: number) => {
+      const orig: any = northwayDeposit.Line[i].DepositLineDetail;
+      expect(line.DepositLineDetail.AccountRef.value).toBe(orig.AccountRef.value);
+      expect(line.DepositLineDetail.ClassRef.value).toBe(orig.ClassRef.value);
+      expect(line.DepositLineDetail.PaymentMethodRef.value).toBe(orig.PaymentMethodRef.value);
+    });
+  });
+
+  it('PRESERVES Class/PM on lines the caller did not touch (the strip hazard)', () => {
+    // Replacing only the linked payments must not silently drop the Class and
+    // Payment Method off the preserved direct lines — buildDepositUpdatePayload
+    // rebuilds them through the read converter.
+    const payload = buildDepositUpdatePayload(northwayDeposit, { linked_payment_ids: [] });
+    expect(payload.Line).toHaveLength(3);
+    for (const line of payload.Line) {
+      expect(line.DepositLineDetail.ClassRef?.value).toBeTruthy();
+      expect(line.DepositLineDetail.PaymentMethodRef?.value).toBe(PM_CHECK);
+    }
+  });
+
+  it('re-codes one line to a new class while keeping the others intact', () => {
+    const shape = qboDepositLinesToUpdateShape(northwayDeposit.Line);
+    const lines = shape.deposit_lines.map((l, i) =>
+      i === 1 ? { ...l, class_id: CLASS_UNRESTRICTED } : l
+    );
+    const payload = buildDepositUpdatePayload(northwayDeposit, { deposit_lines: lines });
+    expect(payload.Line[1].DepositLineDetail.ClassRef).toEqual({ value: CLASS_UNRESTRICTED });
+    expect(payload.Line[0].DepositLineDetail.ClassRef).toEqual({ value: CLASS_UNRESTRICTED });
+    expect(payload.Line[2].DepositLineDetail.ClassRef).toEqual({ value: CLASS_DESIGNATED });
+    expect(payload.Line).toHaveLength(3);
+  });
+
+  it('supports the Cash twin (payment method 1) on every line', () => {
+    const lines = buildDepositTxnLines([], [
+      { amount: 500, account_id: '150', class_id: CLASS_UNRESTRICTED, payment_method_id: PM_CASH },
+      { amount: 25, account_id: '136', class_id: CLASS_DESIGNATED, payment_method_id: PM_CASH },
+    ]);
+    expect(lines.map((l: any) => l.DepositLineDetail.PaymentMethodRef.value)).toEqual([PM_CASH, PM_CASH]);
+  });
+
+  it('keeps linked Undeposited Funds payment lines untouched by Class/PM', () => {
+    const lines = buildDepositTxnLines(
+      [{ payment_id: 'pmt-1', amount: 400 }],
+      [{ amount: 100, account_id: '150', class_id: CLASS_UNRESTRICTED, payment_method_id: PM_CHECK }]
+    );
+    expect(lines[0]).toEqual({ Amount: 400, LinkedTxn: [{ TxnId: 'pmt-1', TxnType: 'Payment' }] });
+    expect(lines[0]).not.toHaveProperty('DepositLineDetail');
+  });
+});
