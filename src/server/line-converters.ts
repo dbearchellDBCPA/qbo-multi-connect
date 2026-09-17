@@ -30,6 +30,135 @@ export function qboSalesLinesToUpdateShape(lines: any[]): any[] {
     });
 }
 
+// ── Shared line BUILDERS (tool input shape → QBO Line) ─────────────────────────
+// One builder per form family so create_* and update_* write identical line
+// shapes, and so header-level class_id lands on every line that has no
+// line-level class of its own.
+
+export interface SalesLineInput {
+  description?: string;
+  amount: number;
+  detail_type?: 'SalesItemLineDetail' | 'DescriptionOnly';
+  item_id?: string;
+  item_name?: string;
+  quantity?: number;
+  unit_price?: number;
+  /** Line ClassRef (SalesItemLineDetail.ClassRef). */
+  class_id?: string;
+  /** Line TaxCodeRef, e.g. "TAX" / "NON" (SalesItemLineDetail.TaxCodeRef). */
+  tax_code_id?: string;
+}
+
+/**
+ * Build sales-form lines (Invoice, Estimate, CreditMemo, SalesReceipt).
+ * `headerClassId` fills the class of every SalesItemLineDetail line that has
+ * no class_id of its own; a line's own class_id always wins.
+ */
+export function buildSalesTxnLines(lines: SalesLineInput[], headerClassId?: string): any[] {
+  return (lines ?? []).map((l) => {
+    const detailType = l.detail_type ?? 'SalesItemLineDetail';
+    const line: any = { Amount: l.amount, DetailType: detailType, Description: l.description };
+    if (detailType === 'SalesItemLineDetail') {
+      line.SalesItemLineDetail = { Qty: l.quantity ?? 1, UnitPrice: l.unit_price ?? l.amount };
+      if (l.item_id) line.SalesItemLineDetail.ItemRef = { value: l.item_id, name: l.item_name };
+      const classId = l.class_id ?? headerClassId;
+      if (classId) line.SalesItemLineDetail.ClassRef = { value: classId };
+      if (l.tax_code_id) line.SalesItemLineDetail.TaxCodeRef = { value: l.tax_code_id };
+    }
+    return line;
+  });
+}
+
+export interface BillLineInput {
+  description?: string;
+  amount: number;
+  detail_type?: 'AccountBasedExpenseLineDetail' | 'ItemBasedExpenseLineDetail';
+  account_id?: string;
+  account_name?: string;
+  item_id?: string;
+  quantity?: number;
+  unit_price?: number;
+  class_id?: string;
+}
+
+/** Build Bill lines. Header class_id fills lines without a class of their own. */
+export function buildBillTxnLines(lines: BillLineInput[], headerClassId?: string): any[] {
+  return (lines ?? []).map((l) => {
+    const detailType = l.detail_type ?? 'AccountBasedExpenseLineDetail';
+    const line: any = { Amount: l.amount, DetailType: detailType, Description: l.description };
+    const classId = l.class_id ?? headerClassId;
+    if (detailType === 'AccountBasedExpenseLineDetail') {
+      line.AccountBasedExpenseLineDetail = {};
+      if (l.account_id) line.AccountBasedExpenseLineDetail.AccountRef = { value: l.account_id, name: l.account_name };
+      if (classId) line.AccountBasedExpenseLineDetail.ClassRef = { value: classId };
+    } else {
+      line.ItemBasedExpenseLineDetail = { Qty: l.quantity ?? 1, UnitPrice: l.unit_price ?? l.amount };
+      if (l.item_id) line.ItemBasedExpenseLineDetail.ItemRef = { value: l.item_id };
+      if (classId) line.ItemBasedExpenseLineDetail.ClassRef = { value: classId };
+    }
+    return line;
+  });
+}
+
+export interface PoLineInput {
+  description?: string;
+  amount: number;
+  item_id?: string;
+  item_name?: string;
+  quantity?: number;
+  unit_price?: number;
+  account_id?: string;
+  class_id?: string;
+}
+
+/** Build PurchaseOrder lines: item-based when item_id is given, else account-based. */
+export function buildPoTxnLines(lines: PoLineInput[], headerClassId?: string): any[] {
+  return (lines ?? []).map((l) => {
+    const line: any = { Amount: l.amount, Description: l.description };
+    const classId = l.class_id ?? headerClassId;
+    if (l.item_id) {
+      line.DetailType = 'ItemBasedExpenseLineDetail';
+      line.ItemBasedExpenseLineDetail = { Qty: l.quantity ?? 1, UnitPrice: l.unit_price ?? l.amount, ItemRef: { value: l.item_id, name: l.item_name } };
+      if (classId) line.ItemBasedExpenseLineDetail.ClassRef = { value: classId };
+    } else {
+      line.DetailType = 'AccountBasedExpenseLineDetail';
+      line.AccountBasedExpenseLineDetail = {};
+      if (l.account_id) line.AccountBasedExpenseLineDetail.AccountRef = { value: l.account_id };
+      if (classId) line.AccountBasedExpenseLineDetail.ClassRef = { value: classId };
+    }
+    return line;
+  });
+}
+
+/**
+ * The one class shared by every sales line of a stored form, or null when
+ * the lines are unclassed or carry different classes. update_* tools use it
+ * so replacement lines that say nothing about class keep the class the form
+ * already had instead of silently stripping it.
+ */
+export function uniformSalesLineClass(lines: any[] | undefined | null): { value: string; name?: string } | null {
+  let found: { value: string; name?: string } | null = null;
+  for (const l of lines ?? []) {
+    if (l?.DetailType !== 'SalesItemLineDetail') continue;
+    const ref = l.SalesItemLineDetail?.ClassRef;
+    if (!ref?.value) return null;
+    if (found && found.value !== String(ref.value)) return null;
+    if (!found) found = { value: String(ref.value), ...(ref.name ? { name: ref.name } : {}) };
+  }
+  return found;
+}
+
+/** True when a stored form has sales lines carrying more than one class. */
+export function hasMixedSalesLineClasses(lines: any[] | undefined | null): boolean {
+  const seen = new Set<string>();
+  for (const l of lines ?? []) {
+    if (l?.DetailType !== 'SalesItemLineDetail') continue;
+    const v = l.SalesItemLineDetail?.ClassRef?.value;
+    if (v) seen.add(String(v));
+  }
+  return seen.size > 1;
+}
+
 // ── Bill converter ─────────────────────────────────────────────────────────────
 
 export function qboBillLinesToUpdateShape(lines: any[]): any[] {

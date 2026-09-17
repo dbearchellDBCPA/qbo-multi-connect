@@ -468,6 +468,135 @@ It loads a `ZZT`-prefixed three-level chart (numbers 9900–9993), reads it
 back, re-runs the batch to prove idempotency, exercises every rule, then
 deactivates everything it created.
 
+## MCP Tools — Sales-form prefill
+
+`create_invoice`, `create_estimate`, `create_credit_memo`, `create_sales_receipt`,
+`create_bill` and `create_purchase_order` fill what the caller leaves blank the
+way the QBO UI does when a customer or vendor is picked. The REST API applies
+none of the UI's client-side prefill: before this, an agent-created invoice in
+a company with custom transaction numbers came back unnumbered, unclassed,
+addressless, without the customer message, and outside the Send queue
+(`SPEC-create-invoice-prefill.md` §1). The layer lives in
+`src/server/prefill.ts` and is shared by all six tools.
+
+### What is filled, and from where
+
+Precedence, per field:
+
+> explicit argument → Customer/Vendor record (the fields it owns: email,
+> addresses, terms) → the party's most recent forms (class, cc/bcc, message,
+> department, print status — per field, the most recent of the last 5 that has
+> it) → company Preferences (default message, default terms, numbering and
+> class-tracking rules) → blank
+
+| Field | Source chain |
+|---|---|
+| `DocNumber` | `doc_number` → next number in the **shared** sales sequence (max numeric `DocNumber` across Invoice, SalesReceipt, CreditMemo, Estimate and RefundReceipt, plus one) when `SalesFormsPrefs.CustomTxnNumbers` is on; omitted (QBO numbers it) when off. Non-numeric numbers such as `STMT 05/25/2025` are ignored. Bills are never numbered (their `DocNumber` is the vendor's bill number). Purchase orders use their own sequence, gated on the company's PO custom-numbering setting (`OtherPrefs` `VendorAndPurchasesPrefs.UseCustomTxnNumbers`). On QBO code 6140 (number already taken) a computed number is bumped and retried, up to 5 times; an explicit number never is. |
+| Line `ClassRef` | `lines[].class_id` → `class_id` → the class on the most recent prior form's first classed line. Always written on the lines; a header `ClassRef` is added only when `ClassTrackingPerTxn` is on (QBO rejects a header class on per-line companies such as Ingram). A warning is returned when the company tracks classes and no class could be found. |
+| `BillEmail` | `bill_email` → customer `PrimaryEmailAddr` → prior form |
+| `BillEmailCc` / `BillEmailBcc` | `bill_email_cc` / `bill_email_bcc` → prior form (QBO keeps cc/bcc on forms only, not on the Customer record) |
+| `BillAddr` / `ShipAddr` | `bill_addr` / `ship_addr` → customer record → prior form. Address row Ids are never copied and an `{Id}`-only shell counts as empty. |
+| `SalesTermRef` | `sales_term_id` → customer record → prior form → `SalesFormsPrefs.DefaultTerms` |
+| `DepartmentRef` | `department_id` → prior form (skipped when `TrackDepartments` is off) |
+| `CustomerMemo` | `customer_memo` → prior form → `SalesFormsPrefs.DefaultCustomerMessage` |
+| `PrintStatus` | prior form |
+| `EmailStatus` | `email_status` → `NeedToSend` (puts the form in QBO's Send forms queue) |
+| Line `TaxCodeRef` | `lines[].tax_code_id` → customer `DefaultTaxCodeRef` |
+| Sales receipts: `DepositToAccountRef`, `PaymentMethodRef` | argument → most recent sales receipt |
+| Bills: `SalesTermRef`, `APAccountRef`, `VendorAddr`, `DepartmentRef`, line `ClassRef`, line `AccountRef` | argument → vendor `TermRef` → prior bill; prior bill → vendor `APAccountRef`; vendor `BillAddr` → prior bill; prior bill; prior bill's first classed line; lines without `account_id` take the expense account of the prior bill's first account line |
+| Purchase orders: `POEmail`, `Memo`, `ShipAddr`, `EmailStatus`, line `ClassRef` | `po_email` → vendor email → prior PO; `vendor_memo` → prior PO; prior PO; `email_status` → `NeedToSend`; prior PO |
+
+Prior forms are read with one query per create (`… WHERE CustomerRef = '<id>'
+ORDERBY TxnDate DESC, Id DESC MAXRESULTS 5`): the same kind first, then the
+customer's invoices (a customer with no credit memos still has a class and a
+cc on their invoices). Preferences are cached per company for an hour, the
+Customer/Vendor record for five minutes. A source that cannot be read becomes
+a warning, never a failed create.
+
+### Parameters
+
+| Param | Default | Meaning |
+|---|---|---|
+| `prefill` | `true` | Run the layer. `false` sends exactly what was passed — the pre-prefill behavior, byte for byte. |
+| `doc_number` | — | Explicit `DocNumber` (max 21 characters). |
+| `class_id` | — | Header-level class, applied to every line without its own `class_id`. |
+| `lines[].class_id`, `lines[].tax_code_id` | — | Per-line class and tax code. |
+| `bill_email`, `bill_email_cc`, `bill_email_bcc` | — | `BillEmail` / `BillEmailCc` / `BillEmailBcc` address (comma-separated addresses allowed). |
+| `customer_memo` | — | `CustomerMemo.value` — the message printed on the form. |
+| `email_status` | `NeedToSend` when prefill is on | `NotSet` \| `NeedToSend` \| `EmailSent`. |
+| `bill_addr`, `ship_addr` | — | Address overrides (same shape as `create_customer`). |
+
+The four sales tools take all of these. `create_bill` takes `prefill`,
+`doc_number` and `class_id` (a Bill has no email fields). `create_purchase_order`
+takes `prefill`, `doc_number`, `class_id`, `po_email`, `vendor_memo` and
+`email_status`. `department_id` and `sales_term_id` keep working and sit in
+the same precedence chain. The tool schemas are generated from these
+definitions at runtime, so the MCP tool list shows the new parameters as soon
+as the server restarts.
+
+### Response
+
+The one-line summary is unchanged for callers that parse it. With `prefill`
+on, a JSON block follows it (§2.5 of the spec):
+
+```json
+{
+  "id": "126413", "doc_number": "5813", "total": 1, "balance": 1, "customer": "Dollar General (C)",
+  "prefilled": {
+    "DocNumber": "computed (CustomTxnNumbers on): 5812 → 5813",
+    "Line.ClassRef": "from invoice #5735 → 7000 - DCM Ingram Center",
+    "BillEmail": "from customer → kwhitehe@dollargeneral.com, cbane@dollargeneral.com",
+    "BillEmailCc": "from invoice #5735 → obingram@ingramentities.com",
+    "CustomerMemo": "from invoice #5735 → Please Pay Via ACH with payment instructions Below: …",
+    "SalesTermRef": "from invoice #2025_TIM → Net 30",
+    "EmailStatus": "default → NeedToSend"
+  },
+  "warnings": []
+}
+```
+
+An agent should read `prefilled` and `warnings` and report them ("class and cc
+copied from invoice #5735"; "no class set — pass class_id").
+
+### `update_invoice` is sparse-safe
+
+Header fields that are not passed stay as they are. Replacement `lines` that
+carry no `class_id` inherit the class the existing lines shared (when the
+existing lines used several classes nothing is guessed and the response says
+so). `class_id` without `lines` re-classes the existing lines in place. New
+header params: `doc_number`, `class_id`, `bill_email`, `bill_email_cc`,
+`bill_email_bcc`, `customer_memo`, `email_status`, `bill_addr`, `ship_addr`.
+`get_invoice` returns those fields too, and lines from any `get_<sales form>`
+round-trip with class and tax code intact through the matching `update_*` tool
+(`update_estimate`, `update_credit_memo` and `update_sales_receipt` accept
+`class_id` and `lines[].class_id` / `lines[].tax_code_id` as well).
+
+### `create_attachment` with `file_url`
+
+Redirects are followed by hand (the SSRF guard runs on every hop) with a
+browser-style `User-Agent`. The file name comes from `file_name` →
+`Content-Disposition` → the URL path (only when it carries a known extension)
+→ the bytes' magic number, so a Dropbox temporary link (`…/cd/0/get/…/file?c_luid=…`)
+is named and typed correctly. An HTML page returned in place of the file is
+refused, with the page's first bytes in the error; a failed fetch reports the
+HTTP status and body; a QBO reply without an `Attachable` is reported together
+with QBO's actual response, and the tool output always states what was fetched
+(`Source: file_url <host>: HTTP 200, 943,113 bytes, content-type application/pdf, 1 redirect`).
+
+### Acceptance run against a live company
+
+```bash
+npm run acceptance:prefill -- --url https://<host>/mcp --key <api key> \
+  --client "Ingram Entities" --customer 31 --item 73 --confirm
+```
+
+Creates a $1.00 invoice with `prefill` on, checks every §7 expectation
+(numbered from the shared sequence, classed, emailed, cc'd, messaged, Net 30,
+`NeedToSend`, every field listed in `prefilled` with its source), deletes it,
+then repeats with `prefill: false` and confirms the bare behavior. It writes to
+the named company; the same checks run in CI against a fake QBO in
+`tests/server/mcp-prefill.e2e.test.ts`.
+
 ## MCP Tools — Bulk Corrections
 
 The MCP server exposes two tool patterns for bulk editing that eliminate

@@ -18,6 +18,12 @@ import {
   depositLineEntityError,
   swapItemInLines,
   swapAccountInLines,
+  buildSalesTxnLines,
+  buildBillTxnLines,
+  buildPoTxnLines,
+  uniformSalesLineClass,
+  hasMixedSalesLineClasses,
+  type SalesLineInput,
 } from './line-converters.js';
 import {
   resolveAccountFilterTerms,
@@ -64,12 +70,14 @@ import {
   addressInput,
   contactInputShape,
   toQboAddress,
+  mergeQboAddress,
   applyContactFields,
   buildCustomerUpdatePayload,
   buildVendorUpdatePayload,
   escapeQboString,
   EMAIL_PARAM_DESCRIPTION,
   DOC_NUMBER_DESCRIPTION,
+  type AddressInput,
 } from './entity-fields.js';
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { basename } from 'node:path';
@@ -77,11 +85,23 @@ import {
   contentTypeForFile,
   supportedExtensions,
   resolveAttachmentPath,
-  assertSafeUrl,
+  fetchRemoteFile,
+  resolveAttachmentFileName,
+  sniffContentType,
+  describeRemoteFetch,
   MAX_ATTACHMENT_BYTES,
   MAX_FILES_PER_UPLOAD,
   type AttachmentUploadItem,
 } from '../api/attachments.js';
+import {
+  runSalesFormPrefill,
+  runPurchaseFormPrefill,
+  postWithDocNumberRetry,
+  appendPrefillReport,
+  emptyOutcome,
+  type PrefillEntity,
+  type SalesFormEntity,
+} from './prefill.js';
 
 // ─── Report Formatters ────────────────────────────────────────────────────────
 // formatCurrency, formatTrialBalance, and formatAgingReport live in
@@ -345,6 +365,88 @@ function strictArgs(shape: Record<string, any>): z.ZodTypeAny {
   return z.object(shape).strict();
 }
 
+// ─── Sales-form prefill — shared parameter fragments ─────────────────────────
+// The create_* tools for sales and purchase forms share these so the MCP tool
+// list shows one consistent vocabulary (see src/server/prefill.ts).
+
+const PREFILL_PARAM = z.boolean().default(true).describe(
+  'Fill what you leave blank the way the QBO UI does when you pick this customer/vendor (the tool description says what is copied). Precedence: your explicit arguments > the Customer/Vendor record > the party\'s most recent forms > company Preferences. The response ends with a JSON block reporting every filled field and its source (`prefilled`) plus `warnings` — read it and report it. false = send exactly what you passed (the pre-prefill behavior).'
+);
+
+const SALES_HEADER_PARAMS = {
+  doc_number: z.string().optional().describe('Explicit DocNumber (max 21 characters). Omit to let prefill compute the next number in the shared sales sequence (company uses custom transaction numbers) or let QBO assign one (it does not).'),
+  class_id: z.string().optional().describe('Header-level class: applied to every line that has no line-level class_id. Written on the lines — QBO rejects a header ClassRef when class tracking is per line; a header ClassRef is added only when the company tracks class per transaction. Use get_classes to find IDs.'),
+  bill_email: z.string().optional().describe('BillEmail.Address — where the form is emailed; comma-separated addresses allowed. Prefilled from the customer record when omitted.'),
+  bill_email_cc: z.string().optional().describe('BillEmailCc.Address. Prefilled from the customer\'s most recent form when omitted (QBO keeps cc only on prior forms, not on the Customer record).'),
+  bill_email_bcc: z.string().optional().describe('BillEmailBcc.Address. Prefilled from the customer\'s most recent form when omitted.'),
+  customer_memo: z.string().optional().describe('CustomerMemo.value — the message printed on the form. Prefilled from the customer\'s most recent form, else the company\'s default sales message.'),
+  email_status: z.enum(['NotSet', 'NeedToSend', 'EmailSent']).optional().describe('EmailStatus. With prefill on this defaults to NeedToSend, which puts the form in QBO\'s Send forms queue; pass NotSet to keep it out.'),
+  bill_addr: addressInput.optional().describe('Billing address override (otherwise prefilled from the customer record).'),
+  ship_addr: addressInput.optional().describe('Shipping address override (otherwise prefilled from the customer record).'),
+};
+
+const SALES_LINE_EXTRAS = {
+  class_id: z.string().optional().describe('Line ClassRef (SalesItemLineDetail.ClassRef); overrides the header class_id for this line.'),
+  tax_code_id: z.string().optional().describe('Line TaxCodeRef, e.g. "TAX" or "NON".'),
+};
+
+interface SalesHeaderArgs {
+  doc_number?: string;
+  bill_email?: string;
+  bill_email_cc?: string;
+  bill_email_bcc?: string;
+  customer_memo?: string;
+  email_status?: 'NotSet' | 'NeedToSend' | 'EmailSent';
+  bill_addr?: AddressInput;
+  ship_addr?: AddressInput;
+}
+
+/** Map the explicit sales-form header arguments onto a QBO payload (only what was passed). */
+function applySalesHeaderArgs(payload: any, a: SalesHeaderArgs): void {
+  if (a.doc_number !== undefined) payload.DocNumber = a.doc_number;
+  if (a.bill_email !== undefined) payload.BillEmail = { Address: a.bill_email };
+  if (a.bill_email_cc !== undefined) payload.BillEmailCc = { Address: a.bill_email_cc };
+  if (a.bill_email_bcc !== undefined) payload.BillEmailBcc = { Address: a.bill_email_bcc };
+  if (a.customer_memo !== undefined) payload.CustomerMemo = { value: a.customer_memo };
+  if (a.email_status !== undefined) payload.EmailStatus = a.email_status;
+  if (a.bill_addr) payload.BillAddr = toQboAddress(a.bill_addr);
+  if (a.ship_addr) payload.ShipAddr = toQboAddress(a.ship_addr);
+}
+
+/**
+ * Replacement lines for an update_* sales tool. Lines that say nothing about
+ * class inherit the one class the stored form's lines shared (a round trip
+ * through get_<entity> → update_<entity> must not strip class); when the
+ * stored lines carried several classes nothing is guessed and a note says so.
+ */
+function replacementSalesLines(existingLines: any[] | undefined, lines: SalesLineInput[], headerClassId: string | undefined, notes: string[]): any[] {
+  let inherit = headerClassId;
+  const needsClass = lines.some((l) => !l.class_id && (l.detail_type ?? 'SalesItemLineDetail') === 'SalesItemLineDetail');
+  if (!inherit && needsClass) {
+    const uniform = uniformSalesLineClass(existingLines);
+    if (uniform) {
+      inherit = uniform.value;
+      notes.push(`Line class carried over from the existing lines: ${uniform.name ?? uniform.value}.`);
+    } else if (hasMixedSalesLineClasses(existingLines)) {
+      notes.push('The existing lines used more than one class and the replacement lines name none, so no class was carried over — pass class_id per line (or the header class_id) if they should stay classed.');
+    }
+  }
+  return buildSalesTxnLines(lines, inherit);
+}
+
+/** Re-class the stored sales lines in place (Ids kept, so QBO updates rather than replaces them). */
+function reclassSalesLinesInPlace(existingLines: any[] | undefined, classId: string): { lines: any[]; changed: number } {
+  let changed = 0;
+  const lines = (existingLines ?? []).map((l: any) => {
+    if (l?.DetailType !== 'SalesItemLineDetail' || !l.SalesItemLineDetail) return l;
+    changed++;
+    return { ...l, SalesItemLineDetail: { ...l.SalesItemLineDetail, ClassRef: { value: classId } } };
+  });
+  return { lines, changed };
+}
+
+const SALES_FORM_ENTITIES = new Set<string>(['Invoice', 'Estimate', 'CreditMemo', 'SalesReceipt']);
+
 // ─── MCP Server Setup ─────────────────────────────────────────────────────────
 
 export async function registerMcpRoutes(
@@ -395,6 +497,35 @@ export async function registerMcpRoutes(
       }
       return (registerToolRaw as any)(name, ...rest);
     };
+
+    /**
+     * Create a sales or purchase form: run the prefill layer (unless the
+     * caller opted out), post — retrying a computed DocNumber that QBO
+     * reports as taken — and render the summary plus the `prefilled` report.
+     */
+    async function createFormWithPrefill(args: {
+      realmId: string;
+      entity: PrefillEntity;
+      partyId: string;
+      payload: any;
+      prefill: boolean;
+      headerClassId?: string;
+      post: (payload: any) => Promise<unknown>;
+      summarize: (record: any) => string;
+      created: (record: any) => Record<string, unknown>;
+    }): Promise<string> {
+      const { realmId, entity, payload } = args;
+      const outcome = !args.prefill
+        ? emptyOutcome()
+        : SALES_FORM_ENTITIES.has(entity)
+          ? await runSalesFormPrefill(qboManager, realmId, entity as SalesFormEntity, args.partyId, payload, { headerClassId: args.headerClassId })
+          : await runPurchaseFormPrefill(qboManager, realmId, entity as 'Bill' | 'PurchaseOrder', args.partyId, payload, { headerClassId: args.headerClassId });
+      const result: any = await postWithDocNumberRetry(args.post, payload, outcome);
+      const record = result?.[entity];
+      if (!record) return JSON.stringify(result, null, 2);
+      const summary = args.summarize(record);
+      return args.prefill ? appendPrefillReport(summary, args.created(record), outcome) : summary;
+    }
 
     // ── list_clients ──────────────────────────────────────────────────────────
     server.tool('list_clients', 'List all connected QuickBooks Online companies', {}, async () => {
@@ -1474,7 +1605,7 @@ export async function registerMcpRoutes(
     // ── create_invoice ───────────────────────────────────────────────────────
     server.tool(
       'create_invoice',
-      'Create an invoice in QuickBooks Online. Supports class, department, and (where applicable) sales terms at the appropriate QBO level (header or line).',
+      'Create an invoice in QuickBooks Online. By default (prefill=true) it is filled the way the QBO UI fills a new invoice when you pick the customer: DocNumber = next number in the shared sales sequence when the company uses custom transaction numbers (else QBO assigns one), BillEmail / addresses / terms from the customer record, line class + cc/bcc + customer message copied from the customer\'s most recent invoice (message falls back to the company default), and EmailStatus=NeedToSend so it lands in the Send forms queue. Explicit arguments always win. The response ends with a JSON block listing every prefilled field with its source (`prefilled`) and any `warnings` — read it and report it. For class-tracked companies pass class_id explicitly when the customer has no prior invoice to copy from. prefill=false sends exactly what you pass.',
       {
         client_name: z.string().describe('The name of the client company'),
         customer_id: z.string().describe('QBO Customer ID (use get_customers to find IDs)'),
@@ -1482,8 +1613,10 @@ export async function registerMcpRoutes(
         txn_date: z.string().optional().describe('Invoice date (YYYY-MM-DD). Defaults to today.'),
         due_date: z.string().optional().describe('Due date (YYYY-MM-DD)'),
         private_note: z.string().optional().describe('Private memo'),
-        department_id: z.string().optional().describe('Header DepartmentRef.value'),
-        sales_term_id: z.string().optional().describe('Header SalesTermRef.value. QBO computes DueDate from TxnDate + term unless due_date is also set.'),
+        department_id: z.string().optional().describe('Header DepartmentRef.value (prefilled from the customer\'s most recent invoice when omitted)'),
+        sales_term_id: z.string().optional().describe('Header SalesTermRef.value (prefilled from the customer record, else the most recent invoice, else the company default). QBO computes DueDate from TxnDate + term unless due_date is also set.'),
+        ...SALES_HEADER_PARAMS,
+        prefill: PREFILL_PARAM,
         lines: z.array(z.object({
           description: z.string().optional().describe('Line item description'),
           amount: z.number().describe('Line amount'),
@@ -1492,49 +1625,39 @@ export async function registerMcpRoutes(
           item_name: z.string().optional().describe('Item name (for readability)'),
           quantity: z.number().optional().describe('Quantity (default 1)'),
           unit_price: z.number().optional().describe('Unit price'),
+          ...SALES_LINE_EXTRAS,
         })).describe('Invoice line items'),
       },
-      async ({ client_name, customer_id, customer_name, txn_date, due_date, private_note, department_id, sales_term_id, lines }) => {
+      async ({ client_name, customer_id, customer_name, txn_date, due_date, private_note, department_id, sales_term_id, class_id, prefill, lines, ...header }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) {
           return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
         }
 
         try {
-          const invoiceLines = lines.map(l => {
-            const line: any = {
-              Amount: l.amount,
-              DetailType: l.detail_type,
-              Description: l.description,
-            };
-            if (l.detail_type === 'SalesItemLineDetail') {
-              line.SalesItemLineDetail = {
-                Qty: l.quantity ?? 1,
-                UnitPrice: l.unit_price ?? l.amount,
-              };
-              if (l.item_id) {
-                line.SalesItemLineDetail.ItemRef = { value: l.item_id, name: l.item_name };
-              }
-            }
-            return line;
-          });
-
           const payload: any = {
             CustomerRef: { value: customer_id, name: customer_name },
-            Line: invoiceLines,
+            Line: buildSalesTxnLines(lines, class_id),
           };
           if (txn_date) payload.TxnDate = txn_date;
           if (department_id) payload.DepartmentRef = { value: department_id };
           if (sales_term_id) payload.SalesTermRef = { value: sales_term_id };
           if (due_date) payload.DueDate = due_date;
           if (private_note) payload.PrivateNote = private_note;
+          applySalesHeaderArgs(payload, header);
 
-          const result = await qboManager.transactions.createInvoice(realmId, payload);
-          const inv = (result as any)?.Invoice;
-          const summary = inv
-            ? `Invoice #${inv.DocNumber ?? inv.Id} created successfully.\nID: ${inv.Id} | SyncToken: ${inv.SyncToken} | Customer: ${inv.CustomerRef?.name ?? customer_id} | Total: ${formatCurrency(inv.TotalAmt)} | Balance: ${formatCurrency(inv.Balance)}`
-            : JSON.stringify(result, null, 2);
-          return { content: [{ type: 'text', text: summary }] };
+          const text = await createFormWithPrefill({
+            realmId,
+            entity: 'Invoice',
+            partyId: customer_id,
+            payload,
+            prefill,
+            headerClassId: class_id,
+            post: (p) => qboManager.transactions.createInvoice(realmId, p),
+            summarize: (inv) => `Invoice #${inv.DocNumber ?? inv.Id} created successfully.\nID: ${inv.Id} | SyncToken: ${inv.SyncToken} | Customer: ${inv.CustomerRef?.name ?? customer_id} | Total: ${formatCurrency(inv.TotalAmt)} | Balance: ${formatCurrency(inv.Balance)}`,
+            created: (inv) => ({ id: inv.Id, doc_number: inv.DocNumber ?? null, total: inv.TotalAmt, balance: inv.Balance, customer: inv.CustomerRef?.name ?? customer_id }),
+          });
+          return { content: [{ type: 'text', text }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error creating invoice: ${err?.message ?? err}` }] };
         }
@@ -1544,7 +1667,7 @@ export async function registerMcpRoutes(
     // ── update_invoice ───────────────────────────────────────────────────────
     server.tool(
       'update_invoice',
-      'Update an existing invoice. Fetches the current invoice first, then applies changes. Use sparse update: only provided fields are changed. Supports class, department, and (where applicable) sales terms at the appropriate QBO level (header or line).',
+      'Update an existing invoice. Fetches the current invoice first, then applies changes as a sparse-safe merge: header fields you do not pass (DocNumber, BillEmail/Cc/Bcc, CustomerMemo, EmailStatus, addresses, terms, department) stay as they are. When `lines` is provided ALL lines are replaced, and replacement lines that carry no class_id inherit the class the existing lines shared — a get_invoice → update_invoice round trip never strips class. class_id without `lines` re-classes the existing lines in place. Every line change is verified against QBO after the write and rolled back on mismatch.',
       {
         client_name: z.string().describe('The name of the client company'),
         invoice_id: z.string().describe('The QBO Invoice ID to update'),
@@ -1554,6 +1677,15 @@ export async function registerMcpRoutes(
         private_note: z.string().optional().describe('New private note'),
         department_id: z.string().optional().describe('New header DepartmentRef.value'),
         sales_term_id: z.string().optional().describe('New header SalesTermRef.value'),
+        doc_number: z.string().optional().describe('New DocNumber (max 21 characters)'),
+        class_id: z.string().optional().describe('Class for the lines: applied to replacement lines that have no class_id of their own, or — without `lines` — to the existing lines in place. Use get_classes to find IDs.'),
+        bill_email: z.string().optional().describe('New BillEmail.Address'),
+        bill_email_cc: z.string().optional().describe('New BillEmailCc.Address'),
+        bill_email_bcc: z.string().optional().describe('New BillEmailBcc.Address'),
+        customer_memo: z.string().optional().describe('New CustomerMemo.value (the message printed on the invoice)'),
+        email_status: z.enum(['NotSet', 'NeedToSend', 'EmailSent']).optional().describe('New EmailStatus (NeedToSend puts the invoice in the Send forms queue)'),
+        bill_addr: addressInput.optional().describe('Billing address fields, merged over the existing address'),
+        ship_addr: addressInput.optional().describe('Shipping address fields, merged over the existing address'),
         lines: z.array(z.object({
           description: z.string().optional(),
           amount: z.number(),
@@ -1562,9 +1694,10 @@ export async function registerMcpRoutes(
           item_name: z.string().optional(),
           quantity: z.number().optional(),
           unit_price: z.number().optional(),
-        })).optional().describe('Replacement line items (replaces ALL existing lines if provided)'),
+          ...SALES_LINE_EXTRAS,
+        })).optional().describe('Replacement line items (replaces ALL existing lines if provided). Lines from get_invoice round-trip as-is, class and tax code included.'),
       },
-      async ({ client_name, invoice_id, customer_id, txn_date, due_date, private_note, department_id, sales_term_id, lines }) => {
+      async ({ client_name, invoice_id, customer_id, txn_date, due_date, private_note, department_id, sales_term_id, doc_number, class_id, bill_email, bill_email_cc, bill_email_bcc, customer_memo, email_status, bill_addr, ship_addr, lines }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) {
           return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
@@ -1584,21 +1717,23 @@ export async function registerMcpRoutes(
           if (sales_term_id) payload.SalesTermRef = { value: sales_term_id };
           if (due_date) payload.DueDate = due_date;
           if (private_note !== undefined) payload.PrivateNote = private_note;
+          applySalesHeaderArgs(payload, { doc_number, bill_email, bill_email_cc, bill_email_bcc, customer_memo, email_status });
+          if (bill_addr) payload.BillAddr = mergeQboAddress(inv.BillAddr, bill_addr);
+          if (ship_addr) payload.ShipAddr = mergeQboAddress(inv.ShipAddr, ship_addr);
 
+          const notes: string[] = [];
+          const linesTouched = Boolean(lines) || Boolean(class_id);
           if (lines) {
-            payload.Line = lines.map(l => {
-              const line: any = { Amount: l.amount, DetailType: l.detail_type, Description: l.description };
-              if (l.detail_type === 'SalesItemLineDetail') {
-                line.SalesItemLineDetail = { Qty: l.quantity ?? 1, UnitPrice: l.unit_price ?? l.amount };
-                if (l.item_id) line.SalesItemLineDetail.ItemRef = { value: l.item_id, name: l.item_name };
-              }
-              return line;
-            });
+            payload.Line = replacementSalesLines(inv.Line, lines, class_id, notes);
+          } else if (class_id) {
+            const reclassed = reclassSalesLinesInPlace(inv.Line, class_id);
+            payload.Line = reclassed.lines;
+            notes.push(`Class ${class_id} applied to ${reclassed.changed} existing line(s).`);
           }
 
           const result = await qboManager.transactions.updateInvoice(realmId, payload);
           const updated = (result as any)?.Invoice;
-          if (updated && lines) {
+          if (updated && linesTouched) {
             const failure = await verifyLinesAndMaybeRollback({
               entityLabel: 'Invoice',
               original: inv,
@@ -1609,7 +1744,7 @@ export async function registerMcpRoutes(
             if (failure) return { content: [{ type: 'text', text: failure }] };
           }
           const summary = updated
-            ? `Invoice #${updated.DocNumber ?? updated.Id} updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken} | Total: ${formatCurrency(updated.TotalAmt)}`
+            ? `Invoice #${updated.DocNumber ?? updated.Id} updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken} | Total: ${formatCurrency(updated.TotalAmt)}${notes.length ? `\n${notes.join('\n')}` : ''}`
             : JSON.stringify(result, null, 2);
           return { content: [{ type: 'text', text: summary }] };
         } catch (err: any) {
@@ -1650,7 +1785,7 @@ export async function registerMcpRoutes(
     // ── create_bill ──────────────────────────────────────────────────────────
     server.tool(
       'create_bill',
-      'Create a bill (accounts payable) in QuickBooks Online. Supports class, department, and (where applicable) sales terms at the appropriate QBO level (header or line).',
+      'Create a bill (accounts payable) in QuickBooks Online. By default (prefill=true) blanks are filled the way the QBO UI fills a bill for this vendor: terms from the vendor record (else the vendor\'s most recent bill), AP account, department and vendor address from the most recent bill / vendor record, and — for lines without their own class_id or account_id — the class and expense account of the vendor\'s most recent bill. The DocNumber is the vendor\'s own invoice number and is never generated. Explicit arguments always win; the response ends with a JSON block of `prefilled` sources and `warnings`. prefill=false sends exactly what you pass.',
       {
         client_name: z.string().describe('The name of the client company'),
         vendor_id: z.string().describe('QBO Vendor ID (use get_vendors to find IDs)'),
@@ -1658,44 +1793,33 @@ export async function registerMcpRoutes(
         txn_date: z.string().optional().describe('Bill date (YYYY-MM-DD)'),
         due_date: z.string().optional().describe('Due date (YYYY-MM-DD). If omitted but sales_term_id is set, QBO computes from TxnDate + term.'),
         private_note: z.string().optional().describe('Private memo'),
-        department_id: z.string().optional().describe('Header DepartmentRef.value (use get_departments to find IDs)'),
-        sales_term_id: z.string().optional().describe('Header SalesTermRef.value. QBO computes DueDate from TxnDate + term unless due_date is also set.'),
+        department_id: z.string().optional().describe('Header DepartmentRef.value (use get_departments to find IDs; prefilled from the vendor\'s most recent bill when omitted)'),
+        sales_term_id: z.string().optional().describe('Header SalesTermRef.value (prefilled from the vendor record, else the most recent bill). QBO computes DueDate from TxnDate + term unless due_date is also set.'),
+        doc_number: z.string().optional().describe("The vendor's bill/invoice number (DocNumber, max 21 characters). Never auto-generated."),
+        class_id: z.string().optional().describe('Header-level class: applied to every line that has no line-level class_id. Use get_classes to find IDs.'),
+        prefill: PREFILL_PARAM,
         lines: z.array(z.object({
           description: z.string().optional().describe('Line description'),
           amount: z.number().describe('Line amount'),
           detail_type: z.enum(['AccountBasedExpenseLineDetail', 'ItemBasedExpenseLineDetail']).default('AccountBasedExpenseLineDetail'),
-          account_id: z.string().optional().describe('Expense account ID (for AccountBasedExpenseLineDetail)'),
+          account_id: z.string().optional().describe('Expense account ID (for AccountBasedExpenseLineDetail; prefilled from the vendor\'s most recent bill when omitted)'),
           account_name: z.string().optional().describe('Account name (for readability)'),
           item_id: z.string().optional().describe('Item ID (for ItemBasedExpenseLineDetail)'),
           quantity: z.number().optional().describe('Quantity'),
           unit_price: z.number().optional().describe('Unit price'),
-          class_id: z.string().optional().describe('Class ID for tracking'),
+          class_id: z.string().optional().describe('Class ID for tracking (overrides the header class_id for this line)'),
         })).describe('Bill line items'),
       },
-      async ({ client_name, vendor_id, vendor_name, txn_date, due_date, private_note, department_id, sales_term_id, lines }) => {
+      async ({ client_name, vendor_id, vendor_name, txn_date, due_date, private_note, department_id, sales_term_id, doc_number, class_id, prefill, lines }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) {
           return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
         }
 
         try {
-          const billLines = lines.map(l => {
-            const line: any = { Amount: l.amount, DetailType: l.detail_type, Description: l.description };
-            if (l.detail_type === 'AccountBasedExpenseLineDetail') {
-              line.AccountBasedExpenseLineDetail = {};
-              if (l.account_id) line.AccountBasedExpenseLineDetail.AccountRef = { value: l.account_id, name: l.account_name };
-              if (l.class_id) line.AccountBasedExpenseLineDetail.ClassRef = { value: l.class_id };
-            } else {
-              line.ItemBasedExpenseLineDetail = { Qty: l.quantity ?? 1, UnitPrice: l.unit_price ?? l.amount };
-              if (l.item_id) line.ItemBasedExpenseLineDetail.ItemRef = { value: l.item_id };
-              if (l.class_id) line.ItemBasedExpenseLineDetail.ClassRef = { value: l.class_id };
-            }
-            return line;
-          });
-
           const payload: any = {
             VendorRef: { value: vendor_id, name: vendor_name },
-            Line: billLines,
+            Line: buildBillTxnLines(lines, class_id),
           };
           if (txn_date) payload.TxnDate = txn_date;
           if (department_id) payload.DepartmentRef = { value: department_id };
@@ -1703,13 +1827,20 @@ export async function registerMcpRoutes(
           // due_date wins over sales-term-computed DueDate per task spec
           if (due_date) payload.DueDate = due_date;
           if (private_note) payload.PrivateNote = private_note;
+          if (doc_number !== undefined) payload.DocNumber = doc_number;
 
-          const result = await qboManager.transactions.createBill(realmId, payload);
-          const bill = (result as any)?.Bill;
-          const summary = bill
-            ? `Bill #${bill.DocNumber ?? bill.Id} created successfully.\nID: ${bill.Id} | SyncToken: ${bill.SyncToken} | Vendor: ${bill.VendorRef?.name ?? vendor_id} | Total: ${formatCurrency(bill.TotalAmt)} | Balance: ${formatCurrency(bill.Balance)}`
-            : JSON.stringify(result, null, 2);
-          return { content: [{ type: 'text', text: summary }] };
+          const text = await createFormWithPrefill({
+            realmId,
+            entity: 'Bill',
+            partyId: vendor_id,
+            payload,
+            prefill,
+            headerClassId: class_id,
+            post: (p) => qboManager.transactions.createBill(realmId, p),
+            summarize: (bill) => `Bill #${bill.DocNumber ?? bill.Id} created successfully.\nID: ${bill.Id} | SyncToken: ${bill.SyncToken} | Vendor: ${bill.VendorRef?.name ?? vendor_id} | Total: ${formatCurrency(bill.TotalAmt)} | Balance: ${formatCurrency(bill.Balance)}`,
+            created: (bill) => ({ id: bill.Id, doc_number: bill.DocNumber ?? null, total: bill.TotalAmt, balance: bill.Balance, vendor: bill.VendorRef?.name ?? vendor_id }),
+          });
+          return { content: [{ type: 'text', text }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error creating bill: ${err?.message ?? err}` }] };
         }
@@ -3161,44 +3292,52 @@ export async function registerMcpRoutes(
     // ── create_sales_receipt ──────────────────────────────────────────────────
     server.tool(
       'create_sales_receipt',
-      'Create a sales receipt in QuickBooks Online. Use when payment is received at the time of sale (no invoice needed). Supports class, department, and (where applicable) sales terms at the appropriate QBO level (header or line).',
+      'Create a sales receipt in QuickBooks Online. Use when payment is received at the time of sale (no invoice needed). By default (prefill=true) blanks are filled the way the QBO UI does for this customer: DocNumber from the shared sales sequence (custom transaction numbers on), BillEmail / addresses from the customer record, line class, cc/bcc, customer message, deposit account and payment method from the customer\'s most recent sales receipt (else invoice), EmailStatus=NeedToSend. Explicit arguments always win; the response ends with a JSON block of `prefilled` sources and `warnings`. prefill=false sends exactly what you pass.',
       {
         client_name: z.string().describe('The name of the client company'),
         customer_id: z.string().describe('Customer ID'),
         customer_name: z.string().optional().describe('Customer name for readability'),
-        deposit_account_id: z.string().optional().describe('Bank account to deposit to (omit to use Undeposited Funds)'),
+        deposit_account_id: z.string().optional().describe('Bank account to deposit to (omit to use Undeposited Funds; prefilled from the customer\'s most recent sales receipt when omitted)'),
         txn_date: z.string().optional().describe('Sale date YYYY-MM-DD'),
-        payment_method_id: z.string().optional().describe('Payment method ID (use get_payment_methods)'),
+        payment_method_id: z.string().optional().describe('Payment method ID (use get_payment_methods; prefilled from the most recent sales receipt when omitted)'),
         private_note: z.string().optional().describe('Memo'),
         department_id: z.string().optional().describe('Header DepartmentRef.value'),
+        ...SALES_HEADER_PARAMS,
+        prefill: PREFILL_PARAM,
         lines: z.array(z.object({
           description: z.string().optional(),
           amount: z.number(),
+          detail_type: z.enum(['SalesItemLineDetail', 'DescriptionOnly']).optional().describe('Line detail type (default SalesItemLineDetail)'),
           item_id: z.string().optional().describe('Item/service ID'),
           item_name: z.string().optional(),
           quantity: z.number().optional(),
           unit_price: z.number().optional(),
+          ...SALES_LINE_EXTRAS,
         })).describe('Line items'),
       },
-      async ({ client_name, customer_id, customer_name, deposit_account_id, txn_date, payment_method_id, private_note, department_id, lines }) => {
+      async ({ client_name, customer_id, customer_name, deposit_account_id, txn_date, payment_method_id, private_note, department_id, class_id, prefill, lines, ...header }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) return { content: [{ type: 'text', text: `Client not found: "${client_name}".` }] };
         try {
-          const srLines = lines.map(l => {
-            const line: any = { Amount: l.amount, DetailType: 'SalesItemLineDetail', Description: l.description };
-            line.SalesItemLineDetail = { Qty: l.quantity ?? 1, UnitPrice: l.unit_price ?? l.amount };
-            if (l.item_id) line.SalesItemLineDetail.ItemRef = { value: l.item_id, name: l.item_name };
-            return line;
-          });
-          const payload: any = { CustomerRef: { value: customer_id, name: customer_name }, Line: srLines };
+          const payload: any = { CustomerRef: { value: customer_id, name: customer_name }, Line: buildSalesTxnLines(lines, class_id) };
           if (txn_date) payload.TxnDate = txn_date;
           if (deposit_account_id) payload.DepositToAccountRef = { value: deposit_account_id };
           if (payment_method_id) payload.PaymentMethodRef = { value: payment_method_id };
           if (department_id) payload.DepartmentRef = { value: department_id };
           if (private_note) payload.PrivateNote = private_note;
-          const result = await qboManager.transactions.createSalesReceipt(realmId, payload);
-          const sr = (result as any)?.SalesReceipt;
-          return { content: [{ type: 'text', text: sr ? `Sales Receipt #${sr.DocNumber ?? sr.Id} created.\nID: ${sr.Id} | SyncToken: ${sr.SyncToken} | Total: ${formatCurrency(sr.TotalAmt)}` : JSON.stringify(result, null, 2) }] };
+          applySalesHeaderArgs(payload, header);
+          const text = await createFormWithPrefill({
+            realmId,
+            entity: 'SalesReceipt',
+            partyId: customer_id,
+            payload,
+            prefill,
+            headerClassId: class_id,
+            post: (p) => qboManager.transactions.createSalesReceipt(realmId, p),
+            summarize: (sr) => `Sales Receipt #${sr.DocNumber ?? sr.Id} created.\nID: ${sr.Id} | SyncToken: ${sr.SyncToken} | Total: ${formatCurrency(sr.TotalAmt)}`,
+            created: (sr) => ({ id: sr.Id, doc_number: sr.DocNumber ?? null, total: sr.TotalAmt, customer: sr.CustomerRef?.name ?? customer_id }),
+          });
+          return { content: [{ type: 'text', text }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error creating sales receipt: ${err?.message ?? err}` }] };
         }
@@ -3215,16 +3354,19 @@ export async function registerMcpRoutes(
         txn_date: z.string().optional().describe('New date YYYY-MM-DD'),
         private_note: z.string().optional().describe('New memo'),
         department_id: z.string().optional().describe('New header DepartmentRef.value'),
+        class_id: z.string().optional().describe('Class applied to replacement lines that have no class_id of their own'),
         lines: z.array(z.object({
           description: z.string().optional(),
           amount: z.number(),
+          detail_type: z.enum(['SalesItemLineDetail', 'DescriptionOnly']).optional(),
           item_id: z.string().optional(),
           item_name: z.string().optional(),
           quantity: z.number().optional(),
           unit_price: z.number().optional(),
-        })).optional().describe('Replacement line items'),
+          ...SALES_LINE_EXTRAS,
+        })).optional().describe('Replacement line items (lines from get_sales_receipt round-trip as-is, class included; lines without class_id inherit the class the existing lines shared)'),
       },
-      async ({ client_name, sales_receipt_id, txn_date, private_note, department_id, lines }) => {
+      async ({ client_name, sales_receipt_id, txn_date, private_note, department_id, class_id, lines }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) return { content: [{ type: 'text', text: `Client not found: "${client_name}".` }] };
         try {
@@ -3235,14 +3377,8 @@ export async function registerMcpRoutes(
           if (txn_date) payload.TxnDate = txn_date;
           if (department_id) payload.DepartmentRef = { value: department_id };
           if (private_note !== undefined) payload.PrivateNote = private_note;
-          if (lines) {
-            payload.Line = lines.map(l => {
-              const line: any = { Amount: l.amount, DetailType: 'SalesItemLineDetail', Description: l.description };
-              line.SalesItemLineDetail = { Qty: l.quantity ?? 1, UnitPrice: l.unit_price ?? l.amount };
-              if (l.item_id) line.SalesItemLineDetail.ItemRef = { value: l.item_id, name: l.item_name };
-              return line;
-            });
-          }
+          const lineNotes: string[] = [];
+          if (lines) payload.Line = replacementSalesLines(sr.Line, lines, class_id, lineNotes);
           const result = await qboManager.transactions.updateSalesReceipt(realmId, payload);
           const updated = (result as any)?.SalesReceipt;
           if (updated && lines) {
@@ -3255,7 +3391,7 @@ export async function registerMcpRoutes(
             });
             if (failure) return { content: [{ type: 'text', text: failure }] };
           }
-          return { content: [{ type: 'text', text: updated ? `Sales Receipt #${updated.DocNumber ?? updated.Id} updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken} | Total: ${formatCurrency(updated.TotalAmt)}` : JSON.stringify(result, null, 2) }] };
+          return { content: [{ type: 'text', text: updated ? `Sales Receipt #${updated.DocNumber ?? updated.Id} updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken} | Total: ${formatCurrency(updated.TotalAmt)}${lineNotes.length ? `\n${lineNotes.join('\n')}` : ''}` : JSON.stringify(result, null, 2) }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error updating sales receipt: ${err?.message ?? err}` }] };
         }
@@ -3315,7 +3451,7 @@ export async function registerMcpRoutes(
     // ── create_credit_memo ────────────────────────────────────────────────────
     server.tool(
       'create_credit_memo',
-      'Create a credit memo for a customer in QuickBooks Online. Supports class, department, and (where applicable) sales terms at the appropriate QBO level (header or line).',
+      'Create a credit memo for a customer in QuickBooks Online. By default (prefill=true) blanks are filled the way the QBO UI does for this customer: DocNumber from the shared sales sequence (custom transaction numbers on), BillEmail / addresses / terms from the customer record, line class, cc/bcc and customer message from the customer\'s most recent credit memo (else invoice), EmailStatus=NeedToSend. Explicit arguments always win; the response ends with a JSON block of `prefilled` sources and `warnings`. prefill=false sends exactly what you pass.',
       {
         client_name: z.string().describe('The name of the client company'),
         customer_id: z.string().describe('Customer ID'),
@@ -3324,33 +3460,41 @@ export async function registerMcpRoutes(
         private_note: z.string().optional().describe('Memo'),
         department_id: z.string().optional().describe('Header DepartmentRef.value'),
         sales_term_id: z.string().optional().describe('Header SalesTermRef.value'),
+        ...SALES_HEADER_PARAMS,
+        prefill: PREFILL_PARAM,
         lines: z.array(z.object({
           description: z.string().optional(),
           amount: z.number(),
+          detail_type: z.enum(['SalesItemLineDetail', 'DescriptionOnly']).optional().describe('Line detail type (default SalesItemLineDetail)'),
           item_id: z.string().optional(),
           item_name: z.string().optional(),
           quantity: z.number().optional(),
           unit_price: z.number().optional(),
+          ...SALES_LINE_EXTRAS,
         })).describe('Credit memo line items'),
       },
-      async ({ client_name, customer_id, customer_name, txn_date, private_note, department_id, sales_term_id, lines }) => {
+      async ({ client_name, customer_id, customer_name, txn_date, private_note, department_id, sales_term_id, class_id, prefill, lines, ...header }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) return { content: [{ type: 'text', text: `Client not found: "${client_name}".` }] };
         try {
-          const cmLines = lines.map(l => {
-            const line: any = { Amount: l.amount, DetailType: 'SalesItemLineDetail', Description: l.description };
-            line.SalesItemLineDetail = { Qty: l.quantity ?? 1, UnitPrice: l.unit_price ?? l.amount };
-            if (l.item_id) line.SalesItemLineDetail.ItemRef = { value: l.item_id, name: l.item_name };
-            return line;
-          });
-          const payload: any = { CustomerRef: { value: customer_id, name: customer_name }, Line: cmLines };
+          const payload: any = { CustomerRef: { value: customer_id, name: customer_name }, Line: buildSalesTxnLines(lines, class_id) };
           if (txn_date) payload.TxnDate = txn_date;
           if (department_id) payload.DepartmentRef = { value: department_id };
           if (sales_term_id) payload.SalesTermRef = { value: sales_term_id };
           if (private_note) payload.PrivateNote = private_note;
-          const result = await qboManager.transactions.createCreditMemo(realmId, payload);
-          const cm = (result as any)?.CreditMemo;
-          return { content: [{ type: 'text', text: cm ? `Credit Memo #${cm.DocNumber ?? cm.Id} created.\nID: ${cm.Id} | SyncToken: ${cm.SyncToken} | Total: ${formatCurrency(cm.TotalAmt)} | Remaining: ${formatCurrency(cm.RemainingCredit)}` : JSON.stringify(result, null, 2) }] };
+          applySalesHeaderArgs(payload, header);
+          const text = await createFormWithPrefill({
+            realmId,
+            entity: 'CreditMemo',
+            partyId: customer_id,
+            payload,
+            prefill,
+            headerClassId: class_id,
+            post: (p) => qboManager.transactions.createCreditMemo(realmId, p),
+            summarize: (cm) => `Credit Memo #${cm.DocNumber ?? cm.Id} created.\nID: ${cm.Id} | SyncToken: ${cm.SyncToken} | Total: ${formatCurrency(cm.TotalAmt)} | Remaining: ${formatCurrency(cm.RemainingCredit)}`,
+            created: (cm) => ({ id: cm.Id, doc_number: cm.DocNumber ?? null, total: cm.TotalAmt, remaining_credit: cm.RemainingCredit, customer: cm.CustomerRef?.name ?? customer_id }),
+          });
+          return { content: [{ type: 'text', text }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error creating credit memo: ${err?.message ?? err}` }] };
         }
@@ -3368,16 +3512,19 @@ export async function registerMcpRoutes(
         private_note: z.string().optional(),
         department_id: z.string().optional().describe('New header DepartmentRef.value'),
         sales_term_id: z.string().optional().describe('New header SalesTermRef.value'),
+        class_id: z.string().optional().describe('Class applied to replacement lines that have no class_id of their own'),
         lines: z.array(z.object({
           description: z.string().optional(),
           amount: z.number(),
+          detail_type: z.enum(['SalesItemLineDetail', 'DescriptionOnly']).optional(),
           item_id: z.string().optional(),
           item_name: z.string().optional(),
           quantity: z.number().optional(),
           unit_price: z.number().optional(),
-        })).optional().describe('Replacement lines'),
+          ...SALES_LINE_EXTRAS,
+        })).optional().describe('Replacement lines (lines from get_credit_memo round-trip as-is, class included; lines without class_id inherit the class the existing lines shared)'),
       },
-      async ({ client_name, credit_memo_id, txn_date, private_note, department_id, sales_term_id, lines }) => {
+      async ({ client_name, credit_memo_id, txn_date, private_note, department_id, sales_term_id, class_id, lines }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) return { content: [{ type: 'text', text: `Client not found: "${client_name}".` }] };
         try {
@@ -3389,14 +3536,8 @@ export async function registerMcpRoutes(
           if (department_id) payload.DepartmentRef = { value: department_id };
           if (sales_term_id) payload.SalesTermRef = { value: sales_term_id };
           if (private_note !== undefined) payload.PrivateNote = private_note;
-          if (lines) {
-            payload.Line = lines.map(l => {
-              const line: any = { Amount: l.amount, DetailType: 'SalesItemLineDetail', Description: l.description };
-              line.SalesItemLineDetail = { Qty: l.quantity ?? 1, UnitPrice: l.unit_price ?? l.amount };
-              if (l.item_id) line.SalesItemLineDetail.ItemRef = { value: l.item_id, name: l.item_name };
-              return line;
-            });
-          }
+          const lineNotes: string[] = [];
+          if (lines) payload.Line = replacementSalesLines(cm.Line, lines, class_id, lineNotes);
           const result = await qboManager.transactions.updateCreditMemo(realmId, payload);
           const updated = (result as any)?.CreditMemo;
           if (updated && lines) {
@@ -3409,7 +3550,7 @@ export async function registerMcpRoutes(
             });
             if (failure) return { content: [{ type: 'text', text: failure }] };
           }
-          return { content: [{ type: 'text', text: updated ? `Credit Memo #${updated.DocNumber ?? updated.Id} updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken}` : JSON.stringify(result, null, 2) }] };
+          return { content: [{ type: 'text', text: updated ? `Credit Memo #${updated.DocNumber ?? updated.Id} updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken}${lineNotes.length ? `\n${lineNotes.join('\n')}` : ''}` : JSON.stringify(result, null, 2) }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error updating credit memo: ${err?.message ?? err}` }] };
         }
@@ -3456,7 +3597,7 @@ export async function registerMcpRoutes(
     // ── create_estimate ───────────────────────────────────────────────────────
     server.tool(
       'create_estimate',
-      'Create a customer estimate/quote in QuickBooks Online. Supports class, department, and (where applicable) sales terms at the appropriate QBO level (header or line).',
+      'Create a customer estimate/quote in QuickBooks Online. By default (prefill=true) blanks are filled the way the QBO UI does for this customer: DocNumber from the shared sales sequence (estimates share it with invoices when custom transaction numbers are on), BillEmail / addresses / terms from the customer record, line class, cc/bcc and customer message from the customer\'s most recent estimate (else invoice), EmailStatus=NeedToSend. Explicit arguments always win; the response ends with a JSON block of `prefilled` sources and `warnings`. prefill=false sends exactly what you pass.',
       {
         client_name: z.string().describe('The name of the client company'),
         customer_id: z.string().describe('Customer ID'),
@@ -3466,34 +3607,42 @@ export async function registerMcpRoutes(
         private_note: z.string().optional().describe('Memo'),
         department_id: z.string().optional().describe('Header DepartmentRef.value'),
         sales_term_id: z.string().optional().describe('Header SalesTermRef.value'),
+        ...SALES_HEADER_PARAMS,
+        prefill: PREFILL_PARAM,
         lines: z.array(z.object({
           description: z.string().optional(),
           amount: z.number(),
+          detail_type: z.enum(['SalesItemLineDetail', 'DescriptionOnly']).optional().describe('Line detail type (default SalesItemLineDetail)'),
           item_id: z.string().optional(),
           item_name: z.string().optional(),
           quantity: z.number().optional(),
           unit_price: z.number().optional(),
+          ...SALES_LINE_EXTRAS,
         })).describe('Line items'),
       },
-      async ({ client_name, customer_id, customer_name, txn_date, expiry_date, private_note, department_id, sales_term_id, lines }) => {
+      async ({ client_name, customer_id, customer_name, txn_date, expiry_date, private_note, department_id, sales_term_id, class_id, prefill, lines, ...header }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) return { content: [{ type: 'text', text: `Client not found: "${client_name}".` }] };
         try {
-          const estLines = lines.map(l => {
-            const line: any = { Amount: l.amount, DetailType: 'SalesItemLineDetail', Description: l.description };
-            line.SalesItemLineDetail = { Qty: l.quantity ?? 1, UnitPrice: l.unit_price ?? l.amount };
-            if (l.item_id) line.SalesItemLineDetail.ItemRef = { value: l.item_id, name: l.item_name };
-            return line;
-          });
-          const payload: any = { CustomerRef: { value: customer_id, name: customer_name }, Line: estLines };
+          const payload: any = { CustomerRef: { value: customer_id, name: customer_name }, Line: buildSalesTxnLines(lines, class_id) };
           if (txn_date) payload.TxnDate = txn_date;
           if (expiry_date) payload.ExpirationDate = expiry_date;
           if (department_id) payload.DepartmentRef = { value: department_id };
           if (sales_term_id) payload.SalesTermRef = { value: sales_term_id };
           if (private_note) payload.PrivateNote = private_note;
-          const result = await qboManager.transactions.createEstimate(realmId, payload);
-          const est = (result as any)?.Estimate;
-          return { content: [{ type: 'text', text: est ? `Estimate #${est.DocNumber ?? est.Id} created.\nID: ${est.Id} | SyncToken: ${est.SyncToken} | Total: ${formatCurrency(est.TotalAmt)}` : JSON.stringify(result, null, 2) }] };
+          applySalesHeaderArgs(payload, header);
+          const text = await createFormWithPrefill({
+            realmId,
+            entity: 'Estimate',
+            partyId: customer_id,
+            payload,
+            prefill,
+            headerClassId: class_id,
+            post: (p) => qboManager.transactions.createEstimate(realmId, p),
+            summarize: (est) => `Estimate #${est.DocNumber ?? est.Id} created.\nID: ${est.Id} | SyncToken: ${est.SyncToken} | Total: ${formatCurrency(est.TotalAmt)}`,
+            created: (est) => ({ id: est.Id, doc_number: est.DocNumber ?? null, total: est.TotalAmt, customer: est.CustomerRef?.name ?? customer_id }),
+          });
+          return { content: [{ type: 'text', text }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error creating estimate: ${err?.message ?? err}` }] };
         }
@@ -3513,16 +3662,19 @@ export async function registerMcpRoutes(
         department_id: z.string().optional().describe('New header DepartmentRef.value'),
         sales_term_id: z.string().optional().describe('New header SalesTermRef.value'),
         txn_status: z.enum(['Pending', 'Accepted', 'Closed', 'Rejected']).optional().describe('Estimate status'),
+        class_id: z.string().optional().describe('Class applied to replacement lines that have no class_id of their own'),
         lines: z.array(z.object({
           description: z.string().optional(),
           amount: z.number(),
+          detail_type: z.enum(['SalesItemLineDetail', 'DescriptionOnly']).optional(),
           item_id: z.string().optional(),
           item_name: z.string().optional(),
           quantity: z.number().optional(),
           unit_price: z.number().optional(),
-        })).optional(),
+          ...SALES_LINE_EXTRAS,
+        })).optional().describe('Replacement lines (lines from get_estimate round-trip as-is, class included; lines without class_id inherit the class the existing lines shared)'),
       },
-      async ({ client_name, estimate_id, txn_date, expiry_date, private_note, department_id, sales_term_id, txn_status, lines }) => {
+      async ({ client_name, estimate_id, txn_date, expiry_date, private_note, department_id, sales_term_id, txn_status, class_id, lines }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) return { content: [{ type: 'text', text: `Client not found: "${client_name}".` }] };
         try {
@@ -3536,14 +3688,8 @@ export async function registerMcpRoutes(
           if (sales_term_id) payload.SalesTermRef = { value: sales_term_id };
           if (private_note !== undefined) payload.PrivateNote = private_note;
           if (txn_status) payload.TxnStatus = txn_status;
-          if (lines) {
-            payload.Line = lines.map(l => {
-              const line: any = { Amount: l.amount, DetailType: 'SalesItemLineDetail', Description: l.description };
-              line.SalesItemLineDetail = { Qty: l.quantity ?? 1, UnitPrice: l.unit_price ?? l.amount };
-              if (l.item_id) line.SalesItemLineDetail.ItemRef = { value: l.item_id, name: l.item_name };
-              return line;
-            });
-          }
+          const lineNotes: string[] = [];
+          if (lines) payload.Line = replacementSalesLines(est.Line, lines, class_id, lineNotes);
           const result = await qboManager.transactions.updateEstimate(realmId, payload);
           const updated = (result as any)?.Estimate;
           if (updated && lines) {
@@ -3556,7 +3702,7 @@ export async function registerMcpRoutes(
             });
             if (failure) return { content: [{ type: 'text', text: failure }] };
           }
-          return { content: [{ type: 'text', text: updated ? `Estimate #${updated.DocNumber ?? updated.Id} updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken} | Status: ${updated.TxnStatus}` : JSON.stringify(result, null, 2) }] };
+          return { content: [{ type: 'text', text: updated ? `Estimate #${updated.DocNumber ?? updated.Id} updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken} | Status: ${updated.TxnStatus}${lineNotes.length ? `\n${lineNotes.join('\n')}` : ''}` : JSON.stringify(result, null, 2) }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error updating estimate: ${err?.message ?? err}` }] };
         }
@@ -3600,7 +3746,7 @@ export async function registerMcpRoutes(
     // ── create_purchase_order ─────────────────────────────────────────────────
     server.tool(
       'create_purchase_order',
-      'Create a purchase order to a vendor in QuickBooks Online. Supports class, department, and (where applicable) sales terms at the appropriate QBO level (header or line).',
+      'Create a purchase order to a vendor in QuickBooks Online. By default (prefill=true) blanks are filled the way the QBO UI does for this vendor: DocNumber from the purchase-order sequence when the company uses custom PO numbers (else QBO assigns one), terms / vendor address / email from the vendor record, AP account, department, ship-to address, vendor message and line class from the vendor\'s most recent purchase order, EmailStatus=NeedToSend. Explicit arguments always win; the response ends with a JSON block of `prefilled` sources and `warnings`. prefill=false sends exactly what you pass.',
       {
         client_name: z.string().describe('The name of the client company'),
         vendor_id: z.string().describe('Vendor ID'),
@@ -3610,6 +3756,12 @@ export async function registerMcpRoutes(
         private_note: z.string().optional().describe('Memo'),
         department_id: z.string().optional().describe('Header DepartmentRef.value'),
         sales_term_id: z.string().optional().describe('Header SalesTermRef.value'),
+        doc_number: z.string().optional().describe('Explicit PO number (DocNumber, max 21 characters). Omit to let prefill compute the next PO number (custom PO numbers on) or QBO assign one.'),
+        class_id: z.string().optional().describe('Header-level class: applied to every line that has no line-level class_id; a header ClassRef is added only when the company tracks class per transaction. Use get_classes to find IDs.'),
+        po_email: z.string().optional().describe('POEmail.Address — where the PO is emailed (prefilled from the vendor record when omitted)'),
+        vendor_memo: z.string().optional().describe('Memo — the message printed on the PO for the vendor (prefilled from the most recent PO when omitted)'),
+        email_status: z.enum(['NotSet', 'NeedToSend', 'EmailSent']).optional().describe('EmailStatus. With prefill on this defaults to NeedToSend; pass NotSet to keep the PO out of the Send queue.'),
+        prefill: PREFILL_PARAM,
         lines: z.array(z.object({
           description: z.string().optional(),
           amount: z.number(),
@@ -3618,33 +3770,35 @@ export async function registerMcpRoutes(
           quantity: z.number().optional(),
           unit_price: z.number().optional(),
           account_id: z.string().optional().describe('Expense account ID (if no item)'),
+          class_id: z.string().optional().describe('Line ClassRef (overrides the header class_id for this line)'),
         })).describe('Purchase order lines'),
       },
-      async ({ client_name, vendor_id, vendor_name, txn_date, ship_to_id, private_note, department_id, sales_term_id, lines }) => {
+      async ({ client_name, vendor_id, vendor_name, txn_date, ship_to_id, private_note, department_id, sales_term_id, doc_number, class_id, po_email, vendor_memo, email_status, prefill, lines }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) return { content: [{ type: 'text', text: `Client not found: "${client_name}".` }] };
         try {
-          const poLines = lines.map(l => {
-            const line: any = { Amount: l.amount, Description: l.description };
-            if (l.item_id) {
-              line.DetailType = 'ItemBasedExpenseLineDetail';
-              line.ItemBasedExpenseLineDetail = { Qty: l.quantity ?? 1, UnitPrice: l.unit_price ?? l.amount, ItemRef: { value: l.item_id, name: l.item_name } };
-            } else {
-              line.DetailType = 'AccountBasedExpenseLineDetail';
-              line.AccountBasedExpenseLineDetail = {};
-              if (l.account_id) line.AccountBasedExpenseLineDetail.AccountRef = { value: l.account_id };
-            }
-            return line;
-          });
-          const payload: any = { VendorRef: { value: vendor_id, name: vendor_name }, Line: poLines };
+          const payload: any = { VendorRef: { value: vendor_id, name: vendor_name }, Line: buildPoTxnLines(lines, class_id) };
           if (txn_date) payload.TxnDate = txn_date;
           if (ship_to_id) payload.ShipTo = { value: ship_to_id };
           if (department_id) payload.DepartmentRef = { value: department_id };
           if (sales_term_id) payload.SalesTermRef = { value: sales_term_id };
           if (private_note) payload.PrivateNote = private_note;
-          const result = await qboManager.transactions.createPurchaseOrder(realmId, payload);
-          const po = (result as any)?.PurchaseOrder;
-          return { content: [{ type: 'text', text: po ? `Purchase Order #${po.DocNumber ?? po.Id} created.\nID: ${po.Id} | SyncToken: ${po.SyncToken} | Vendor: ${po.VendorRef?.name ?? vendor_id} | Total: ${formatCurrency(po.TotalAmt)}` : JSON.stringify(result, null, 2) }] };
+          if (doc_number !== undefined) payload.DocNumber = doc_number;
+          if (po_email !== undefined) payload.POEmail = { Address: po_email };
+          if (vendor_memo !== undefined) payload.Memo = vendor_memo;
+          if (email_status !== undefined) payload.EmailStatus = email_status;
+          const text = await createFormWithPrefill({
+            realmId,
+            entity: 'PurchaseOrder',
+            partyId: vendor_id,
+            payload,
+            prefill,
+            headerClassId: class_id,
+            post: (p) => qboManager.transactions.createPurchaseOrder(realmId, p),
+            summarize: (po) => `Purchase Order #${po.DocNumber ?? po.Id} created.\nID: ${po.Id} | SyncToken: ${po.SyncToken} | Vendor: ${po.VendorRef?.name ?? vendor_id} | Total: ${formatCurrency(po.TotalAmt)}`,
+            created: (po) => ({ id: po.Id, doc_number: po.DocNumber ?? null, total: po.TotalAmt, vendor: po.VendorRef?.name ?? vendor_id }),
+          });
+          return { content: [{ type: 'text', text }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error creating purchase order: ${err?.message ?? err}` }] };
         }
@@ -4213,6 +4367,12 @@ export async function registerMcpRoutes(
             private_note: inv.PrivateNote,
             department_id: inv.DepartmentRef?.value,
             sales_term_id: inv.SalesTermRef?.value,
+            bill_email: inv.BillEmail?.Address,
+            bill_email_cc: inv.BillEmailCc?.Address,
+            bill_email_bcc: inv.BillEmailBcc?.Address,
+            customer_memo: inv.CustomerMemo?.value,
+            email_status: inv.EmailStatus,
+            print_status: inv.PrintStatus,
             total_amt: inv.TotalAmt,
             balance: inv.Balance,
             lines: qboSalesLinesToUpdateShape(inv.Line ?? []),
@@ -4845,7 +5005,7 @@ export async function registerMcpRoutes(
       file_url?: string;
       file_base64?: string;
       file_name?: string;
-    }): Promise<{ fileName: string; bytes: Uint8Array }> {
+    }): Promise<{ fileName: string; bytes: Uint8Array; source: string }> {
       const sources = [src.file_path, src.file_url, src.file_base64].filter((s) => s !== undefined);
       if (sources.length !== 1) {
         throw new Error('Provide exactly one of file_path, file_url, or file_base64.');
@@ -4853,6 +5013,9 @@ export async function registerMcpRoutes(
 
       let fileName: string;
       let bytes: Uint8Array;
+      // Where the bytes came from, for the tool output and for error reports:
+      // an upload that fails must say what was fetched, not just that it failed.
+      let source: string;
       if (src.file_path !== undefined) {
         if (!attachmentsDir) {
           throw new Error(
@@ -4879,23 +5042,41 @@ export async function registerMcpRoutes(
           throw err;
         }
         fileName = src.file_name ?? basename(resolved);
+        source = `file_path ${resolved} (${bytes.length.toLocaleString('en-US')} bytes)`;
       } else if (src.file_url !== undefined) {
-        const url = assertSafeUrl(src.file_url);
-        const res = await fetch(url);
-        if (!res.ok) throw new Error(`Failed to fetch file_url (HTTP ${res.status})`);
-        bytes = new Uint8Array(await res.arrayBuffer());
-        fileName = src.file_name ?? (basename(url.pathname) || 'attachment');
+        // Redirects are followed by hand with the SSRF guard on every hop, a
+        // browser-ish User-Agent is sent, and the file name comes from
+        // file_name → Content-Disposition → URL path (only with a known
+        // extension) → the bytes' magic number. Dropbox temporary links
+        // 302 and end in "/file", which is how the old code mis-named them.
+        const fetched = await fetchRemoteFile(src.file_url);
+        bytes = fetched.bytes;
+        fileName = resolveAttachmentFileName({ explicit: src.file_name, dispositionFileName: fetched.dispositionFileName, url: fetched.finalUrl, bytes });
+        source = `file_url ${fetched.finalUrl.host}: ${describeRemoteFetch(fetched)}`;
+        const sniffed = sniffContentType(bytes);
+        if (sniffed?.contentType === 'text/html' && contentTypeForFile(fileName) !== 'text/html') {
+          const head = Buffer.from(bytes.subarray(0, 120)).toString('utf8').replace(/\s+/g, ' ').trim();
+          throw new Error(
+            `file_url returned an HTML page, not a file (${source}). The link has probably expired, is single-use and was already consumed, or needs a browser session — mint a fresh link and retry. First bytes: "${head}"`
+          );
+        }
       } else {
         if (!src.file_name) throw new Error('file_name is required when using file_base64.');
         bytes = Uint8Array.from(Buffer.from(src.file_base64!, 'base64'));
         fileName = src.file_name;
+        source = `file_base64 (${bytes.length.toLocaleString('en-US')} bytes)`;
       }
 
-      if (bytes.length === 0) throw new Error(`File is empty: ${fileName}`);
+      if (bytes.length === 0) throw new Error(`File is empty: ${fileName} (${source})`);
       if (bytes.length > MAX_ATTACHMENT_BYTES) {
         throw new Error(`File exceeds QBO's 20 MB attachment limit: ${fileName} (${bytes.length} bytes)`);
       }
-      return { fileName, bytes };
+      return { fileName, bytes, source };
+    }
+
+    /** Content type for an upload: explicit override → file-name extension → the bytes' magic number. */
+    function attachmentContentType(explicit: string | undefined, fileName: string, bytes: Uint8Array): string | null {
+      return explicit ?? contentTypeForFile(fileName) ?? sniffContentType(bytes)?.contentType ?? null;
     }
 
     function buildEntityRef(entity_type?: string, entity_id?: string): { type: string; id: string } | undefined {
@@ -4941,17 +5122,21 @@ export async function registerMcpRoutes(
         }
         try {
           const entityRef = buildEntityRef(entity_type, entity_id);
-          const { fileName, bytes } = await loadAttachmentBytes({ file_path, file_url, file_base64, file_name });
-          const contentType = content_type ?? contentTypeForFile(fileName);
+          const { fileName, bytes, source } = await loadAttachmentBytes({ file_path, file_url, file_base64, file_name });
+          const contentType = attachmentContentType(content_type, fileName, bytes);
           if (!contentType) {
-            return { content: [{ type: 'text', text: `Cannot infer content type from "${fileName}". Supported extensions: ${supportedExtensions()} — or pass content_type explicitly.` }] };
+            return { content: [{ type: 'text', text: `Cannot infer content type from "${fileName}" (${source}). Supported extensions: ${supportedExtensions()} — pass file_name with an extension, or content_type explicitly.` }] };
           }
+          const sniffed = sniffContentType(bytes);
+          const typeNote = sniffed && sniffed.contentType !== contentType && !(sniffed.contentType === 'image/jpeg' && contentType === 'image/jpeg')
+            ? `\nNote: the bytes look like ${sniffed.contentType} but the upload was typed ${contentType} (from ${content_type ? 'content_type' : `"${fileName}"`}).`
+            : '';
           const [result] = await qboManager.attachments.upload(realmId, [
             { fileName, contentType, bytes, note, includeOnSend: include_on_send, entityRef },
           ]);
           const text = result.ok
-            ? `Attachment uploaded.\n${describeUploadResult(result, entityRef)}`
-            : `Attachment upload failed: ${result.error}`;
+            ? `Attachment uploaded.\n${describeUploadResult(result, entityRef)}\nSource: ${source} → uploaded as "${fileName}" (${contentType})${typeNote}`
+            : `Attachment upload failed: ${result.error}\nSource: ${source} → sent as "${fileName}" (${contentType}, ${bytes.length.toLocaleString('en-US')} bytes)${typeNote}`;
           return { content: [{ type: 'text', text }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error creating attachment: ${err?.message ?? err}` }] };
@@ -4989,9 +5174,9 @@ export async function registerMcpRoutes(
           const label = item.file_path ?? item.file_url ?? item.file_name ?? 'item';
           try {
             const entityRef = buildEntityRef(item.entity_type, item.entity_id);
-            const { fileName, bytes } = await loadAttachmentBytes(item);
-            const contentType = contentTypeForFile(fileName);
-            if (!contentType) throw new Error(`Cannot infer content type from "${fileName}" (supported: ${supportedExtensions()})`);
+            const { fileName, bytes, source } = await loadAttachmentBytes(item);
+            const contentType = attachmentContentType(undefined, fileName, bytes);
+            if (!contentType) throw new Error(`Cannot infer content type from "${fileName}" (${source}; supported: ${supportedExtensions()})`);
             loaded.push({ label, item: { fileName, contentType, bytes, note: item.note, includeOnSend: include_on_send, entityRef } });
           } catch (err: any) {
             outcomes.push({ label, status: 'failed', error: err?.message ?? String(err) });
