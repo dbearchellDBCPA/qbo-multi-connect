@@ -922,7 +922,7 @@ function buildActivity() {
     if (Number.isFinite(authorizedAt) && authorizedAt <= now) {
       events.push({
         ts: authorizedAt,
-        tone: 'green',
+        tone: 'ok',
         title: 'Company connected',
         meta: `${conn.clientName} · ${relativeTime(authorizedAt)}`,
       });
@@ -937,7 +937,7 @@ function buildActivity() {
     ) {
       events.push({
         ts: refreshedAt,
-        tone: 'green',
+        tone: 'ok',
         title: 'Token refreshed',
         meta: `${conn.clientName} · ${relativeTime(refreshedAt)}`,
       });
@@ -951,7 +951,7 @@ function buildActivity() {
       );
       events.push({
         ts: expiredAt,
-        tone: 'amber',
+        tone: 'warn',
         title: 'Authorization expired',
         meta: `${conn.clientName} · ${relativeTime(expiredAt)}`,
       });
@@ -960,7 +960,7 @@ function buildActivity() {
       const ts = new Date(conn.updatedAt ?? conn.tokenExpiry).getTime();
       events.push({
         ts: Number.isFinite(ts) ? ts : now,
-        tone: 'amber',
+        tone: 'warn',
         title: 'Connection revoked',
         meta: `${conn.clientName} · ${relativeTime(Number.isFinite(ts) ? ts : now)}`,
       });
@@ -972,7 +972,7 @@ function buildActivity() {
       if (user.createdAt) {
         events.push({
           ts: new Date(user.createdAt).getTime(),
-          tone: 'green',
+          tone: 'ok',
           title: 'Member added',
           meta: `${user.name} · ${relativeTime(user.createdAt)}`,
           userId: user.id,
@@ -981,7 +981,7 @@ function buildActivity() {
       if (user.lastUsedAt) {
         events.push({
           ts: new Date(user.lastUsedAt).getTime(),
-          tone: 'blue',
+          tone: 'info',
           title: 'API key used',
           meta: `${user.name} · ${relativeTime(user.lastUsedAt)}`,
           userId: user.id,

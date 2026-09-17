@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import fastifyFormbody from '@fastify/formbody';
 import type { QBOManager } from '../../index.js';
 import { escapeHtml } from '../callback-page.js';
+import { BRAND_BASE, BRAND_FONT_FACES, BRAND_MARK, BRAND_TOKENS } from '../brand-css.js';
 
 /**
  * OAuth 2.1 authorization server endpoints for the MCP connector.
@@ -20,54 +21,37 @@ import { publicBaseUrl } from '../public-url.js';
 export { publicBaseUrl };
 
 const SIGN_IN_STYLES = `
-  :root {
-    --bg:#f6f7f9; --surface:#fff; --surface-2:#f1f3f5; --border:#e3e6ea;
-    --text:#1d2530; --text-secondary:#5b6672; --text-faint:#8a93a0;
-    --primary:#2a7d4f; --primary-hover:#236b43; --err:#c23b3b; --err-soft:#fbeaea;
-    --shadow:0 10px 30px rgba(16,24,40,.12);
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg:#12161c; --surface:#1a2027; --surface-2:#232a33; --border:#2e3742;
-      --text:#e8ecf1; --text-secondary:#a7b0bb; --text-faint:#6f7a86;
-      --primary:#3fa26c; --primary-hover:#4cb37a; --err:#e06c6c; --err-soft:#3a2222;
-      --shadow:0 10px 30px rgba(0,0,0,.5);
-    }
-  }
-  * { box-sizing:border-box; margin:0; padding:0; }
-  body {
-    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-    background:var(--bg); color:var(--text); min-height:100vh; display:flex;
-    align-items:center; justify-content:center; padding:24px; line-height:1.5;
-  }
+${BRAND_FONT_FACES}
+${BRAND_TOKENS}
+${BRAND_BASE}
   .card {
     background:var(--surface); border:1px solid var(--border); border-radius:16px;
     box-shadow:var(--shadow); max-width:420px; width:100%; padding:36px 32px;
   }
-  .brand { display:flex; align-items:center; gap:10px; margin-bottom:22px; }
-  .brand-logo {
-    width:34px; height:34px; border-radius:9px; background:var(--primary); color:#fff;
-    font-weight:700; font-size:13px; display:inline-flex; align-items:center; justify-content:center;
-  }
-  .brand-name { font-weight:650; font-size:15px; }
+  .brand { margin-bottom:22px; }
   h1 { font-size:19px; margin-bottom:6px; }
   .lead { color:var(--text-secondary); font-size:14px; margin-bottom:22px; }
   .lead strong { color:var(--text); }
-  label { display:block; font-size:13px; font-weight:600; margin-bottom:6px; }
+  label { display:block; font-size:13px; font-weight:600; color:var(--text-secondary); margin-bottom:6px; }
   input[type=text], input[type=password] {
-    width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:8px;
+    width:100%; padding:10px 12px; border:1px solid var(--border-input); border-radius:8px;
     background:var(--surface-2); color:var(--text); font-size:14px; margin-bottom:16px;
     font-family:inherit;
   }
-  input:focus { outline:2px solid var(--primary); outline-offset:-1px; }
+  input::placeholder { color:var(--text-faint); }
+  /* Focus swaps the border for an accent ring, per the brand's field spec. */
+  input:focus-visible {
+    outline:none; border-color:transparent; box-shadow:0 0 0 2px var(--primary);
+  }
   button {
-    width:100%; background:var(--primary); color:#fff; border:none; border-radius:8px;
-    padding:11px; font-size:14.5px; font-weight:600; cursor:pointer; font-family:inherit;
+    width:100%; background:var(--primary); color:var(--on-primary); border:none; border-radius:8px;
+    padding:12px; font-size:14.5px; font-weight:600; cursor:pointer; font-family:inherit;
+    transition:background .15s;
   }
   button:hover { background:var(--primary-hover); }
   .err {
-    background:var(--err-soft); color:var(--err); border-radius:8px; padding:10px 12px;
-    font-size:13.5px; margin-bottom:16px;
+    background:var(--err-soft); border:1px solid var(--err-border); color:var(--err);
+    border-radius:8px; padding:10px 12px; font-size:13.5px; font-weight:500; margin-bottom:16px;
   }
   .note { margin-top:18px; font-size:12.5px; color:var(--text-faint); line-height:1.6; }
 `;
@@ -90,7 +74,7 @@ function signInPage(opts: {
 </head>
 <body>
   <div class="card">
-    <div class="brand"><span class="brand-logo">QB</span><span class="brand-name">QBO Multi-Connect</span></div>
+    <div class="brand">${BRAND_MARK}<span class="brand-name">QBO Multi-Connect</span></div>
     <h1>Sign in to connect</h1>
     <p class="lead"><strong>${escapeHtml(opts.clientName)}</strong> is requesting access to QuickBooks on your behalf. Sign in with your QBO Multi-Connect account — you'll only reach the client companies assigned to you.</p>
     ${opts.error ? `<div class="err">${escapeHtml(opts.error)}</div>` : ''}
@@ -341,7 +325,7 @@ function errorPage(message: string): string {
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Sign-in error — QBO Multi-Connect</title><style>${SIGN_IN_STYLES}</style></head>
 <body><div class="card">
-  <div class="brand"><span class="brand-logo">QB</span><span class="brand-name">QBO Multi-Connect</span></div>
+  <div class="brand">${BRAND_MARK}<span class="brand-name">QBO Multi-Connect</span></div>
   <h1>Can't complete sign-in</h1>
   <p class="lead">${escapeHtml(message)}</p>
 </div></body></html>`;
