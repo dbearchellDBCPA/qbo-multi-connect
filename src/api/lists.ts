@@ -47,6 +47,17 @@ export class ListsAPI {
     return this.client.post(realmId, 'class', cls);
   }
 
+  async getClass(realmId: string, classId: string): Promise<unknown> {
+    return this.client.get(realmId, `class/${classId}`, {});
+  }
+
+  async updateClass(realmId: string, cls: any): Promise<unknown> {
+    if (!cls.Id || cls.SyncToken === undefined || cls.SyncToken === null) {
+      throw new Error('Class must have Id and SyncToken for updates');
+    }
+    return this.client.post(realmId, 'class', cls);
+  }
+
   // ── Departments (a.k.a. Locations) ───────────────────────────────────────
 
   async getDepartments(realmId: string, options: { activeOnly?: boolean } = {}): Promise<unknown> {
@@ -55,6 +66,17 @@ export class ListsAPI {
   }
 
   async createDepartment(realmId: string, dept: any): Promise<unknown> {
+    return this.client.post(realmId, 'department', dept);
+  }
+
+  async getDepartment(realmId: string, departmentId: string): Promise<unknown> {
+    return this.client.get(realmId, `department/${departmentId}`, {});
+  }
+
+  async updateDepartment(realmId: string, dept: any): Promise<unknown> {
+    if (!dept.Id || dept.SyncToken === undefined || dept.SyncToken === null) {
+      throw new Error('Department must have Id and SyncToken for updates');
+    }
     return this.client.post(realmId, 'department', dept);
   }
 

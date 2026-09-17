@@ -23,6 +23,20 @@ export class QBOError extends Error {
 }
 
 /**
+ * Render a QBO Fault body as "Message — Detail (QBO code N)". QBO's Message
+ * alone ("A business validation error has occurred while processing your
+ * request") says nothing; the rule that was broken lives in Detail. Returns
+ * null when the body is not a Fault.
+ */
+export function formatQboFault(body: any): string | null {
+  const e = body?.Fault?.Error?.[0];
+  if (!e) return null;
+  const head = [e.Message, e.Detail].filter(Boolean).join(' — ');
+  if (!head) return null;
+  return e.code != null && e.code !== '' ? `${head} (QBO code ${e.code})` : head;
+}
+
+/**
  * Core QBO API client
  */
 export class QBOClient {
@@ -194,7 +208,7 @@ export class QBOClient {
       let errorMessage: string;
       try {
         const errorJson = JSON.parse(errorBody);
-        errorMessage = errorJson.Fault?.Error?.[0]?.Message || errorJson.error || errorBody;
+        errorMessage = formatQboFault(errorJson) || errorJson.error || errorBody;
       } catch {
         errorMessage = errorBody;
       }

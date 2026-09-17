@@ -41,6 +41,26 @@ import {
   verifyLinesAndMaybeRollback,
 } from './update-verification.js';
 import {
+  QBO_ACCOUNT_TYPES,
+  indexAccounts,
+  ancestorIds,
+  parentIdOf,
+  resolveParentAccount,
+  hasParentSpec,
+  validateAccountPlacement,
+  applyParentToPayload,
+  explainAccountError,
+  describeQboFault,
+  executeAccountBatch,
+  formatBatchOutcome,
+  formatAccountTable,
+  formatAccountTree,
+  projectAccount,
+  refChainIncludes,
+  displayName as accountDisplayName,
+  type QboAccount,
+} from './account-hierarchy.js';
+import {
   addressInput,
   contactInputShape,
   toQboAddress,
@@ -908,24 +928,66 @@ export async function registerMcpRoutes(
     // ── get_accounts ──────────────────────────────────────────────────────────
     server.tool(
       'get_accounts',
-      'Get Chart of Accounts for a QBO client',
-      { client_name: z.string().describe('The name of the client company') },
-      async ({ client_name }) => {
+      'Get the Chart of Accounts for a QBO client, including sub-account (parent/child) structure. Every row carries Id, account number, type, detail type, parent (Id and number), fully qualified name ("Parent:Child:Grandchild") and active flag — enough to verify a loaded chart against its source or diff two companies. format="table" (default) lists one row per account; "tree" indents sub-accounts under their parents; "json" returns the same fields as one compact JSON object per line for programmatic diffing. Deactivated accounts are excluded unless include_inactive=true.',
+      {
+        client_name: z.string().describe('The name of the client company'),
+        format: z.enum(['table', 'tree', 'json']).optional().describe('"table" (default): one row per account. "tree": indented hierarchy. "json": array of {id, acct_num, name, account_type, account_sub_type, classification, parent_id, parent_acct_num, fully_qualified_name, sub_account, active, depth}.'),
+        include_inactive: z.boolean().optional().describe('Also return deactivated accounts (QBO shows them as "Name (deleted)"). Default false.'),
+        account_type: z.enum(QBO_ACCOUNT_TYPES).optional().describe('Only accounts of this QBO account type.'),
+        filter: z.string().optional().describe('Only accounts whose number, name or fully qualified name contains this text (case-insensitive). In tree format the ancestors of each match are kept so the branch renders in place.'),
+      },
+      async ({ client_name, format = 'table', include_inactive = false, account_type, filter }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) {
           return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
         }
         try {
-          const accounts = await qboManager.accounts.getAll(realmId);
-          const list = ((accounts as any)?.QueryResponse?.Account ?? accounts ?? []) as any[];
-          const lines = [
+          const accounts = await qboManager.accounts.getAll(realmId, { includeInactive: include_inactive });
+          const all = ((accounts as any)?.QueryResponse?.Account ?? []) as QboAccount[];
+          const index = indexAccounts(all);
+
+          let list = all;
+          if (account_type) list = list.filter((a) => a.AccountType === account_type);
+          if (filter && filter.trim()) {
+            const needle = filter.trim().toLowerCase();
+            const hit = (a: QboAccount) =>
+              [a.AcctNum, a.Name, a.FullyQualifiedName].some((v) => v != null && String(v).toLowerCase().includes(needle));
+            const matches = list.filter(hit);
+            if (format === 'tree') {
+              // Keep each match's ancestors so the branch renders in place
+              // (ancestors share the account type, so the type filter still holds).
+              const keep = new Set(matches.map((a) => String(a.Id)));
+              for (const m of matches) for (const id of ancestorIds(m, index)) keep.add(id);
+              list = list.filter((a) => keep.has(String(a.Id)));
+            } else {
+              list = matches;
+            }
+          }
+
+          const scope = [
+            include_inactive ? 'including inactive' : 'active only',
+            account_type ? `type: ${account_type}` : '',
+            filter ? `filter: "${filter}"` : '',
+          ].filter(Boolean).join(' | ');
+          const header = [
             `CHART OF ACCOUNTS — ${client_name}`,
+            `${list.length} account${list.length === 1 ? '' : 's'} (${scope})`,
             '─'.repeat(60),
-            ...list.map((a: any) => `  ${a.AcctNum ? `[${a.AcctNum}] ` : ''}${a.Name ?? 'Unknown'} — ${a.AccountType ?? ''} (${a.Classification ?? ''})`),
           ];
-          return { content: [{ type: 'text', text: lines.join('\n') }] };
+          if (list.length === 0) {
+            return { content: [{ type: 'text', text: `${header.join('\n')}\nNo accounts matched.` }] };
+          }
+          if (format === 'json') {
+            const rows = list
+              .slice()
+              .sort((a, b) => accountDisplayName(a).localeCompare(accountDisplayName(b)))
+              .map((a) => projectAccount(a, index));
+            return { content: [{ type: 'text', text: `[\n${rows.map((r) => `  ${JSON.stringify(r)}`).join(',\n')}\n]` }] };
+          }
+          const body = format === 'tree' ? formatAccountTree(list) : formatAccountTable(list, index);
+          return { content: [{ type: 'text', text: [...header, ...body].join('\n') }] };
         } catch (err: any) {
-          return { content: [{ type: 'text', text: `Error fetching accounts: ${err?.message ?? err}` }] };
+          return { content: [{ type: 'text', text: `Error fetching accounts: ${describeQboFault(err)}` }] };
         }
       }
     );
@@ -2193,27 +2255,26 @@ export async function registerMcpRoutes(
     // ── create_account ───────────────────────────────────────────────────────
     server.tool(
       'create_account',
-      'Create a new account in the Chart of Accounts',
+      'Create a new account in the Chart of Accounts, optionally as a sub-account. Identify the parent by account number (parent_account_number), by name or fully qualified name (parent_account_name, e.g. "Fixed Assets:Vehicles"), or by QBO Id (parent_account_id); it is resolved to an Id server-side and the call fails clearly — nothing written — if the parent is not found, ambiguous, or inactive. QBO rules checked before the write and explained if QBO rejects anyway: a sub-account must have the same account type as its parent (detail types may differ); the hierarchy is limited to 5 levels; names must be unique among accounts sharing a parent (the same name under different parents is fine); account numbers must be unique company-wide among active accounts; names cannot contain colons or double quotes; OpeningBalanceEquity / UndepositedFunds / RetainedEarnings / CashReceiptIncome / CashExpenditureExpense / ExchangeGainOrLoss accounts can be neither parents nor children; Fixed Asset accounts with an Accumulated Depreciation / Amortization / Depletion detail type must be sub-accounts (QBO rejects them as top-level or parent accounts). To load a whole chart at once use batch_create_accounts.',
       {
         client_name: z.string().describe('The name of the client company'),
-        name: z.string().describe('Account name'),
-        account_type: z.enum([
-          'Bank', 'Other Current Asset', 'Fixed Asset', 'Other Asset',
-          'Accounts Receivable', 'Equity', 'Expense', 'Other Expense',
-          'Cost of Goods Sold', 'Accounts Payable', 'Credit Card',
-          'Long Term Liability', 'Other Current Liability', 'Income', 'Other Income',
-        ]).describe('QBO account type'),
-        account_sub_type: z.string().optional().describe('Account sub-type (e.g., "Checking", "Savings", "OfficeGeneralAdministrativeExpenses")'),
-        acct_num: z.string().optional().describe('Account number'),
+        name: z.string().describe('Account name (no colons or double quotes; max 100 characters)'),
+        account_type: z.enum(QBO_ACCOUNT_TYPES).describe('QBO account type. For a sub-account this must equal the parent\'s account type.'),
+        account_sub_type: z.string().optional().describe('Account detail type (e.g., "Checking", "AccumulatedDepreciation", "CreditCard", "OfficeGeneralAdministrativeExpenses")'),
+        acct_num: z.string().optional().describe('Account number (unique company-wide)'),
         description: z.string().optional().describe('Account description'),
         currency: z.string().optional().describe('Currency code (e.g., USD). Only for multi-currency companies.'),
+        parent_account_number: z.string().optional().describe('Make this a sub-account of the account with this account number (exact match)'),
+        parent_account_name: z.string().optional().describe('Make this a sub-account of the account with this name or fully qualified name ("Parent:Child"). Exact, case-insensitive; fails if several accounts share the name — then pass the fully qualified name, parent_account_number, or parent_account_id.'),
+        parent_account_id: z.string().optional().describe('Make this a sub-account of the account with this QBO Id'),
       },
-      async ({ client_name, name, account_type, account_sub_type, acct_num, description, currency }) => {
+      async ({ client_name, name, account_type, account_sub_type, acct_num, description, currency, parent_account_number, parent_account_name, parent_account_id }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) {
           return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
         }
 
+        let parent: QboAccount | null = null;
         try {
           const payload: any = { Name: name, AccountType: account_type };
           if (account_sub_type) payload.AccountSubType = account_sub_type;
@@ -2221,14 +2282,37 @@ export async function registerMcpRoutes(
           if (description) payload.Description = description;
           if (currency) payload.CurrencyRef = { value: currency };
 
+          const parentSpec = { id: parent_account_id, number: parent_account_number, name: parent_account_name };
+          if (hasParentSpec(parentSpec)) {
+            // Resolving a parent needs the chart of accounts — inactive included,
+            // so a deactivated parent is reported as such, not as "not found".
+            const coa: any = await qboManager.accounts.getAll(realmId, { includeInactive: true });
+            const index = indexAccounts(coa?.QueryResponse?.Account ?? []);
+            const resolved = resolveParentAccount(index, parentSpec);
+            if (!resolved.ok) {
+              return { content: [{ type: 'text', text: `Cannot create account "${name}": ${resolved.error}\nNothing was written.` }] };
+            }
+            parent = resolved.parent;
+            const problems = validateAccountPlacement(
+              { name, acctNum: acct_num, accountType: account_type, accountSubType: account_sub_type },
+              parent,
+              index
+            );
+            if (problems.length > 0) {
+              return { content: [{ type: 'text', text: `Cannot create account "${name}" under "${accountDisplayName(parent)}" — nothing was written:\n  • ${problems.join('\n  • ')}` }] };
+            }
+            applyParentToPayload(payload, parent);
+          }
+
           const result = await qboManager.accounts.create(realmId, payload);
           const acct = (result as any)?.Account;
           const summary = acct
-            ? `Account "${acct.Name}" created successfully.\nID: ${acct.Id} | SyncToken: ${acct.SyncToken} | Type: ${acct.AccountType} | SubType: ${acct.AccountSubType ?? 'N/A'}${acct.AcctNum ? ` | Number: ${acct.AcctNum}` : ''}`
+            ? `Account "${acct.Name}" created${parent ? ` as a sub-account of "${accountDisplayName(parent)}"` : ''}.\nID: ${acct.Id} | SyncToken: ${acct.SyncToken} | Type: ${acct.AccountType} | SubType: ${acct.AccountSubType ?? 'N/A'}${acct.AcctNum ? ` | Number: ${acct.AcctNum}` : ''}${acct.ParentRef ? ` | Parent ID: ${acct.ParentRef.value}` : ''}\nFully qualified name: ${acct.FullyQualifiedName ?? acct.Name}`
             : JSON.stringify(result, null, 2);
           return { content: [{ type: 'text', text: summary }] };
         } catch (err: any) {
-          return { content: [{ type: 'text', text: `Error creating account: ${err?.message ?? err}` }] };
+          const explained = explainAccountError(err, { name, acctNum: acct_num, parentFqn: parent ? accountDisplayName(parent) : undefined });
+          return { content: [{ type: 'text', text: `Error creating account "${name}": ${explained.text}` }] };
         }
       }
     );
@@ -2236,7 +2320,7 @@ export async function registerMcpRoutes(
     // ── update_account ───────────────────────────────────────────────────────
     server.tool(
       'update_account',
-      'Update an existing account in the Chart of Accounts. Fetches the current account first.',
+      'Update an existing account in the Chart of Accounts: rename, renumber, change the description, activate/deactivate, change the type or detail type, and move it in the hierarchy. Re-parent with parent_account_number / parent_account_name / parent_account_id (resolved and checked exactly like create_account: same account type as the new parent, at most 5 levels, no cycles, no duplicate name under the new parent) or promote it to a top-level account with make_top_level=true. This is how the default accounts QBO seeds into every new company — which cannot be deleted — get folded into the right place in the tree. Fetches the current account first, so only the ID is needed.',
       {
         client_name: z.string().describe('The name of the client company'),
         account_id: z.string().describe('The QBO Account ID to update'),
@@ -2244,13 +2328,26 @@ export async function registerMcpRoutes(
         acct_num: z.string().optional().describe('New account number'),
         description: z.string().optional().describe('New description'),
         active: z.boolean().optional().describe('Set active/inactive status'),
+        account_type: z.enum(QBO_ACCOUNT_TYPES).optional().describe('New QBO account type. QBO refuses to change the type of an account that has sub-accounts, and a sub-account must keep the same type as its parent.'),
+        account_sub_type: z.string().optional().describe('New detail type (e.g. "AccumulatedDepreciation")'),
+        parent_account_number: z.string().optional().describe('Move under the account with this account number (exact match)'),
+        parent_account_name: z.string().optional().describe('Move under the account with this name or fully qualified name ("Parent:Child"); fails if ambiguous'),
+        parent_account_id: z.string().optional().describe('Move under the account with this QBO Id'),
+        make_top_level: z.boolean().optional().describe('Remove the parent so the account becomes top-level. Cannot be combined with a parent_account_* argument.'),
       },
-      async ({ client_name, account_id, name, acct_num, description, active }) => {
+      async ({ client_name, account_id, name, acct_num, description, active, account_type, account_sub_type, parent_account_number, parent_account_name, parent_account_id, make_top_level }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) {
           return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
         }
 
+        const parentSpec = { id: parent_account_id, number: parent_account_number, name: parent_account_name };
+        const reparenting = hasParentSpec(parentSpec);
+        if (reparenting && make_top_level) {
+          return { content: [{ type: 'text', text: 'Pass either a parent_account_* argument or make_top_level=true, not both. Nothing was changed.' }] };
+        }
+
+        let newParent: QboAccount | null = null;
         try {
           const existing = await qboManager.accounts.get(realmId, account_id) as any;
           const acct = existing?.Account;
@@ -2263,15 +2360,102 @@ export async function registerMcpRoutes(
           if (acct_num !== undefined) payload.AcctNum = acct_num;
           if (description !== undefined) payload.Description = description;
           if (active !== undefined) payload.Active = active;
+          if (account_type) payload.AccountType = account_type;
+          if (account_sub_type) payload.AccountSubType = account_sub_type;
+
+          // Moving or re-typing needs the chart of accounts: to resolve the new
+          // parent, and to check QBO's hierarchy rules before the write.
+          if (reparenting || make_top_level || account_type) {
+            const coa: any = await qboManager.accounts.getAll(realmId, { includeInactive: true });
+            const index = indexAccounts(coa?.QueryResponse?.Account ?? []);
+            if (reparenting) {
+              const resolved = resolveParentAccount(index, parentSpec);
+              if (!resolved.ok) {
+                return { content: [{ type: 'text', text: `Cannot move account "${acct.Name}" (ID ${account_id}): ${resolved.error}\nNothing was changed.` }] };
+              }
+              newParent = resolved.parent;
+            } else if (!make_top_level) {
+              const currentParentId = parentIdOf(acct);
+              newParent = currentParentId ? index.byId.get(currentParentId) ?? null : null;
+            }
+            const problems = validateAccountPlacement(
+              { id: String(acct.Id), name: payload.Name, acctNum: payload.AcctNum, accountType: payload.AccountType, accountSubType: payload.AccountSubType },
+              newParent,
+              index
+            );
+            if (problems.length > 0) {
+              return { content: [{ type: 'text', text: `Cannot update account "${acct.Name}" (ID ${account_id}) — nothing was changed:\n  • ${problems.join('\n  • ')}` }] };
+            }
+            if (reparenting || make_top_level) applyParentToPayload(payload, newParent);
+          }
 
           const result = await qboManager.accounts.update(realmId, payload);
           const updated = (result as any)?.Account;
+          const moved = reparenting && newParent
+            ? ` — now a sub-account of "${accountDisplayName(newParent)}"`
+            : make_top_level ? ' — now a top-level account' : '';
           const summary = updated
-            ? `Account "${updated.Name}" updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken} | Type: ${updated.AccountType}${updated.AcctNum ? ` | Number: ${updated.AcctNum}` : ''} | Active: ${updated.Active}`
+            ? `Account "${updated.Name}" updated${moved}.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken} | Type: ${updated.AccountType} | SubType: ${updated.AccountSubType ?? 'N/A'}${updated.AcctNum ? ` | Number: ${updated.AcctNum}` : ''} | Active: ${updated.Active} | Parent: ${updated.ParentRef ? `ID ${updated.ParentRef.value}` : 'none (top level)'}\nFully qualified name: ${updated.FullyQualifiedName ?? updated.Name}`
             : JSON.stringify(result, null, 2);
           return { content: [{ type: 'text', text: summary }] };
         } catch (err: any) {
-          return { content: [{ type: 'text', text: `Error updating account: ${err?.message ?? err}` }] };
+          const explained = explainAccountError(err, { name, acctNum: acct_num, parentFqn: newParent ? accountDisplayName(newParent) : undefined });
+          return { content: [{ type: 'text', text: `Error updating account ${account_id}: ${explained.text}` }] };
+        }
+      }
+    );
+
+    // ── batch_create_accounts ────────────────────────────────────────────────
+    const batchAccountRowSchema = z.object({
+      name: z.string().describe('Account name (no colons or double quotes; max 100 characters)'),
+      account_type: z.enum(QBO_ACCOUNT_TYPES).describe('QBO account type — for a sub-account, must equal the parent\'s type'),
+      account_sub_type: z.string().optional().describe('Detail type, e.g. "AccumulatedDepreciation", "CreditCard", "OtherCurrentLiabilities"'),
+      acct_num: z.string().optional().describe('Account number (unique company-wide). Rows with a number are matched to existing accounts by number on re-runs.'),
+      description: z.string().optional().describe('Account description'),
+      parent_account_number: z.string().optional().describe('Parent by account number — another row in this batch, or an account already in QBO'),
+      parent_account_name: z.string().optional().describe('Parent by name (another row in this batch) or by fully qualified name of an existing account ("Parent:Child")'),
+      parent_account_id: z.string().optional().describe('Parent by QBO Id (existing accounts only)'),
+    }).strict();
+
+    server.tool(
+      'batch_create_accounts',
+      'Load a whole chart of accounts (up to 500 rows) into a QBO company, creating parents before children whatever the input order: rows are sorted by depth, and a row may name its parent by account number or name whether that parent is another row in the batch or an account already in QBO (a row in the batch takes precedence over an existing account of the same name or number). Idempotent: a row matching an existing account (by account number, else by name under the same parent) is reported as unchanged, skipped (default) or updated (on_existing="update" — which also renames, renumbers, re-types, re-parents and reactivates), never duplicated, so the same batch can be re-run after a partial failure. Row-level failures never abort the load: every row gets its own status (created / updated / unchanged / skipped / failed / blocked) and a message naming the QBO rule it broke — account type differs from the parent, nesting past 5 levels, duplicate name under the same parent, duplicate account number company-wide, invalid characters, parent not found or ambiguous — and the children of a failed row come back "blocked" instead of being created at the wrong level. dry_run=true validates and plans the whole load against the live chart and writes nothing. One QBO call per created or updated row, run sequentially.',
+      {
+        client_name: z.string().describe('The name of the client company'),
+        accounts: z.array(batchAccountRowSchema).min(1).max(500).describe('The rows to load, in any order'),
+        on_existing: z.enum(['skip', 'update']).optional().describe('When a row matches an existing account that differs from it: "skip" (default) leaves the account alone and reports the differences; "update" applies the row to it (name, number, type, detail type, description, parent, active).'),
+        dry_run: z.boolean().optional().describe('Plan and validate only — nothing is written. Default false.'),
+      },
+      async ({ client_name, accounts, on_existing = 'skip', dry_run = false }) => {
+        const realmId = await findRealmId(qboManager, client_name);
+        if (!realmId) {
+          return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
+        }
+        try {
+          const coa: any = await qboManager.accounts.getAll(realmId, { includeInactive: true });
+          const index = indexAccounts(coa?.QueryResponse?.Account ?? []);
+          const unwrap = (result: any, verb: string): QboAccount => {
+            const acct = result?.Account;
+            if (!acct) throw new Error(`QBO ${verb} returned no Account: ${JSON.stringify(result).slice(0, 300)}`);
+            return acct;
+          };
+          const writer = {
+            create: async (payload: Record<string, unknown>) => unwrap(await qboManager.accounts.create(realmId, payload), 'create'),
+            update: async (payload: Record<string, unknown>) => unwrap(await qboManager.accounts.update(realmId, payload), 'update'),
+          };
+          const options = { onExisting: on_existing, dryRun: dry_run } as const;
+          const outcome = await executeAccountBatch(accounts, index, writer, options);
+          const lines = [
+            `BATCH CREATE ACCOUNTS — ${client_name}${dry_run ? ' (DRY RUN — nothing written)' : ''}`,
+            '─'.repeat(60),
+            ...formatBatchOutcome(outcome, options),
+          ];
+          if (!dry_run && (outcome.counts.failed > 0 || outcome.counts.blocked > 0)) {
+            lines.push('', 'Fix the rows listed above and re-run the same batch: rows that already landed will report "unchanged".');
+          }
+          return { content: [{ type: 'text', text: lines.join('\n') }] };
+        } catch (err: any) {
+          return { content: [{ type: 'text', text: `Error loading accounts: ${describeQboFault(err)}` }] };
         }
       }
     );
@@ -2564,6 +2748,66 @@ export async function registerMcpRoutes(
       }
     );
 
+    // ── update_class ──────────────────────────────────────────────────────────
+    server.tool(
+      'update_class',
+      'Update an existing class: rename it (name), move it under another class (parent_class_id) or promote it to top level (make_top_level=true), and activate or deactivate it (active). QBO will not delete a class once it has been used on a transaction, so deactivation is the real removal; a deactivated class stays visible via get_classes active_only=false and can be reactivated. Fetches the current class first, so only the ID is needed.',
+      {
+        client_name: z.string().describe('The name of the client company'),
+        class_id: z.string().describe('The QBO Class ID to update (use get_classes to find IDs)'),
+        name: z.string().optional().describe('New class name'),
+        parent_class_id: z.string().optional().describe('Move under this parent class (makes it a sub-class)'),
+        make_top_level: z.boolean().optional().describe('Remove the parent so the class becomes a top-level class. Cannot be combined with parent_class_id.'),
+        active: z.boolean().optional().describe('Set active/inactive status'),
+      },
+      async ({ client_name, class_id, name, parent_class_id, make_top_level, active }) => {
+        const realmId = await findRealmId(qboManager, client_name);
+        if (!realmId) return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
+        if (parent_class_id && make_top_level) {
+          return { content: [{ type: 'text', text: 'Pass either parent_class_id or make_top_level=true, not both. Nothing was changed.' }] };
+        }
+        try {
+          const existing = await qboManager.lists.getClass(realmId, class_id) as any;
+          const cls = existing?.Class;
+          if (!cls) return { content: [{ type: 'text', text: `Class ${class_id} not found.` }] };
+
+          const payload: any = { ...cls };
+          if (name) payload.Name = name;
+          if (active !== undefined) payload.Active = active;
+          if (parent_class_id) {
+            if (parent_class_id === class_id) {
+              return { content: [{ type: 'text', text: `Class "${cls.Name}" cannot be its own parent. Nothing was changed.` }] };
+            }
+            const all: any = await qboManager.lists.getClasses(realmId, { activeOnly: false });
+            const byId = new Map<string, any>(((all?.QueryResponse?.Class ?? []) as any[]).map((c) => [String(c.Id), c]));
+            const parent = byId.get(parent_class_id);
+            if (!parent) {
+              return { content: [{ type: 'text', text: `Parent class ${parent_class_id} not found or inactive. Use get_classes to list classes. Nothing was changed.` }] };
+            }
+            if (refChainIncludes(byId, parent_class_id, class_id)) {
+              return { content: [{ type: 'text', text: `Cannot move class "${cls.Name}" under "${parent.FullyQualifiedName ?? parent.Name}": that class is one of its own sub-classes. Nothing was changed.` }] };
+            }
+            payload.ParentRef = { value: parent_class_id };
+            payload.SubClass = true;
+          } else if (make_top_level) {
+            delete payload.ParentRef;
+            payload.SubClass = false;
+          }
+          // Derived from Name + ParentRef; never send a stale one back.
+          delete payload.FullyQualifiedName;
+
+          const result = await qboManager.lists.updateClass(realmId, payload);
+          const updated = (result as any)?.Class;
+          const summary = updated
+            ? `Class "${updated.Name}" updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken} | Active: ${updated.Active}${updated.ParentRef ? ` | Parent ID: ${updated.ParentRef.value}` : ' | Top level'}\nFully qualified name: ${updated.FullyQualifiedName ?? updated.Name}`
+            : JSON.stringify(result, null, 2);
+          return { content: [{ type: 'text', text: summary }] };
+        } catch (err: any) {
+          return { content: [{ type: 'text', text: `Error updating class: ${describeQboFault(err)}` }] };
+        }
+      }
+    );
+
     // ── get_departments ───────────────────────────────────────────────────────
     server.tool(
       'get_departments',
@@ -2616,6 +2860,66 @@ export async function registerMcpRoutes(
           return { content: [{ type: 'text', text: summary }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error creating department: ${err?.message ?? err}` }] };
+        }
+      }
+    );
+
+    // ── update_department ─────────────────────────────────────────────────────
+    server.tool(
+      'update_department',
+      'Update an existing department (location): rename it (name), move it under another department (parent_department_id) or promote it to top level (make_top_level=true), and activate or deactivate it (active). QBO will not delete a location once it has been used on a transaction, so deactivation is the real removal; a deactivated department stays visible via get_departments active_only=false and can be reactivated. Fetches the current department first, so only the ID is needed.',
+      {
+        client_name: z.string().describe('The name of the client company'),
+        department_id: z.string().describe('The QBO Department ID to update (use get_departments to find IDs)'),
+        name: z.string().optional().describe('New department name'),
+        parent_department_id: z.string().optional().describe('Move under this parent department (makes it a sub-department)'),
+        make_top_level: z.boolean().optional().describe('Remove the parent so the department becomes top-level. Cannot be combined with parent_department_id.'),
+        active: z.boolean().optional().describe('Set active/inactive status'),
+      },
+      async ({ client_name, department_id, name, parent_department_id, make_top_level, active }) => {
+        const realmId = await findRealmId(qboManager, client_name);
+        if (!realmId) return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
+        if (parent_department_id && make_top_level) {
+          return { content: [{ type: 'text', text: 'Pass either parent_department_id or make_top_level=true, not both. Nothing was changed.' }] };
+        }
+        try {
+          const existing = await qboManager.lists.getDepartment(realmId, department_id) as any;
+          const dept = existing?.Department;
+          if (!dept) return { content: [{ type: 'text', text: `Department ${department_id} not found.` }] };
+
+          const payload: any = { ...dept };
+          if (name) payload.Name = name;
+          if (active !== undefined) payload.Active = active;
+          if (parent_department_id) {
+            if (parent_department_id === department_id) {
+              return { content: [{ type: 'text', text: `Department "${dept.Name}" cannot be its own parent. Nothing was changed.` }] };
+            }
+            const all: any = await qboManager.lists.getDepartments(realmId, { activeOnly: false });
+            const byId = new Map<string, any>(((all?.QueryResponse?.Department ?? []) as any[]).map((d) => [String(d.Id), d]));
+            const parent = byId.get(parent_department_id);
+            if (!parent) {
+              return { content: [{ type: 'text', text: `Parent department ${parent_department_id} not found or inactive. Use get_departments to list departments. Nothing was changed.` }] };
+            }
+            if (refChainIncludes(byId, parent_department_id, department_id)) {
+              return { content: [{ type: 'text', text: `Cannot move department "${dept.Name}" under "${parent.FullyQualifiedName ?? parent.Name}": that department is one of its own sub-departments. Nothing was changed.` }] };
+            }
+            payload.ParentRef = { value: parent_department_id };
+            payload.SubDepartment = true;
+          } else if (make_top_level) {
+            delete payload.ParentRef;
+            payload.SubDepartment = false;
+          }
+          // Derived from Name + ParentRef; never send a stale one back.
+          delete payload.FullyQualifiedName;
+
+          const result = await qboManager.lists.updateDepartment(realmId, payload);
+          const updated = (result as any)?.Department;
+          const summary = updated
+            ? `Department "${updated.Name}" updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken} | Active: ${updated.Active}${updated.ParentRef ? ` | Parent ID: ${updated.ParentRef.value}` : ' | Top level'}\nFully qualified name: ${updated.FullyQualifiedName ?? updated.Name}`
+            : JSON.stringify(result, null, 2);
+          return { content: [{ type: 'text', text: summary }] };
+        } catch (err: any) {
+          return { content: [{ type: 'text', text: `Error updating department: ${describeQboFault(err)}` }] };
         }
       }
     );
@@ -2829,7 +3133,7 @@ export async function registerMcpRoutes(
     // ── delete_account ────────────────────────────────────────────────────────
     server.tool(
       'delete_account',
-      'Deactivate a Chart of Accounts account in QuickBooks Online.',
+      'Deactivate a Chart of Accounts account in QuickBooks Online. QBO has no delete for accounts, so this sets Active=false: QBO renames the account "Name (deleted)" and frees its name and account number for reuse; it stays visible via get_accounts include_inactive=true and can be restored with update_account active=true. Deactivate sub-accounts before their parent.',
       {
         client_name: z.string().describe('The name of the client company'),
         account_id: z.string().describe('QBO Account ID to deactivate'),
@@ -2841,10 +3145,15 @@ export async function registerMcpRoutes(
           const existing = await qboManager.accounts.get(realmId, account_id) as any;
           const acct = existing?.Account;
           if (!acct) return { content: [{ type: 'text', text: `Account ${account_id} not found.` }] };
-          await qboManager.accounts.deactivate(realmId, acct);
-          return { content: [{ type: 'text', text: `Account "${acct.Name}" (ID: ${account_id}) deactivated.` }] };
+          if (acct.Active === false) {
+            return { content: [{ type: 'text', text: `Account "${acct.Name}" (ID: ${account_id}) is already inactive.` }] };
+          }
+          const result = await qboManager.accounts.deactivate(realmId, acct) as any;
+          const updated = result?.Account;
+          const renamed = updated?.Name && updated.Name !== acct.Name ? ` — QBO now lists it as "${updated.Name}"` : '';
+          return { content: [{ type: 'text', text: `Account "${acct.Name}" (ID: ${account_id}) deactivated${renamed}.` }] };
         } catch (err: any) {
-          return { content: [{ type: 'text', text: `Error deactivating account: ${err?.message ?? err}` }] };
+          return { content: [{ type: 'text', text: `Error deactivating account: ${explainAccountError(err).text}` }] };
         }
       }
     );
