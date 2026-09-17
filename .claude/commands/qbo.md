@@ -37,8 +37,8 @@ When the user gives you a task, use the QBO MCP tools to complete it. Always thi
 
 ### Write Tools
 - `create_journal_entry` / `update_journal_entry` / `delete_journal_entry` — full JE lifecycle
-- `create_invoice` / `update_invoice` / `delete_invoice` — customer invoices
-- `create_bill` / `update_bill` / `delete_bill` — vendor bills (AP)
+- `create_invoice` / `update_invoice` / `delete_invoice` — customer invoices. `create_invoice` (and `create_estimate` / `create_credit_memo` / `create_sales_receipt`) prefills what you leave blank the way the QBO UI does when you pick the customer: DocNumber from the shared sales sequence, line class, email/cc/bcc, addresses, terms, customer message, EmailStatus=NeedToSend — sources in order: your arguments, the Customer record, the customer's most recent forms, company Preferences. The response ends with a `prefilled` map (field → source) and `warnings`; `prefill: false` sends exactly what you pass. `update_invoice` is sparse-safe: untouched header fields stay, replacement lines inherit the class the existing lines shared, `class_id` alone re-classes lines in place.
+- `create_bill` / `update_bill` / `delete_bill` — vendor bills (AP). `create_bill` prefills terms, AP account, department, vendor address, and the class / expense account of the vendor's last bill for lines that name none; a bill's DocNumber is the vendor's bill number and is never generated. `create_purchase_order` prefills likewise from the vendor's last PO.
 - `create_payment` — customer payments (can link to specific invoices)
 - `create_bill_payment` — vendor payments (Check or CreditCard, can link to specific bills)
 - `create_expense` / `update_expense` — expenses/purchases (Cash, Check, or CreditCard from a bank/CC account); update edits the original Purchase in place
@@ -71,8 +71,9 @@ When the user gives you a task, use the QBO MCP tools to complete it. Always thi
 
 ### Customer Revenue Cycle
 1. `get_customers` — find customer ID
-2. `create_invoice` — create invoice
+2. `create_invoice` — create invoice. It prefills from the customer's last invoice, the Customer record and the company's sales settings: next DocNumber in the shared sales sequence (custom transaction numbers on), line class, BillEmail + cc/bcc, billing/shipping address, terms, the customer message, and EmailStatus=NeedToSend so it shows in the Send queue. Read the `prefilled` map and `warnings` in the response and report them ("numbered 5813; class and cc copied from invoice #5735"). For class-tracked companies pass `class_id` explicitly when the customer has no prior invoice — the response warns "no class set". Pass `prefill: false` only when you want exactly what you send.
 3. `create_payment` — record payment, link to invoice
+4. `create_attachment` with `file_url` to attach backup (a Dropbox temporary link works; pass `file_name` with the extension you want on the attachment) — the response states what was fetched and, on failure, what QBO answered
 
 ### Adjusting Entries
 1. `get_trial_balance` — identify what needs adjustment

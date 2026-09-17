@@ -5,6 +5,12 @@ import {
   contentTypeForFile,
   resolveAttachmentPath,
   assertSafeUrl,
+  parseContentDispositionFileName,
+  sniffContentType,
+  resolveAttachmentFileName,
+  fetchRemoteFile,
+  describeRemoteFetch,
+  REMOTE_FETCH_USER_AGENT,
   MAX_FILES_PER_UPLOAD,
 } from '../../src/api/attachments.js';
 import { QBOClient } from '../../src/api/client.js';
@@ -77,6 +83,80 @@ describe('assertSafeUrl', () => {
   });
 });
 
+// ─── file_url helpers (SPEC §5) ──────────────────────────────────────────────
+
+describe('parseContentDispositionFileName', () => {
+  it('reads quoted, bare and RFC 5987 encoded names, basename only', () => {
+    expect(parseContentDispositionFileName('attachment; filename="TIM true-up 2025.pdf"')).toBe('TIM true-up 2025.pdf');
+    expect(parseContentDispositionFileName('attachment; filename=scan.pdf')).toBe('scan.pdf');
+    expect(parseContentDispositionFileName("attachment; filename*=UTF-8''inv%205813.pdf")).toBe('inv 5813.pdf');
+    expect(parseContentDispositionFileName('attachment; filename="../../etc/passwd"')).toBe('passwd');
+    expect(parseContentDispositionFileName('inline')).toBeNull();
+    expect(parseContentDispositionFileName(null)).toBeNull();
+  });
+});
+
+describe('sniffContentType', () => {
+  it('recognizes PDFs, images and HTML error pages by their leading bytes', () => {
+    expect(sniffContentType(Buffer.from('%PDF-1.7 ...'))).toEqual({ contentType: 'application/pdf', extension: '.pdf' });
+    expect(sniffContentType(Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]))).toEqual({ contentType: 'image/png', extension: '.png' });
+    expect(sniffContentType(Uint8Array.from([0xff, 0xd8, 0xff, 0xe0]))).toEqual({ contentType: 'image/jpeg', extension: '.jpg' });
+    expect(sniffContentType(Buffer.from('\n  <!DOCTYPE html><html>'))).toEqual({ contentType: 'text/html', extension: '.html' });
+    expect(sniffContentType(Buffer.from('<html lang="en">'))).toEqual({ contentType: 'text/html', extension: '.html' });
+    expect(sniffContentType(Buffer.from('plain text'))).toBeNull();
+  });
+});
+
+describe('resolveAttachmentFileName', () => {
+  const url = new URL('https://uc123.dl.dropboxusercontent.com/cd/0/get/tok/file?c_luid=1');
+  it('prefers file_name, then Content-Disposition, then a URL basename with a known extension, then the bytes', () => {
+    expect(resolveAttachmentFileName({ explicit: 'custom.pdf', dispositionFileName: 'disp.pdf', url, bytes: Buffer.from('%PDF') })).toBe('custom.pdf');
+    expect(resolveAttachmentFileName({ dispositionFileName: 'disp.pdf', url, bytes: Buffer.from('%PDF') })).toBe('disp.pdf');
+    expect(resolveAttachmentFileName({ url: new URL('https://files.example.com/checks/img1.png'), bytes: Buffer.from('%PDF') })).toBe('img1.png');
+    expect(resolveAttachmentFileName({ url, bytes: Buffer.from('%PDF-1.4') })).toBe('attachment.pdf');
+    expect(resolveAttachmentFileName({ url, bytes: Buffer.from('<html>') })).toBe('file');
+    expect(resolveAttachmentFileName({ url: new URL('https://files.example.com/'), bytes: Buffer.from('??') })).toBe('attachment');
+  });
+});
+
+describe('fetchRemoteFile', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('follows redirects by hand with a browser User-Agent and reports what it fetched', async () => {
+    const calls: any[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: any, init: any) => {
+      calls.push({ url: String(input), init });
+      if (calls.length === 1) return new Response('', { status: 302, headers: { location: '/cd/0/get/tok/file?c_luid=1' } });
+      return new Response(Buffer.from('%PDF-1.4 x'), { status: 200, headers: { 'content-type': 'application/pdf', 'content-disposition': 'attachment; filename="a.pdf"' } });
+    }));
+    const r = await fetchRemoteFile('https://files.example.com/start');
+    expect(calls.map((c) => c.url)).toEqual(['https://files.example.com/start', 'https://files.example.com/cd/0/get/tok/file?c_luid=1']);
+    for (const c of calls) {
+      expect(c.init.redirect).toBe('manual');
+      expect(c.init.headers['User-Agent']).toBe(REMOTE_FETCH_USER_AGENT);
+    }
+    expect(r.status).toBe(200);
+    expect(r.redirects).toBe(1);
+    expect(r.dispositionFileName).toBe('a.pdf');
+    expect(r.finalUrl.pathname).toBe('/cd/0/get/tok/file');
+    expect(Buffer.from(r.bytes).toString()).toBe('%PDF-1.4 x');
+    expect(describeRemoteFetch(r)).toBe('HTTP 200, 10 bytes, content-type application/pdf, 1 redirect, Content-Disposition name "a.pdf"');
+  });
+
+  it('applies the SSRF guard to every hop and caps the redirect chain', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 302, headers: { location: 'https://10.0.0.9/secret' } })));
+    await expect(fetchRemoteFile('https://files.example.com/start')).rejects.toThrow(/10\.0\.0\.9.*not allowed/);
+
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 302, headers: { location: 'https://files.example.com/again' } })));
+    await expect(fetchRemoteFile('https://files.example.com/start', { maxRedirects: 2 })).rejects.toThrow(/more than 2 redirects/);
+  });
+
+  it('reports the status and a snippet of the body when the fetch fails', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('<html><body>Link expired</body></html>', { status: 403, statusText: 'Forbidden' })));
+    await expect(fetchRemoteFile('https://files.example.com/x.pdf')).rejects.toThrow('Failed to fetch file_url (HTTP 403 Forbidden from files.example.com): <html><body>Link expired</body></html>');
+  });
+});
+
 // ─── Upload multipart structure + response parsing ───────────────────────────
 
 function makeClient(fetchImpl: ReturnType<typeof vi.fn>) {
@@ -140,6 +220,23 @@ describe('AttachmentsAPI.upload', () => {
     expect(results[1].ok).toBe(false);
     expect(results[1].error).toContain('Invalid Reference Id');
     expect(results[1].error).toContain('Purchase 999 not found');
+  });
+
+  it('says what QBO answered when no Attachable comes back, and handles a top-level Fault', async () => {
+    const noAttachable = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ AttachableResponse: [{ Warnings: 'x' }] }) });
+    const api = new AttachmentsAPI(makeClient(noAttachable));
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const [r] = await api.upload('realm-1', [{ fileName: 'a.pdf', contentType: 'application/pdf', bytes: new Uint8Array([1, 2, 3]) }]);
+    expect(r.ok).toBe(false);
+    expect(r.error).toBe('Upload failed: QBO returned HTTP 2xx but no Attachable for this file (3 bytes as application/pdf). QBO response: {"Warnings":"x"}');
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('[qbo-attachments] no Attachable for "a.pdf"'));
+
+    vi.unstubAllGlobals();
+    const topFault = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ Fault: { Error: [{ Message: 'Bad multipart', Detail: 'metadata part missing', code: '2010' }] } }) });
+    const api2 = new AttachmentsAPI(makeClient(topFault));
+    const [r2] = await api2.upload('realm-1', [{ fileName: 'a.pdf', contentType: 'application/pdf', bytes: new Uint8Array([1]) }]);
+    expect(r2.error).toBe('QBO rejected the upload: Bad multipart — metadata part missing (QBO code 2010)');
+    errSpy.mockRestore();
   });
 
   it('enforces the per-request file cap', async () => {
