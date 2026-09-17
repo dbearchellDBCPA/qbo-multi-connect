@@ -14,7 +14,8 @@
     "test": "vitest",
     "cli": "tsx src/cli/index.ts",
     "server": "tsx src/server/index.ts",
-    "start": "node dist/server/index.js"
+    "start": "node dist/server/index.js",
+    "sandbox:coa": "tsx scripts/sandbox-coa-hierarchy.ts"
   },
   "keywords": [
     "quickbooks",

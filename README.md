@@ -353,7 +353,7 @@ require an admin key.
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/company/:realmId/info` | Get company information |
-| `GET` | `/api/company/:realmId/accounts` | Get chart of accounts |
+| `GET` | `/api/company/:realmId/accounts` | Get chart of accounts (active accounts; includes `ParentRef`, `SubAccount`, `FullyQualifiedName`) |
 | `GET` | `/api/company/:realmId/invoices` | Query invoices |
 | `GET` | `/api/company/:realmId/bills` | Query bills |
 | `GET` | `/api/company/:realmId/vendors` | Query vendors |
@@ -376,6 +376,97 @@ require an admin key.
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/api/company/:realmId/journal-entries` | Create a journal entry |
+
+## MCP Tools — Chart of Accounts hierarchy
+
+QuickBooks nests accounts up to five levels deep (`Parent:Child:Grandchild`,
+the `FullyQualifiedName`). These tools build and maintain that tree.
+
+### `create_account` / `update_account` — parents by number, name or Id
+
+```
+create_account(client_name="Acme", name="Accumulated Depreciation",
+               account_type="Fixed Asset", account_sub_type="AccumulatedDepreciation",
+               acct_num="1519", parent_account_number="1510")
+
+update_account(client_name="Acme", account_id="87", parent_account_name="Fixed Assets:Vehicles")
+update_account(client_name="Acme", account_id="87", make_top_level=true)
+```
+
+The parent is resolved server-side: exact account number, exact name, or a
+fully qualified name when the same name exists under several parents (the
+call fails and lists the candidates rather than guessing). Before the write,
+the tools check the rules QBO enforces and report the broken one in plain
+words; if QBO rejects anyway, its fault is translated the same way:
+
+| Rule | Source |
+|---|---|
+| A sub-account has the same account type as its parent (detail types may differ) | QBO validation, code 6000 |
+| At most 5 levels (`FullyQualifiedName` "Limited to 5 levels") | Intuit Account reference |
+| Names are unique among accounts sharing a parent; the same name under different parents is fine | QBO code 6240 / sandbox chart |
+| Account numbers are unique company-wide among active accounts (a deactivated account frees its number) | QBO code 6000, sandbox probe |
+| Names cannot contain `:` or `"`; numbers cannot contain `:` | Intuit Account reference, code 2180 |
+| OpeningBalanceEquity, UndepositedFunds, RetainedEarnings, CashReceiptIncome, CashExpenditureExpense, ExchangeGainOrLoss accounts can be neither parents nor children | Intuit Account reference |
+| Fixed Asset accounts with an Accumulated Depreciation / Amortization / Depletion detail type must be sub-accounts — QBO rejects them as top-level or parent accounts | QBO code 6000, sandbox probe |
+| The type of an account that has sub-accounts cannot be changed | QBO |
+
+`delete_account` deactivates (QBO has no delete for accounts): the account is
+renamed `Name (deleted)`, its name and number are freed, and it stays visible
+with `get_accounts include_inactive=true`.
+
+### `batch_create_accounts` — a whole chart in one call
+
+```
+batch_create_accounts(client_name="Acme", dry_run=true, accounts=[
+  {name:"Fixed Assets", account_type:"Fixed Asset", account_sub_type:"OtherFixedAssets", acct_num:"1500"},
+  {name:"Vehicles",     account_type:"Fixed Asset", account_sub_type:"Vehicles", acct_num:"1510", parent_account_number:"1500"},
+  {name:"Accumulated Depreciation", account_type:"Fixed Asset", account_sub_type:"AccumulatedDepreciation",
+   acct_num:"1519", parent_account_number:"1510"},
+])
+```
+
+- **Parents first, whatever the row order.** A row may name its parent by
+  number or name whether that parent is another row or already in QBO.
+- **Idempotent.** A row matching an existing account (by number, else by name
+  under the same parent) is `unchanged`, `skipped` (default, with the
+  differences listed) or `updated` (`on_existing="update"`), never duplicated.
+  Re-run the same batch after a partial failure.
+- **Per-row results, no abort.** Every row gets `created` / `updated` /
+  `unchanged` / `skipped` / `failed` / `blocked` plus a message naming the
+  rule; children of a failed row are `blocked`, not created at the wrong level.
+- **`dry_run=true`** plans and validates the whole load against the live chart
+  without writing.
+
+### `get_accounts` — verify and diff
+
+`format="table"` (default) lists Id, number, type, detail type, parent Id and
+number, active flag and fully qualified name. `format="tree"` indents
+sub-accounts under their parents. `format="json"` returns one compact object
+per account for diffing. `filter` narrows by number/name/FQN (in tree format
+the ancestors of each match are kept), `account_type` narrows by type, and
+`include_inactive=true` adds deactivated accounts.
+
+### `update_class` / `update_department`
+
+Rename (`name`), re-parent (`parent_class_id` / `parent_department_id`),
+promote (`make_top_level=true`) and activate/deactivate (`active`). QBO does
+not delete a class or location once a transaction has used it, so
+`active=false` is the real removal.
+
+### Acceptance run against a sandbox
+
+`tests/server/mcp-account-hierarchy.e2e.test.ts` drives the real MCP server
+through the scenario in `tests/support/coa-hierarchy-scenario.ts` against a
+fake Intuit API that enforces the rules above with QBO's own fault text. The
+same scenario runs against a live deployment and a **sandbox** company:
+
+```
+npm run sandbox:coa -- --url https://<host>/mcp --key <api key> --client "Company A" --confirm
+```
+
+It loads a `ZZT`-prefixed three-level chart (numbers 9900–9993), reads it
+back, re-runs the batch to prove idempotency, exercises every rule, then
+deactivates everything it created.
 
 ## MCP Tools — Bulk Corrections
 

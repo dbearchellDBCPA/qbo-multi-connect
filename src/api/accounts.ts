@@ -22,11 +22,14 @@ export class AccountsAPI {
   }
 
   /**
-   * Get all accounts
+   * Get all accounts. QBO's query returns active objects only unless Active is
+   * filtered explicitly, so includeInactive adds `WHERE Active IN (true, false)`
+   * (deactivated accounts come back named "Name (deleted)").
    */
-  async getAll(realmId: string, options: { maxResults?: number } = {}): Promise<unknown> {
+  async getAll(realmId: string, options: { maxResults?: number; includeInactive?: boolean } = {}): Promise<unknown> {
     const maxResults = options.maxResults || 1000;
-    return this.query(realmId, `SELECT * FROM Account MAXRESULTS ${maxResults}`);
+    const where = options.includeInactive ? ' WHERE Active IN (true, false)' : '';
+    return this.query(realmId, `SELECT * FROM Account${where} MAXRESULTS ${maxResults}`);
   }
 
   /**
@@ -101,16 +104,21 @@ export class AccountsAPI {
   }
 
   /**
-   * Deactivate an account. QBO does not support hard delete for Account;
-   * this performs a sparse update setting Active=false.
+   * Deactivate an account. QBO has no delete operation for Account — posting
+   * `account?operation=delete` fails with "Operation Delete is not supported"
+   * (QBO code 500) — so this is the documented sparse update setting
+   * Active=false. QBO renames the account "Name (deleted)" and frees both the
+   * name and the account number for reuse.
    */
   async deactivate(realmId: string, account: any): Promise<unknown> {
-    if (!account.Id || !account.SyncToken) {
+    if (!account.Id || account.SyncToken === undefined || account.SyncToken === null) {
       throw new Error('Account must have Id and SyncToken for deactivation');
     }
-    return this.client.post(realmId, 'account?operation=delete', {
+    return this.client.post(realmId, 'account', {
       Id: account.Id,
       SyncToken: account.SyncToken,
+      Active: false,
+      sparse: true,
     });
   }
 

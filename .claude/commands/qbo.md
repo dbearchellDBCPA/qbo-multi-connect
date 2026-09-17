@@ -24,7 +24,7 @@ When the user gives you a task, use the QBO MCP tools to complete it. Always thi
 ### Read Tools
 - `list_clients` — start here, lists all connected QBO companies
 - `get_company_info` — company details, fiscal year, address
-- `get_accounts` — full Chart of Accounts with IDs, types, numbers (use this to look up account IDs before creating transactions)
+- `get_accounts` — full Chart of Accounts with IDs, numbers, types, detail types, parent (Id + number), fully qualified names and active flags; `format: "tree"` shows the sub-account hierarchy indented, `format: "json"` is diff-friendly, `filter` narrows by number/name, `include_inactive` shows deactivated accounts (use this to look up account IDs before creating transactions)
 - `get_customers` / `get_vendors` — entity lists with IDs, balances, status
 - `get_invoices` / `get_bills` — transaction lists, filterable by date and status
 - `get_profit_and_loss` — P&L report (supports summarize by month/quarter/class/department)
@@ -42,7 +42,9 @@ When the user gives you a task, use the QBO MCP tools to complete it. Always thi
 - `create_payment` — customer payments (can link to specific invoices)
 - `create_bill_payment` — vendor payments (Check or CreditCard, can link to specific bills)
 - `create_expense` / `update_expense` — expenses/purchases (Cash, Check, or CreditCard from a bank/CC account); update edits the original Purchase in place
-- `create_account` / `update_account` — Chart of Accounts management
+- `create_account` / `update_account` / `delete_account` — Chart of Accounts management. Both accept a parent by account number (`parent_account_number`), name or fully qualified name (`parent_account_name`), or Id (`parent_account_id`); `update_account` also re-parents (`make_top_level: true` promotes) and changes type/detail type. QBO rules are checked before the write and explained if QBO rejects anyway: sub-accounts share the parent's account type, max 5 levels, names unique per parent, numbers unique company-wide, no colons in names, Accumulated Depreciation/Amortization/Depletion accounts must be sub-accounts. `delete_account` deactivates (QBO cannot delete accounts).
+- `batch_create_accounts` — load a whole chart (up to 500 rows) parents-first regardless of row order; idempotent (re-run after a partial failure: existing rows report `unchanged`, differing ones `skipped` or, with `on_existing: "update"`, `updated`); per-row status + rule-naming message; `dry_run: true` plans without writing.
+- `create_class` / `update_class`, `create_department` / `update_department` — rename, re-parent (`parent_*_id` / `make_top_level`), and activate/deactivate (`active: false` is the real removal — QBO won't delete a class or location that has been used)
 - `create_vendor` / `create_customer` — entity creation
 
 ---
@@ -76,6 +78,14 @@ When the user gives you a task, use the QBO MCP tools to complete it. Always thi
 1. `get_trial_balance` — identify what needs adjustment
 2. `get_accounts` — get account IDs for debit and credit sides
 3. `create_journal_entry` — post with clear description of the adjustment reason
+
+### Load a Chart of Accounts with sub-accounts (migration)
+1. `get_accounts` with `format: "tree"` — see what QBO seeded (defaults cannot be deleted)
+2. `batch_create_accounts` with `dry_run: true` — every row planned; fix any `failed` rows (the message names the row and the QBO rule)
+3. `batch_create_accounts` — parents are created before children automatically; children of a failed row come back `blocked`, everything else lands
+4. Re-run the same batch until every row is `created` or `unchanged` (idempotent — nothing is duplicated)
+5. `update_account` with `parent_account_number` / `make_top_level` — fold QBO's default accounts into the tree
+6. `get_accounts` with `format: "json"` or `"tree"` — diff the result against the source ledger
 
 ### Investigate an Account
 1. `get_general_ledger` with account filter — pull all transactions
