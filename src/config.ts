@@ -1,6 +1,7 @@
 import { config } from 'dotenv';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { parseAlertsConfig, type AlertsConfig } from './alerts/config.js';
 
 // Load .env from project root
 const __filename = fileURLToPath(import.meta.url);
@@ -31,6 +32,8 @@ export interface AppConfig {
     port: number;
     apiKey: string;
   };
+  /** Email alerts when a connection breaks (RESEND_API_KEY, QBO_ALERT_EMAIL, QBO_ALERT_FROM). */
+  alerts: AlertsConfig;
 }
 
 const environment = (process.env.QBO_ENVIRONMENT || 'sandbox') as 'sandbox' | 'production';
@@ -61,6 +64,7 @@ export const appConfig: AppConfig = {
     port: parseInt(process.env.PORT || process.env.QBO_SERVER_PORT || '3456', 10),
     apiKey: process.env.QBO_API_KEY || '',
   },
+  alerts: parseAlertsConfig(process.env),
 };
 
 /**

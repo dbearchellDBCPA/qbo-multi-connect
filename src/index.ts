@@ -4,6 +4,9 @@ import { QBOClient, ReportsAPI, JournalEntriesAPI, TransactionsAPI, AccountsAPI,
 import { UserService } from './users.js';
 import { UploadTokenService } from './upload-tokens.js';
 import { OAuthServerService } from './oauth-server.js';
+import { ConnectionAlerts } from './alerts/connection-alerts.js';
+import { disabledAlertsConfig, type AlertsConfig } from './alerts/config.js';
+import { ResendEmailSender, type EmailSender } from './alerts/email.js';
 import type { OAuthConfig, Connection } from './db/models.js';
 
 export interface QBOManagerConfig {
@@ -13,6 +16,12 @@ export interface QBOManagerConfig {
   clientSecret?: string;
   redirectUri?: string;
   environment?: 'sandbox' | 'production';
+  /** Email alerts when a connection breaks. Omit, or pass a disabled config, to turn them off. */
+  alerts?: AlertsConfig;
+  /** Email transport override (tests). Defaults to Resend with alerts.resendApiKey. */
+  emailSender?: EmailSender;
+  /** The dashboard's public address, for links in alert emails. */
+  dashboardUrl?: () => string | null;
 }
 
 /**
@@ -36,6 +45,7 @@ export class QBOManager {
   public readonly uploadTokens: UploadTokenService;
   public readonly oauth: OAuthServerService;
   public readonly users: UserService;
+  public readonly alerts: ConnectionAlerts;
 
   constructor(config: QBOManagerConfig) {
     // Validate config
@@ -70,6 +80,13 @@ export class QBOManager {
     this.uploadTokens = new UploadTokenService(this.db);
     this.oauth = new OAuthServerService(this.db);
     this.users = new UserService(this.db, config.encryptionKey);
+
+    // Email alerts for broken connections: off unless configured. The
+    // transport is injectable so tests never reach the network.
+    const alertsConfig = config.alerts ?? disabledAlertsConfig();
+    const emailSender =
+      config.emailSender ?? (alertsConfig.enabled ? new ResendEmailSender(alertsConfig.resendApiKey) : null);
+    this.alerts = new ConnectionAlerts(this.db, alertsConfig, emailSender, config.dashboardUrl);
   }
 
   /**
@@ -170,7 +187,7 @@ export class QBOManager {
       return;
     }
 
-    this.refreshDaemon = new RefreshDaemon(this.tokenStore, this.oauthConfig, checkIntervalMs);
+    this.refreshDaemon = new RefreshDaemon(this.tokenStore, this.oauthConfig, checkIntervalMs, undefined, this.alerts);
     this.refreshDaemon.start();
   }
 
@@ -194,3 +211,6 @@ export class QBOManager {
 export type { Connection, OAuthConfig, User, NewUser, UserUpdate, UserRole, UserStatus } from './db/models.js';
 export { QBOError } from './api/index.js';
 export { UserService, generateApiKey, hashApiKey } from './users.js';
+export { parseAlertsConfig } from './alerts/config.js';
+export type { AlertsConfig } from './alerts/config.js';
+export type { EmailSender, OutboundEmail } from './alerts/email.js';

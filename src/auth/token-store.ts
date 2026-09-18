@@ -3,6 +3,7 @@ import { encrypt, decrypt } from '../crypto/encrypt.js';
 import type {
   Connection,
   ConnectionRecord,
+  ConnectionStatus,
   NewConnection,
   TokenUpdate,
 } from '../db/models.js';
@@ -91,6 +92,14 @@ export class TokenStore {
    */
   async getConnectionsExpiringSoon(minutesThreshold: number = 10): Promise<Connection[]> {
     const records = await this.db.getConnectionsExpiringSoon(minutesThreshold);
+    return records.map(record => this.decryptConnection(record));
+  }
+
+  /**
+   * Connections in a given status (tokens decrypted)
+   */
+  async getConnectionsByStatus(status: ConnectionStatus): Promise<Connection[]> {
+    const records = await this.db.getConnectionsByStatus(status);
     return records.map(record => this.decryptConnection(record));
   }
 

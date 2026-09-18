@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import type {
+  ConnectionAlertRecord,
   ConnectionRecord,
   ConnectionStatus,
   NewConnection,
@@ -555,6 +556,40 @@ export class ConnectionDatabase {
   async purgeExpiredOAuth(): Promise<void> {
     this.db.prepare("DELETE FROM oauth_tokens WHERE expires_at <= datetime('now')").run();
     this.db.prepare("DELETE FROM oauth_auth_codes WHERE expires_at <= datetime('now')").run();
+  }
+
+  // ── Connection alerts (email notifications) ──────────────────────────────
+
+  /** Has this exact break (realm + dedupe key) already been reported? */
+  async hasConnectionAlert(realmId: string, kind: ConnectionAlertRecord['kind'], dedupeKey: string): Promise<boolean> {
+    const row = this.db
+      .prepare('SELECT 1 FROM connection_alerts WHERE realm_id = ? AND kind = ? AND dedupe_key = ?')
+      .get(realmId, kind, dedupeKey);
+    return row !== undefined;
+  }
+
+  /** Record a delivered alert. A duplicate (same realm + kind + key) is ignored. */
+  async insertConnectionAlert(row: {
+    realmId: string;
+    clientName: string;
+    kind: ConnectionAlertRecord['kind'];
+    dedupeKey: string;
+    recipients: string[];
+    providerId: string | null;
+  }): Promise<void> {
+    this.db
+      .prepare(
+        'INSERT OR IGNORE INTO connection_alerts (realm_id, client_name, kind, dedupe_key, recipients, provider_id) VALUES (?, ?, ?, ?, ?, ?)'
+      )
+      .run(row.realmId, row.clientName, row.kind, row.dedupeKey, row.recipients.join(', '), row.providerId);
+  }
+
+  /** The most recent alert sent, for the dashboard's status line. */
+  async getLatestConnectionAlert(): Promise<ConnectionAlertRecord | null> {
+    const row = this.db
+      .prepare('SELECT * FROM connection_alerts ORDER BY sent_at DESC, id DESC LIMIT 1')
+      .get() as ConnectionAlertRecord | undefined;
+    return row ?? null;
   }
 
   /**
