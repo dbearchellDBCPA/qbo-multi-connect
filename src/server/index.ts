@@ -10,6 +10,7 @@ import { companyRoutes } from './routes/company.js';
 import { usersRoutes } from './routes/users.js';
 import { authRoutes } from './routes/auth.js';
 import { oauthRoutes } from './routes/oauth.js';
+import { alertsRoutes } from './routes/alerts.js';
 import { registerMcpRoutes } from './mcp.js';
 import { renderCallbackPage } from './callback-page.js';
 import { exchangeCodeForTokens } from '../auth/oauth.js';
@@ -37,6 +38,11 @@ async function startServer() {
     clientSecret: appConfig.intuit.clientSecret,
     redirectUri: appConfig.oauth.redirectUri,
     environment: appConfig.intuit.environment,
+    // Email alerts when a connection breaks. The link in the email uses the
+    // address the server can work out without a request (QBO_PUBLIC_URL,
+    // QBO_ALLOWED_HOSTS, or Railway's public domain).
+    alerts: appConfig.alerts,
+    dashboardUrl: () => resolvePublicUrl().baseUrl,
   });
 
   // Start token refresh daemon (check every 5 minutes)
@@ -205,6 +211,7 @@ async function startServer() {
   await companyRoutes(fastify, qboManager, apiKey);
   await usersRoutes(fastify, qboManager, apiKey);
   await authRoutes(fastify, qboManager, apiKey);
+  await alertsRoutes(fastify, qboManager, apiKey);
   // OAuth 2.1 authorization server: lets one shared workspace connector
   // authenticate each team member individually.
   await oauthRoutes(fastify, qboManager);
@@ -228,6 +235,15 @@ async function startServer() {
     console.log(`🔑 Auth:       Bearer ${apiKey.substring(0, 8)}...`);
     console.log(`💾 Database:   ${appConfig.db.path}`);
     console.log(`🌍 Environment: ${appConfig.intuit.environment}`);
+    const alerts = appConfig.alerts;
+    if (alerts.enabled) {
+      console.log(`📧 Alerts:     on — ${alerts.recipients.join(', ')} (from ${alerts.from})`);
+    } else if (alerts.problems.length === 0 && alerts.missing.length === 3) {
+      console.log(`📧 Alerts:     off — set RESEND_API_KEY, QBO_ALERT_EMAIL and QBO_ALERT_FROM to be emailed when a connection breaks`);
+    } else {
+      const why = [...alerts.problems, ...alerts.missing.map((name) => `${name} is not set`)].join('; ');
+      console.log(`⚠️  Alerts:     off — ${why}`);
+    }
     if (publicUrl.source === 'QBO_PUBLIC_URL') {
       console.log(`🌐 Public URL:  ${publicUrl.baseUrl} (pinned by QBO_PUBLIC_URL)`);
     } else if (publicUrl.baseUrl) {

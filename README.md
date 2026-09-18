@@ -105,6 +105,12 @@ Your QuickBooks connections must survive restarts, so give the app a disk:
    That's all. Don't set any API keys — the app generates its own secrets
    on first boot (next step).
 
+   Optional but recommended: get an email the moment a company's QuickBooks
+   connection breaks, instead of a teammate discovering that client has
+   vanished from Claude. Add `RESEND_API_KEY`, `QBO_ALERT_EMAIL` and
+   `QBO_ALERT_FROM` — see
+   [Email alerts when a connection breaks](#email-alerts-when-a-connection-breaks).
+
 ### Step 5 — Get your web address and admin key
 
 1. Service → **Settings → Networking → Generate Domain**. Railway gives you
@@ -165,6 +171,11 @@ also shows these steps on its **Connect to Claude** card.
 - **QuickBooks re-authorization:** roughly every 100 days per company (an
   Intuit rule). The dashboard shows a countdown and a one-click
   **Reconnect** when it's due.
+- **Broken connections:** if Intuit rejects a company's stored authorization
+  (someone disconnected the app on the QuickBooks side, say), that client
+  disappears from Claude for everyone until an admin clicks **Reconnect**.
+  With [email alerts](#email-alerts-when-a-connection-breaks) configured you
+  hear about it within minutes, not from a teammate.
 
 ---
 
@@ -347,6 +358,13 @@ require an admin key.
 | `GET` | `/api/connections` | List all connected companies |
 | `POST` | `/api/connections/auth-url` | Generate OAuth URL for new connection |
 | `DELETE` | `/api/connections/:realmId` | Disconnect and revoke a company |
+
+### Email alerts (admin key required)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/alerts` | Whether alerts are on, who is notified, and the last alert sent |
+| `POST` | `/api/alerts/test` | Send a test email to the configured recipients |
 
 ### Company Data
 
@@ -622,6 +640,9 @@ curl -H "Authorization: Bearer YOUR_API_KEY" \
 | `QBO_PUBLIC_URL` | No | — | Pins the public origin. Unset = follow the domain each request uses |
 | `QBO_ALLOWED_HOSTS` | No | — | Comma-separated hostnames this deployment answers on (`*.` wildcards ok) |
 | `QBO_REDIRECT_URI` | No | derived | Pins the QuickBooks callback. Unset = `https://<domain in use>/callback` |
+| `RESEND_API_KEY` | No | — | Resend API key for email alerts ("sending access" is enough) |
+| `QBO_ALERT_EMAIL` | No | — | Who to email when a connection breaks; comma-separated for several |
+| `QBO_ALERT_FROM` | No | — | Sender for alert emails, on a domain verified in Resend |
 
 ### Public URL & custom domains
 
@@ -631,6 +652,40 @@ from the hostname each request arrives on — so pointing your own domain at the
 deployment is a DNS change plus one redirect URI registered with Intuit, with
 no redeploy and no downtime. The Railway address keeps working alongside it.
 Full walkthrough: [`docs/CUSTOM-DOMAIN.md`](docs/CUSTOM-DOMAIN.md).
+
+### Email alerts when a connection breaks
+
+A connection "breaks" when Intuit definitively rejects its stored
+authorization (`invalid_grant`: the app was disconnected from the QuickBooks
+side, the authorization was revoked, or the 100-day refresh window closed).
+The refresh daemon notices within the hour, marks the company **Expired**,
+and it vanishes from `list_clients` for every team member until an admin
+clicks **Reconnect**. Set three variables and the server emails you instead
+of leaving you to find out from a teammate:
+
+| Variable | Value |
+|---|---|
+| `RESEND_API_KEY` | An API key from [resend.com](https://resend.com): **API Keys → Create**, permission *Sending access*. |
+| `QBO_ALERT_EMAIL` | Who to notify. Several: `you@yourfirm.com, ops@yourfirm.com`. |
+| `QBO_ALERT_FROM` | The sender, on a domain you have verified in Resend: `QBO Multi-Connect <qbo-alerts@yourfirm.com>`. |
+
+How it behaves:
+
+- **One email per break**, listing every company that broke in that sweep:
+  client name, company ID, why, and the Reconnect steps with a link to the
+  dashboard. Reconnect it and it's watched again; if it breaks later you
+  get a new email.
+- Only *definitive* failures are reported. A transient Intuit outage never
+  triggers an alert — those connections are retried and heal on their own.
+- A failed delivery is retried every 15 minutes, and a restart never
+  re-sends an alert (sent alerts are recorded in the database).
+- The dashboard shows the state under **Connect to Claude → Email alerts
+  when a connection breaks**, with a **Send a test email** button so you can
+  prove the setup works before you need it. The startup log prints the same
+  status, including which variable is still missing.
+- The link in the email uses the address the server knows for itself:
+  `QBO_PUBLIC_URL`, else the first `QBO_ALLOWED_HOSTS` entry, else Railway's
+  public domain. If none of those is set the email simply omits the link.
 
 ### Generating keys yourself (optional)
 
@@ -710,7 +765,7 @@ and [Docker](#running-it-elsewhere-docker)). Details worth knowing:
 | Access Token | 60 minutes | Auto-refresh at 50 min or on-demand |
 | Refresh Token | 100 days | Alert at 90 days; re-auth if expired |
 
-The refresh daemon proactively refreshes tokens before expiry. If a refresh token expires, the connection status flips to `expired`. Use **Reconnect** on the company card (or generate a fresh auth URL for it) to re-authorize — this refreshes the tokens in place, keeping the same realm ID, so existing team-member assignments and any edited name are preserved. A company's display name can be changed anytime with **Edit name** (it's a local label, not pulled from QuickBooks).
+The refresh daemon proactively refreshes tokens before expiry. If a refresh token expires, the connection status flips to `expired` (and, with [email alerts](#email-alerts-when-a-connection-breaks) configured, an email goes out). Use **Reconnect** on the company card (or generate a fresh auth URL for it) to re-authorize — this refreshes the tokens in place, keeping the same realm ID, so existing team-member assignments and any edited name are preserved. A company's display name can be changed anytime with **Edit name** (it's a local label, not pulled from QuickBooks).
 
 ## Intuit Developer App Setup
 

@@ -1,6 +1,7 @@
 import { TokenStore } from './token-store.js';
 import { refreshAccessToken, OAuthTokenError } from './oauth.js';
 import type { OAuthConfig } from '../db/models.js';
+import type { BrokenConnection, BrokenConnectionNotifier } from '../alerts/connection-alerts.js';
 
 // Per-realm in-flight refresh promises. Intuit rotates the refresh token on
 // every refresh and invalidates the previous one, so two concurrent refreshes
@@ -104,7 +105,9 @@ export class RefreshDaemon {
     private tokenStore: TokenStore,
     private oauthConfig: OAuthConfig,
     private checkIntervalMs: number = 5 * 60 * 1000, // 5 minutes
-    private refreshThresholdMinutes: number = 10 // Refresh when < 10 min left
+    private refreshThresholdMinutes: number = 10, // Refresh when < 10 min left
+    // Told about connections that need re-authorization (email alerts).
+    private notifier: BrokenConnectionNotifier | null = null
   ) {}
 
   /**
@@ -146,7 +149,8 @@ export class RefreshDaemon {
 
   /**
    * Check for expiring tokens and refresh them, then attempt to revive
-   * connections stuck in 'expired' whose refresh window is still open.
+   * connections stuck in 'expired' whose refresh window is still open, and
+   * finally report whatever is definitively broken to the notifier.
    */
   private async checkAndRefresh(): Promise<void> {
     try {
@@ -174,6 +178,7 @@ export class RefreshDaemon {
     }
 
     await this.revivePass();
+    await this.alertPass();
   }
 
   /**
@@ -212,6 +217,38 @@ export class RefreshDaemon {
       }
     } catch (error) {
       console.error('Error in revive pass:', error);
+    }
+  }
+
+  /**
+   * Report connections that need re-authorization to the notifier: those
+   * the revive pass parked on a definitive invalid_grant, and those whose
+   * 100-day refresh window has already closed (nothing to retry). A
+   * connection whose revival is merely failing transiently is not reported.
+   * The notifier dedupes per break, so running this every tick is safe.
+   */
+  async alertPass(): Promise<void> {
+    if (!this.notifier) return;
+    try {
+      const expired = await this.tokenStore.getConnectionsByStatus('expired');
+      const now = Date.now();
+      const broken: BrokenConnection[] = [];
+      for (const connection of expired) {
+        const refreshExpiryIso = connection.refreshExpiry.toISOString();
+        let reason: BrokenConnection['reason'] | null = null;
+        if (connection.refreshExpiry.getTime() <= now) reason = 'refresh_window_lapsed';
+        else if (this.deadRealms.get(connection.realmId) === refreshExpiryIso) reason = 'invalid_grant';
+        if (!reason) continue;
+        broken.push({
+          clientName: connection.clientName,
+          realmId: connection.realmId,
+          refreshExpiry: connection.refreshExpiry,
+          reason,
+        });
+      }
+      if (broken.length > 0) await this.notifier.notifyBroken(broken);
+    } catch (error) {
+      console.error('Error in alert pass:', error);
     }
   }
 

@@ -11,6 +11,10 @@ let me = null; // { kind, userId, name, role, allClients, canWrite, username, ha
 // worked that out. Drives the "Server address" panel and its warnings when a
 // custom domain is in play. Null until loaded (or for non-admins).
 let serverUrl = null;
+// Admin-only: whether the server emails anyone when a QuickBooks connection
+// breaks, who it tells, and the last alert it sent. Null until loaded (or for
+// non-admins / a server without the feature).
+let alertsInfo = null;
 let connections = [];
 let users = [];
 let connectionsLoaded = false;
@@ -254,6 +258,19 @@ async function loadServerUrl() {
   renderAll();
 }
 
+async function loadAlerts() {
+  const sessionToken = authToken;
+  try {
+    const data = await api('/api/alerts');
+    if (sessionToken !== authToken) return;
+    alertsInfo = data;
+  } catch {
+    if (sessionToken !== authToken) return;
+    alertsInfo = null; // non-admin or older server — panel stays hidden
+  }
+  renderAll();
+}
+
 async function initApp() {
   me = await api('/api/me');
   $('auth-screen').hidden = true;
@@ -265,7 +282,7 @@ async function initApp() {
   await Promise.all([
     loadData(false),
     loadMyKey(),
-    ...(me.role === 'admin' ? [loadServerUrl()] : []),
+    ...(me.role === 'admin' ? [loadServerUrl(), loadAlerts()] : []),
   ]);
 
   clearInterval(refreshTimer);
@@ -347,6 +364,7 @@ function signOut(expired = false) {
   myKeyPrefix = null;
   me = null;
   serverUrl = null;
+  alertsInfo = null;
   users = [];
   connections = [];
   connectionsLoaded = false;
@@ -736,6 +754,7 @@ function connectorCardHtml(scopeNote) {
       </details>
 
       ${serverUrlPanelHtml()}
+      ${alertsPanelHtml()}
 
       <details class="connector-help">
         <summary>Personal API-key URL (alternative)</summary>
@@ -822,6 +841,75 @@ function serverUrlPanelHtml() {
             you own are ever echoed back.</li>
       </ol>
     </details>`;
+}
+
+// Admin-only panel: does this server email anyone when a QuickBooks
+// connection breaks? The configuration itself is three server environment
+// variables; this shows what's in effect and can prove it with a test send.
+function alertsPanelHtml() {
+  if (me?.role !== 'admin' || !alertsInfo) return '';
+  const info = alertsInfo;
+
+  const notices = [
+    ...(info.problems || []).map((p) => `<div class="warn-box">${escapeHtml(p)}</div>`),
+    ...(info.lastError ? [`<div class="warn-box">The last alert could not be sent — ${escapeHtml(info.lastError)}</div>`] : []),
+  ].join('');
+
+  let body;
+  if (info.enabled) {
+    const recipients = (info.recipients || []).map((r) => `<strong>${escapeHtml(r)}</strong>`).join(', ');
+    const last = info.lastAlert
+      ? `Last alert: ${escapeHtml(info.lastAlert.clientName)} · ${relativeTime(info.lastAlert.sentAt)}.`
+      : 'No alert has been needed yet.';
+    const linkNote = info.dashboardUrl
+      ? ''
+      : ` The email can't link back here until the server knows its own address — set <code>QBO_PUBLIC_URL</code> or <code>QBO_ALLOWED_HOSTS</code>.`;
+    body = `
+      <div class="connector-caption">
+        <strong>On.</strong> When a company's QuickBooks connection breaks and needs reconnecting, an email goes to
+        ${recipients} from <code>${escapeHtml(info.from || '')}</code> — once per break. ${last}${linkNote}
+      </div>
+      <div class="connector-caption" style="margin-top:12px">
+        <button type="button" class="btn btn-ghost btn-small" data-action="send-test-alert">Send a test email</button>
+      </div>`;
+  } else {
+    const missing = new Set(info.missing || []);
+    const row = (name, what) =>
+      `<li${missing.has(name) ? '' : ' style="opacity:.6"'}><code>${name}</code> — ${what}${
+        missing.has(name) ? '' : ' <em>(already set)</em>'
+      }</li>`;
+    body = `
+      <div class="connector-caption">
+        <strong>Off.</strong> Nobody is told when a connection breaks — team members simply stop seeing that client
+        in Claude until someone notices and clicks Reconnect. To be emailed instead, add these variables to the
+        server environment (Railway → service → <strong>Variables</strong>) and redeploy:
+      </div>
+      <ol class="help-steps">
+        ${row('RESEND_API_KEY', 'an API key from resend.com ("sending access" is enough)')}
+        ${row('QBO_ALERT_EMAIL', 'who to notify — one address, or several separated by commas')}
+        ${row('QBO_ALERT_FROM', 'the sender, on a domain verified in Resend, e.g. <code>QBO Alerts &lt;alerts@yourfirm.com&gt;</code>')}
+      </ol>`;
+  }
+
+  return `
+    <details class="connector-help">
+      <summary>Email alerts when a connection breaks (admin)</summary>
+      ${notices}
+      ${body}
+    </details>`;
+}
+
+async function sendTestAlert(button) {
+  if (button) button.disabled = true;
+  try {
+    const result = await api('/api/alerts/test', { method: 'POST', body: JSON.stringify({}) });
+    toast(`Test email sent to ${(result.recipients || []).join(', ')}`);
+    loadAlerts();
+  } catch (err) {
+    toast(err.message, 'error');
+  } finally {
+    if (button) button.disabled = false;
+  }
 }
 
 function teamDetailHtml() {
@@ -1696,6 +1784,7 @@ document.addEventListener('DOMContentLoaded', () => {
     else if (action === 'copy-redirect-uri')
       copyText(serverUrl?.intuitRedirectUri || `${window.location.origin}/callback`, 'Callback URL copied');
     else if (action === 'test') testConnection(realm);
+    else if (action === 'send-test-alert') sendTestAlert(target);
     else if (action === 'add-company') showAddCompanyModal();
     else if (action === 'add-user') showCreateUserModal();
     else if (action === 'rename') renameCompany(realm, name);

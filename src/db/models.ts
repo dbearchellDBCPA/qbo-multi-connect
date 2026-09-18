@@ -184,3 +184,17 @@ export interface OAuthConfig {
   redirectUri: string;
   environment?: 'sandbox' | 'production';
 }
+
+/**
+ * A record of an alert email sent about a connection (raw row)
+ */
+export interface ConnectionAlertRecord {
+  id: number;
+  realm_id: string;
+  client_name: string;
+  kind: 'broken';
+  dedupe_key: string;
+  recipients: string;
+  provider_id: string | null;
+  sent_at: string;
+}

@@ -147,3 +147,22 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
 
 CREATE INDEX IF NOT EXISTS idx_oauth_tokens_user ON oauth_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_oauth_codes_user ON oauth_auth_codes(user_id);
+
+-- ── Email alerts for broken connections ──────────────────────────────────────
+-- One row per alert email the provider accepted. dedupe_key is the
+-- refresh_expiry the connection had when it broke: the same break is never
+-- reported twice (across restarts too), while a reconnect mints a new
+-- refresh window and so a later break gets a fresh alert.
+CREATE TABLE IF NOT EXISTS connection_alerts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  realm_id TEXT NOT NULL,
+  client_name TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('broken')),
+  dedupe_key TEXT NOT NULL,
+  recipients TEXT NOT NULL,
+  provider_id TEXT,
+  sent_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_connection_alerts_dedupe
+  ON connection_alerts(realm_id, kind, dedupe_key);

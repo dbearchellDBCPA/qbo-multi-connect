@@ -82,6 +82,9 @@ so the named volume is what makes the instance durable.
    - Leave `QBO_PUBLIC_URL` / `QBO_REDIRECT_URI` **unset** — addresses follow
      the domain in use. Optionally set `QBO_ALLOWED_HOSTS` to the domains this
      instance answers on.
+   - Optional: `RESEND_API_KEY`, `QBO_ALERT_EMAIL` and `QBO_ALERT_FROM` to be
+     emailed when a company's QuickBooks connection breaks and needs
+     reconnecting (README → *Email alerts when a connection breaks*).
 5. **Add the redirect URI** to the Intuit app's list of redirect URIs:
    `https://<the-service-url>/callback`, plus the same for any custom domain.
    The dashboard shows the exact value under **Connect to Claude → Server

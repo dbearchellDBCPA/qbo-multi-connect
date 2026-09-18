@@ -140,6 +140,16 @@ QBO_API_KEY=your_generated_api_key
 QBO_SERVER_PORT=3456
 ```
 
+Optional — to be emailed when a company's QuickBooks connection breaks and
+needs reconnecting (see the README section *Email alerts when a connection
+breaks*):
+
+```bash
+RESEND_API_KEY=re_xxxxxxxxxxxxxxxxxxxxxxxx
+QBO_ALERT_EMAIL=you@yourfirm.com
+QBO_ALERT_FROM=QBO Multi-Connect <qbo-alerts@yourfirm.com>
+```
+
 Generate a secure API key:
 
 ```bash
