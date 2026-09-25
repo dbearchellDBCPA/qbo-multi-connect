@@ -4,6 +4,7 @@ import {
   buildDepositUpdatePayload,
   depositLineEntityError,
   qboDepositLinesToUpdateShape,
+  stampDepositLineIds,
 } from '../../src/server/line-converters.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -50,12 +51,18 @@ describe('update_deposit — lines REPLACE, never append', () => {
       deposit_lines: [{ amount: 25, account_id: '83', description: 'replacement line C' }],
       linked_payment_ids: [],
     });
-    expect(payload.Line).toHaveLength(1); // NOT 3
+    expect(payload.Line).toHaveLength(1); // NOT 3 — replace, never concatenate
     expect(payload.Line[0].Amount).toBe(25);
     expect(payload.Line[0].DepositLineDetail.AccountRef.value).toBe('83');
-    // No trace of the fetched lines may survive in the payload.
+    // First existing direct-line Id stamped; second Id omitted (shrink).
+    expect(payload.Line[0].Id).toBe('1');
+    expect(payload.sparse).toBe(false);
+    // No trace of the old amounts/accounts as separate entries.
     const total = payload.Line.reduce((s: number, l: any) => s + l.Amount, 0);
     expect(total).toBe(25); // NOT 175
+    const accounts = payload.Line.map((l: any) => l.DepositLineDetail?.AccountRef?.value);
+    expect(accounts).not.toContain('82');
+    expect(accounts).not.toContain('1');
   });
 
   it('replaces with the union of linked payments and direct lines, payments first', () => {
@@ -76,8 +83,9 @@ describe('update_deposit — lines REPLACE, never append', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Per-kind semantics (2026-08-24): each array independently — provided
-// replaces that kind, OMITTED preserves that kind (rebuilt without Ids),
+// Per-kind semantics (2026-08-24, Id-stamp fix 2026-09-25): each array
+// independently — provided replaces that kind, OMITTED preserves that kind
+// (rebuilt WITH existing Ids stamped so Deposit updates in place),
 // linked_payment_ids: [] explicitly returns payments to Undeposited Funds.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -128,14 +136,49 @@ describe('update_deposit — per-kind preserve/replace semantics', () => {
     expect(payload.Line[0].LinkedTxn).toBeUndefined();
   });
 
-  it('never carries fetched Id/LineNum into the outgoing Line array (preserved lines are rebuilt clean)', () => {
+  it('stamps existing Line.Ids onto preserved/re-coded lines (Deposit: no-Id = append)', () => {
+    // Production 2026-09-25: Deposit lines without Id are ADDED. Preserving or
+    // re-coding existing lines MUST carry the fetched Ids so QBO updates in place.
     const payload = buildDepositUpdatePayload(mixedDeposit, {
       deposit_lines: [{ amount: 80.08, account_id: '73' }],
     });
-    for (const line of payload.Line) {
-      expect(line.Id).toBeUndefined();
-      expect(line.LineNum).toBeUndefined();
-    }
+    expect(payload.Line).toHaveLength(2);
+    expect(payload.Line[0].Id).toBe('1'); // linked payment matched by TxnId
+    expect(payload.Line[1].Id).toBe('2'); // direct line matched by index
+    expect(payload.Line[0].LineNum).toBeUndefined(); // LineNum not stamped
+    expect(payload.sparse).toBe(false);
+  });
+
+  it("Frank's P0: 1-line deposit, change account_id only → same Id, new AccountRef, length 1", () => {
+    // HIL Deposit 48 / HK Deposit 64: changing account on the single line must
+    // UPDATE that line's Id in place — not append a second line.
+    const oneLine = {
+      Id: '48',
+      SyncToken: '0',
+      DepositToAccountRef: { value: '35' },
+      TxnDate: '2026-09-25',
+      TotalAmt: 2752.54,
+      Line: [
+        {
+          Id: '1',
+          LineNum: 1,
+          Amount: 2752.54,
+          DetailType: 'DepositLineDetail',
+          DepositLineDetail: { AccountRef: { value: '182', name: 'Eastside Fund' } },
+        },
+      ],
+    };
+    const payload = buildDepositUpdatePayload(oneLine, {
+      deposit_lines: [{ amount: 2752.54, account_id: '73' }],
+    });
+    expect(payload.Line).toHaveLength(1);
+    expect(payload.Line[0].Id).toBe('1');
+    expect(payload.Line[0].Amount).toBe(2752.54);
+    expect(payload.Line[0].DepositLineDetail.AccountRef.value).toBe('73');
+    expect(payload.sparse).toBe(false);
+    // Must NOT contain both old and new accounts as separate entries.
+    const accounts = payload.Line.map((l: any) => l.DepositLineDetail?.AccountRef?.value);
+    expect(accounts).toEqual(['73']);
   });
 
   it('entity-only change: same account, new Received-From entity', () => {
@@ -249,6 +292,54 @@ describe('get_deposit → update_deposit round-trip', () => {
     expect(payload.Line).toHaveLength(existingDeposit.Line.length);
     const total = payload.Line.reduce((s: number, l: any) => s + l.Amount, 0);
     expect(total).toBe(150);
+  });
+});
+
+
+describe('stampDepositLineIds', () => {
+  it('matches linked payments by TxnId and direct lines by index', () => {
+    const existing = [
+      { Id: '10', Amount: 400, LinkedTxn: [{ TxnId: 'pmt-1', TxnType: 'Payment' }] },
+      { Id: '20', Amount: 80, DetailType: 'DepositLineDetail', DepositLineDetail: { AccountRef: { value: '182' } } },
+    ];
+    const rebuilt = [
+      { Amount: 400, LinkedTxn: [{ TxnId: 'pmt-1', TxnType: 'Payment' }] },
+      { Amount: 80, DetailType: 'DepositLineDetail', DepositLineDetail: { AccountRef: { value: '73' } } },
+    ];
+    const stamped = stampDepositLineIds(existing, rebuilt);
+    expect(stamped[0].Id).toBe('10');
+    expect(stamped[1].Id).toBe('20');
+    expect(stamped[1].DepositLineDetail.AccountRef.value).toBe('73');
+  });
+
+  it('leaves extra new lines without Id (true add) and omits unused Ids when shrinking', () => {
+    const existing = [
+      { Id: '1', Amount: 10, DetailType: 'DepositLineDetail', DepositLineDetail: { AccountRef: { value: 'a' } } },
+      { Id: '2', Amount: 20, DetailType: 'DepositLineDetail', DepositLineDetail: { AccountRef: { value: 'b' } } },
+    ];
+    const grown = stampDepositLineIds(existing, [
+      { Amount: 10, DetailType: 'DepositLineDetail', DepositLineDetail: { AccountRef: { value: 'a' } } },
+      { Amount: 20, DetailType: 'DepositLineDetail', DepositLineDetail: { AccountRef: { value: 'b' } } },
+      { Amount: 30, DetailType: 'DepositLineDetail', DepositLineDetail: { AccountRef: { value: 'c' } } },
+    ]);
+    expect(grown.map((l: any) => l.Id)).toEqual(['1', '2', undefined]);
+
+    const shrunk = stampDepositLineIds(existing, [
+      { Amount: 99, DetailType: 'DepositLineDetail', DepositLineDetail: { AccountRef: { value: 'z' } } },
+    ]);
+    expect(shrunk).toHaveLength(1);
+    expect(shrunk[0].Id).toBe('1'); // Id '2' omitted
+  });
+
+  it('does not stamp a linked payment Id onto a different TxnId', () => {
+    const existing = [
+      { Id: '10', Amount: 400, LinkedTxn: [{ TxnId: 'pmt-1', TxnType: 'Payment' }] },
+    ];
+    const rebuilt = [
+      { Amount: 400, LinkedTxn: [{ TxnId: 'pmt-NEW', TxnType: 'Payment' }] },
+    ];
+    const stamped = stampDepositLineIds(existing, rebuilt);
+    expect(stamped[0].Id).toBeUndefined();
   });
 });
 
