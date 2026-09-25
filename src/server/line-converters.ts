@@ -257,22 +257,71 @@ export function depositLineEntityError(depositLines: DepositDirectLineInput[] = 
 }
 
 /**
+ * Stamp existing Deposit Line.Ids onto a rebuilt Line array so QBO updates
+ * those lines in place.
+ *
+ * Production (2026-09-25, HIL Deposit 48 / HK Deposit 64): for Deposit,
+ * lines WITHOUT an Id are ADDED and omitted lines are NOT removed. The
+ * Aug "strip Ids = replace" assumption is exactly wrong for Deposit —
+ * changing account on one line must keep that line's Id.
+ *
+ * Matching:
+ *  - Linked Payment lines → by LinkedTxn[0].TxnId
+ *  - DepositLineDetail lines → by index among direct lines (so re-coding
+ *    account keeps the same Id)
+ * Extra new lines beyond the existing count get no Id (true add). Shrinking
+ * omits unused Ids; with sparse:false QBO should drop them (verification
+ * catches failure).
+ */
+export function stampDepositLineIds(existingLines: any[] | undefined | null, newLines: any[]): any[] {
+  const existing = existingLines ?? [];
+  const linkedByTxnId = new Map<string, any>();
+  const existingDirect: any[] = [];
+  for (const line of existing) {
+    const txnId = line?.LinkedTxn?.[0]?.TxnId;
+    if (txnId != null && line?.LinkedTxn?.[0]?.TxnType === 'Payment') {
+      linkedByTxnId.set(String(txnId), line);
+    } else if (line?.DetailType === 'DepositLineDetail') {
+      existingDirect.push(line);
+    }
+  }
+
+  let directIdx = 0;
+  return (newLines ?? []).map((line: any) => {
+    const out = { ...line };
+    const txnId = out?.LinkedTxn?.[0]?.TxnId;
+    if (txnId != null && out?.LinkedTxn?.[0]?.TxnType === 'Payment') {
+      const match = linkedByTxnId.get(String(txnId));
+      if (match?.Id != null) out.Id = match.Id;
+      return out;
+    }
+    if (out?.DetailType === 'DepositLineDetail') {
+      const match = existingDirect[directIdx++];
+      if (match?.Id != null) out.Id = match.Id;
+      return out;
+    }
+    return out;
+  });
+}
+
+/**
  * Build the full-update payload for a Deposit (read-modify-write).
  *
- * QBO full updates replace the entire Line array with whatever is posted
- * (lines with an Id update in place, lines without an Id are ADDED, omitted
- * lines are removed), so the outgoing Line array is rebuilt from scratch —
- * never the fetched line objects with their Ids, and never a concatenation
- * onto them. Carrying the fetched lines into the body is exactly the bug
- * that made update_deposit append instead of replace.
+ * Deposit line semantics (confirmed production 2026-09-25): lines WITH an Id
+ * update in place; lines WITHOUT an Id are ADDED; omitted Ids are dropped
+ * only on a full (sparse:false) update. So the outgoing Line array is rebuilt
+ * from scratch (never a concatenation onto fetched lines — that appends),
+ * then existing Ids are stamped back onto matching rebuilt lines via
+ * stampDepositLineIds. Carrying no Ids is exactly the bug that made
+ * update_deposit append instead of replace when re-coding an account.
  *
  * Per-kind semantics (each array independently):
  *  - provided (even []) → that kind is REPLACED with exactly what was passed;
  *    linked_payment_ids: [] explicitly returns those payments to
  *    Undeposited Funds.
- *  - omitted (undefined) → that kind is PRESERVED, rebuilt cleanly (without
- *    Id/LineNum) from the fetched deposit — so re-coding a direct line can
- *    never silently unlink payments.
+ *  - omitted (undefined) → that kind is PRESERVED, rebuilt from the fetched
+ *    deposit with Ids stamped so re-coding a direct line never silently
+ *    unlinks payments and never appends a duplicate.
  *  - both omitted → Line is left untouched entirely (scalar-only update).
  */
 export function buildDepositUpdatePayload(
@@ -293,7 +342,9 @@ export function buildDepositUpdatePayload(
     const current = qboDepositLinesToUpdateShape(existing?.Line ?? []);
     const linked = args.linked_payment_ids ?? current.linked_payment_ids;
     const direct = args.deposit_lines ?? current.deposit_lines;
-    payload.Line = buildDepositTxnLines(linked, direct);
+    payload.Line = stampDepositLineIds(existing?.Line, buildDepositTxnLines(linked, direct));
+    // Full update so omitted line Ids are dropped rather than left hanging.
+    payload.sparse = false;
   }
   return payload;
 }

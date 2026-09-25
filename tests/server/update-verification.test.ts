@@ -3,6 +3,7 @@ import {
   postedLineStats,
   statsMatch,
   stripLineIds,
+  looksLikeAppendedLines,
   verifyLinesAndMaybeRollback,
 } from '../../src/server/update-verification.js';
 
@@ -45,10 +46,38 @@ describe('stripLineIds', () => {
   });
 });
 
+describe('looksLikeAppendedLines', () => {
+  it('detects 1→2 / $X→$2X append fingerprint', () => {
+    expect(looksLikeAppendedLines(
+      { count: 1, total: 2752.54 },
+      { count: 2, total: 5505.08 },
+    )).toBe(true);
+  });
+
+  it('detects further inflation (retries → 7 lines)', () => {
+    expect(looksLikeAppendedLines(
+      { count: 1, total: 100 },
+      { count: 7, total: 700 },
+    )).toBe(true);
+  });
+
+  it('rejects unrelated mismatches', () => {
+    expect(looksLikeAppendedLines(
+      { count: 2, total: 100 },
+      { count: 3, total: 150 },
+    )).toBe(false); // 1.5x is not an integer multiple ≥ 2
+    expect(looksLikeAppendedLines(
+      { count: 2, total: 100 },
+      { count: 1, total: 50 },
+    )).toBe(false);
+  });
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
-// The P0 production incident (2026-08-24, Hatcher Investments deposit 50):
+// The P0 production incident (2026-08-24 / re-confirmed 2026-09-25):
 // submitted 1 line / $2,752.54, QBO stored 2 lines / $5,505.08. The handler
-// must detect the drift and restore the original single line.
+// must detect the drift and restore the original single line WITH its Id
+// (stripLineIds on rollback would APPEND again).
 // ─────────────────────────────────────────────────────────────────────────────
 
 const originalDeposit = {
@@ -91,11 +120,11 @@ describe('verifyLinesAndMaybeRollback', () => {
     expect(rollback).not.toHaveBeenCalled();
   });
 
-  it('detects the append, rolls back to the original lines, and says the change was NOT applied', async () => {
+  it('detects the append, rolls back WITH original Ids + sparse:false, and says DO NOT RETRY', async () => {
     const rollback = vi.fn().mockResolvedValue({
       Id: '50',
       SyncToken: '4',
-      Line: [{ Amount: 2752.54, DetailType: 'DepositLineDetail', DepositLineDetail: { AccountRef: { value: '182' } } }],
+      Line: [{ Id: '1', Amount: 2752.54, DetailType: 'DepositLineDetail', DepositLineDetail: { AccountRef: { value: '182' } } }],
     });
     const failure = await verifyLinesAndMaybeRollback({
       entityLabel: 'Deposit',
@@ -106,17 +135,20 @@ describe('verifyLinesAndMaybeRollback', () => {
     });
     expect(failure).toContain('VERIFICATION FAILED');
     expect(failure).toContain('2 line(s) totaling $5,505.08');
+    expect(failure).toContain('APPENDED');
+    expect(failure).toContain('DO NOT RETRY');
     expect(failure).toContain('ROLLED BACK');
     expect(failure).toContain('NOT applied');
 
-    // The rollback payload must be the original deposit with the FAILED
-    // update's SyncToken and lines stripped of Id/LineNum (clean replace).
+    // Rollback must keep the original line Id (NOT stripLineIds) and force
+    // sparse:false so QBO updates in place instead of appending again.
     const payload = rollback.mock.calls[0][0];
     expect(payload.Id).toBe('50');
     expect(payload.SyncToken).toBe('3');
+    expect(payload.sparse).toBe(false);
     expect(payload.Line).toHaveLength(1);
-    expect(payload.Line[0].Id).toBeUndefined();
-    expect(payload.Line[0].LineNum).toBeUndefined();
+    expect(payload.Line[0].Id).toBe('1');
+    expect(payload.Line[0].LineNum).toBe(1);
     expect(payload.Line[0].DepositLineDetail.AccountRef.value).toBe('182');
   });
 
@@ -131,6 +163,7 @@ describe('verifyLinesAndMaybeRollback', () => {
     });
     expect(failure).toContain('ROLLBACK ATTEMPTED');
     expect(failure).toContain('fix manually');
+    expect(failure).toContain('DO NOT RETRY');
   });
 
   it('reports a rollback that threw, without raising', async () => {
@@ -144,5 +177,6 @@ describe('verifyLinesAndMaybeRollback', () => {
     });
     expect(failure).toContain('ROLLBACK FAILED: stale SyncToken');
     expect(failure).toContain('fix manually');
+    expect(failure).toContain('DO NOT RETRY');
   });
 });
