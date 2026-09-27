@@ -89,6 +89,93 @@ export function qboJournalLinesToUpdateShape(lines: any[]): any[] {
     });
 }
 
+export interface JournalLineInput {
+  posting_type: 'Debit' | 'Credit';
+  account_id: string;
+  account_name?: string;
+  amount: number;
+  description?: string;
+  entity_type?: 'Customer' | 'Vendor' | 'Employee';
+  entity_id?: string;
+  entity_name?: string;
+  class_id?: string;
+  class_name?: string;
+  department_id?: string;
+}
+
+/**
+ * Build a QBO JournalEntry `Line` array from tool input. Shared by
+ * create_journal_entry and update_journal_entry (line semantics unchanged:
+ * rebuilt lines carry no Id).
+ */
+export function buildJournalEntryLines(lines: JournalLineInput[]): any[] {
+  return lines.map((l) => {
+    const line: any = {
+      Amount: l.amount,
+      DetailType: 'JournalEntryLineDetail',
+      Description: l.description,
+      JournalEntryLineDetail: {
+        PostingType: l.posting_type,
+        AccountRef: { value: l.account_id, name: l.account_name },
+      },
+    };
+    if (l.entity_type && l.entity_id) {
+      line.JournalEntryLineDetail.Entity = {
+        Type: l.entity_type,
+        EntityRef: { value: l.entity_id, name: l.entity_name },
+      };
+    }
+    if (l.class_id) {
+      line.JournalEntryLineDetail.ClassRef = { value: l.class_id, name: l.class_name };
+    }
+    if (l.department_id) {
+      line.JournalEntryLineDetail.DepartmentRef = { value: l.department_id };
+    }
+    return line;
+  });
+}
+
+/** create_journal_entry payload. DocNumber is omitted unless non-empty. */
+export function buildJournalEntryCreatePayload(args: {
+  txn_date?: string;
+  private_note?: string;
+  doc_number?: string;
+  lines: JournalLineInput[];
+}): any {
+  const payload: any = { Line: buildJournalEntryLines(args.lines) };
+  if (args.txn_date) payload.TxnDate = args.txn_date;
+  if (args.private_note) payload.PrivateNote = args.private_note;
+  if (args.doc_number) payload.DocNumber = args.doc_number;
+  return payload;
+}
+
+/**
+ * update_journal_entry payload (read-modify-write on the freshly fetched JE,
+ * so SyncToken and every untouched field — TxnDate, attachments, currency,
+ * Line Ids — are carried through verbatim).
+ *
+ * `Line` is only replaced when the caller passes `lines`. A metadata-only
+ * update (doc_number / txn_date / private_note) posts the fetched Line array
+ * by reference — never rebuilt, so the Ids are never lost.
+ * doc_number: undefined = untouched, "" = clear, otherwise set.
+ */
+export function buildJournalEntryUpdatePayload(
+  existing: any,
+  args: {
+    txn_date?: string;
+    private_note?: string;
+    doc_number?: string;
+    lines?: JournalLineInput[];
+  }
+): any {
+  const payload: any = { ...existing };
+  if (args.txn_date) payload.TxnDate = args.txn_date;
+  if (args.private_note !== undefined) payload.PrivateNote = args.private_note;
+  if (args.doc_number !== undefined) payload.DocNumber = args.doc_number;
+  if (args.lines) payload.Line = buildJournalEntryLines(args.lines);
+  return payload;
+}
+
 // ── Expense (Purchase) converter ───────────────────────────────────────────────
 // NOTE: uses expense_account_id (matching create_expense schema) not account_id
 
@@ -330,6 +417,8 @@ export function buildDepositUpdatePayload(
     deposit_account_id?: string;
     txn_date?: string;
     private_note?: string;
+    /** undefined = untouched, "" = clear, otherwise set. Never touches Line. */
+    doc_number?: string;
     linked_payment_ids?: DepositLinkedPaymentInput[];
     deposit_lines?: DepositDirectLineInput[];
   }
@@ -338,6 +427,7 @@ export function buildDepositUpdatePayload(
   if (args.deposit_account_id) payload.DepositToAccountRef = { value: args.deposit_account_id };
   if (args.txn_date) payload.TxnDate = args.txn_date;
   if (args.private_note !== undefined) payload.PrivateNote = args.private_note;
+  if (args.doc_number !== undefined) payload.DocNumber = args.doc_number;
   if (args.linked_payment_ids || args.deposit_lines) {
     const current = qboDepositLinesToUpdateShape(existing?.Line ?? []);
     const linked = args.linked_payment_ids ?? current.linked_payment_ids;

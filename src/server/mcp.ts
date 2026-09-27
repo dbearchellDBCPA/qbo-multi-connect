@@ -18,7 +18,17 @@ import {
   depositLineEntityError,
   swapItemInLines,
   swapAccountInLines,
+  buildJournalEntryCreatePayload,
+  buildJournalEntryUpdatePayload,
 } from './line-converters.js';
+import {
+  docNumberError,
+  applyDocNumberOnCreate,
+  applyDocNumberOnUpdate,
+  docNumberSummary,
+  DOC_NUMBER_PARAM_DESCRIPTION,
+  DOC_NUMBER_UPDATE_PARAM_DESCRIPTION,
+} from './doc-number.js';
 import {
   resolveAccountFilterTerms,
   expandToDescendants,
@@ -1276,6 +1286,7 @@ export async function registerMcpRoutes(
         client_name: z.string().describe('The name of the client company'),
         txn_date: z.string().optional().describe('Transaction date in YYYY-MM-DD format. Defaults to today.'),
         private_note: z.string().optional().describe('Private memo/note for the journal entry'),
+        doc_number: z.string().optional().describe(`Journal no. — ${DOC_NUMBER_PARAM_DESCRIPTION} Omit (or pass "") to let QBO auto-number if the company has that enabled.`),
         lines: z.array(z.object({
           posting_type: z.enum(['Debit', 'Credit']).describe('Debit or Credit'),
           account_id: z.string().describe('QBO Account ID (use get_accounts to find IDs)'),
@@ -1290,7 +1301,9 @@ export async function registerMcpRoutes(
           department_id: z.string().optional().describe('Line-level DepartmentRef.value (JournalEntry uses department per-line, not header)'),
         })).describe('Array of journal entry lines. Debits must equal credits.'),
       },
-      async ({ client_name, txn_date, private_note, lines }) => {
+      async ({ client_name, txn_date, private_note, doc_number, lines }) => {
+        const docErr = docNumberError(doc_number);
+        if (docErr) return { content: [{ type: 'text', text: docErr }] };
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) {
           return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
@@ -1304,39 +1317,12 @@ export async function registerMcpRoutes(
         }
 
         try {
-          const jeLines = lines.map(l => {
-            const line: any = {
-              Amount: l.amount,
-              DetailType: 'JournalEntryLineDetail',
-              Description: l.description,
-              JournalEntryLineDetail: {
-                PostingType: l.posting_type,
-                AccountRef: { value: l.account_id, name: l.account_name },
-              },
-            };
-            if (l.entity_type && l.entity_id) {
-              line.JournalEntryLineDetail.Entity = {
-                Type: l.entity_type,
-                EntityRef: { value: l.entity_id, name: l.entity_name },
-              };
-            }
-            if (l.class_id) {
-              line.JournalEntryLineDetail.ClassRef = { value: l.class_id, name: l.class_name };
-            }
-            if (l.department_id) {
-              line.JournalEntryLineDetail.DepartmentRef = { value: l.department_id };
-            }
-            return line;
-          });
-
-          const payload: any = { Line: jeLines };
-          if (txn_date) payload.TxnDate = txn_date;
-          if (private_note) payload.PrivateNote = private_note;
+          const payload = buildJournalEntryCreatePayload({ txn_date, private_note, doc_number, lines });
 
           const result = await qboManager.journalEntries.create(realmId, payload);
           const je = (result as any)?.JournalEntry;
           const summary = je
-            ? `Journal Entry #${je.DocNumber ?? je.Id} created successfully.\nID: ${je.Id} | SyncToken: ${je.SyncToken} | Date: ${je.TxnDate} | Total: ${formatCurrency(je.TotalAmt)}`
+            ? `Journal Entry #${je.DocNumber ?? je.Id} created successfully.\nID: ${je.Id} | SyncToken: ${je.SyncToken} | Date: ${je.TxnDate} | Total: ${formatCurrency(je.TotalAmt)}${docNumberSummary(je, 'Journal No')}`
             : JSON.stringify(result, null, 2);
           return { content: [{ type: 'text', text: summary }] };
         } catch (err: any) {
@@ -1354,6 +1340,7 @@ export async function registerMcpRoutes(
         journal_entry_id: z.string().describe('The QBO Journal Entry ID to update'),
         txn_date: z.string().optional().describe('New transaction date (YYYY-MM-DD)'),
         private_note: z.string().optional().describe('New private note'),
+        doc_number: z.string().optional().describe(`New Journal no. — ${DOC_NUMBER_UPDATE_PARAM_DESCRIPTION}`),
         lines: z.array(z.object({
           posting_type: z.enum(['Debit', 'Credit']),
           account_id: z.string(),
@@ -1368,7 +1355,9 @@ export async function registerMcpRoutes(
           department_id: z.string().optional().describe('Line-level DepartmentRef.value'),
         })).optional().describe('Replacement lines (if provided, replaces ALL existing lines). Debits must equal credits.'),
       },
-      async ({ client_name, journal_entry_id, txn_date, private_note, lines }) => {
+      async ({ client_name, journal_entry_id, txn_date, private_note, doc_number, lines }) => {
+        const docErr = docNumberError(doc_number);
+        if (docErr) return { content: [{ type: 'text', text: docErr }] };
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) {
           return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
@@ -1382,42 +1371,18 @@ export async function registerMcpRoutes(
             return { content: [{ type: 'text', text: `Journal Entry ${journal_entry_id} not found.` }] };
           }
 
-          const payload: any = { ...je };
-          if (txn_date) payload.TxnDate = txn_date;
-          if (private_note !== undefined) payload.PrivateNote = private_note;
-
           if (lines) {
             const totalDebits = lines.filter(l => l.posting_type === 'Debit').reduce((sum, l) => sum + l.amount, 0);
             const totalCredits = lines.filter(l => l.posting_type === 'Credit').reduce((sum, l) => sum + l.amount, 0);
             if (Math.abs(totalDebits - totalCredits) > 0.01) {
               return { content: [{ type: 'text', text: `Debits (${totalDebits.toFixed(2)}) must equal Credits (${totalCredits.toFixed(2)}).` }] };
             }
-
-            payload.Line = lines.map(l => {
-              const line: any = {
-                Amount: l.amount,
-                DetailType: 'JournalEntryLineDetail',
-                Description: l.description,
-                JournalEntryLineDetail: {
-                  PostingType: l.posting_type,
-                  AccountRef: { value: l.account_id, name: l.account_name },
-                },
-              };
-              if (l.entity_type && l.entity_id) {
-                line.JournalEntryLineDetail.Entity = {
-                  Type: l.entity_type,
-                  EntityRef: { value: l.entity_id, name: l.entity_name },
-                };
-              }
-              if (l.class_id) {
-                line.JournalEntryLineDetail.ClassRef = { value: l.class_id, name: l.class_name };
-              }
-              if (l.department_id) {
-                line.JournalEntryLineDetail.DepartmentRef = { value: l.department_id };
-              }
-              return line;
-            });
           }
+
+          // Read-modify-write: Line is only replaced when `lines` is passed.
+          // A doc_number / metadata-only update posts the fetched Line array
+          // verbatim (Ids intact) — see buildJournalEntryUpdatePayload.
+          const payload = buildJournalEntryUpdatePayload(je, { txn_date, private_note, doc_number, lines });
 
           const result = await qboManager.journalEntries.update(realmId, payload);
           const updated = (result as any)?.JournalEntry;
@@ -1432,7 +1397,7 @@ export async function registerMcpRoutes(
             if (failure) return { content: [{ type: 'text', text: failure }] };
           }
           const summary = updated
-            ? `Journal Entry #${updated.DocNumber ?? updated.Id} updated successfully.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken} | Date: ${updated.TxnDate}`
+            ? `Journal Entry #${updated.DocNumber ?? updated.Id} updated successfully.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken} | Date: ${updated.TxnDate}${docNumberSummary(updated, 'Journal No')}`
             : JSON.stringify(result, null, 2);
           return { content: [{ type: 'text', text: summary }] };
         } catch (err: any) {
@@ -1484,6 +1449,7 @@ export async function registerMcpRoutes(
         private_note: z.string().optional().describe('Private memo'),
         department_id: z.string().optional().describe('Header DepartmentRef.value'),
         sales_term_id: z.string().optional().describe('Header SalesTermRef.value. QBO computes DueDate from TxnDate + term unless due_date is also set.'),
+        doc_number: z.string().optional().describe(`Invoice no. — ${DOC_NUMBER_PARAM_DESCRIPTION} Omit to let QBO auto-number (if custom transaction numbers are off).`),
         lines: z.array(z.object({
           description: z.string().optional().describe('Line item description'),
           amount: z.number().describe('Line amount'),
@@ -1494,7 +1460,9 @@ export async function registerMcpRoutes(
           unit_price: z.number().optional().describe('Unit price'),
         })).describe('Invoice line items'),
       },
-      async ({ client_name, customer_id, customer_name, txn_date, due_date, private_note, department_id, sales_term_id, lines }) => {
+      async ({ client_name, customer_id, customer_name, txn_date, due_date, private_note, department_id, sales_term_id, doc_number, lines }) => {
+        const docErr = docNumberError(doc_number);
+        if (docErr) return { content: [{ type: 'text', text: docErr }] };
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) {
           return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
@@ -1528,11 +1496,12 @@ export async function registerMcpRoutes(
           if (sales_term_id) payload.SalesTermRef = { value: sales_term_id };
           if (due_date) payload.DueDate = due_date;
           if (private_note) payload.PrivateNote = private_note;
+          applyDocNumberOnCreate(payload, doc_number);
 
           const result = await qboManager.transactions.createInvoice(realmId, payload);
           const inv = (result as any)?.Invoice;
           const summary = inv
-            ? `Invoice #${inv.DocNumber ?? inv.Id} created successfully.\nID: ${inv.Id} | SyncToken: ${inv.SyncToken} | Customer: ${inv.CustomerRef?.name ?? customer_id} | Total: ${formatCurrency(inv.TotalAmt)} | Balance: ${formatCurrency(inv.Balance)}`
+            ? `Invoice #${inv.DocNumber ?? inv.Id} created successfully.\nID: ${inv.Id} | SyncToken: ${inv.SyncToken} | Customer: ${inv.CustomerRef?.name ?? customer_id} | Total: ${formatCurrency(inv.TotalAmt)} | Balance: ${formatCurrency(inv.Balance)}${docNumberSummary(inv, 'Invoice No')}`
             : JSON.stringify(result, null, 2);
           return { content: [{ type: 'text', text: summary }] };
         } catch (err: any) {
@@ -1548,6 +1517,7 @@ export async function registerMcpRoutes(
       {
         client_name: z.string().describe('The name of the client company'),
         invoice_id: z.string().describe('The QBO Invoice ID to update'),
+        doc_number: z.string().optional().describe(`New invoice no. — ${DOC_NUMBER_UPDATE_PARAM_DESCRIPTION}`),
         customer_id: z.string().optional().describe('New customer ID'),
         txn_date: z.string().optional().describe('New invoice date (YYYY-MM-DD)'),
         due_date: z.string().optional().describe('New due date (YYYY-MM-DD)'),
@@ -1564,7 +1534,9 @@ export async function registerMcpRoutes(
           unit_price: z.number().optional(),
         })).optional().describe('Replacement line items (replaces ALL existing lines if provided)'),
       },
-      async ({ client_name, invoice_id, customer_id, txn_date, due_date, private_note, department_id, sales_term_id, lines }) => {
+      async ({ client_name, invoice_id, doc_number, customer_id, txn_date, due_date, private_note, department_id, sales_term_id, lines }) => {
+        const docErr = docNumberError(doc_number);
+        if (docErr) return { content: [{ type: 'text', text: docErr }] };
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) {
           return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
@@ -1584,6 +1556,7 @@ export async function registerMcpRoutes(
           if (sales_term_id) payload.SalesTermRef = { value: sales_term_id };
           if (due_date) payload.DueDate = due_date;
           if (private_note !== undefined) payload.PrivateNote = private_note;
+          applyDocNumberOnUpdate(payload, doc_number);
 
           if (lines) {
             payload.Line = lines.map(l => {
@@ -1609,7 +1582,7 @@ export async function registerMcpRoutes(
             if (failure) return { content: [{ type: 'text', text: failure }] };
           }
           const summary = updated
-            ? `Invoice #${updated.DocNumber ?? updated.Id} updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken} | Total: ${formatCurrency(updated.TotalAmt)}`
+            ? `Invoice #${updated.DocNumber ?? updated.Id} updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken} | Total: ${formatCurrency(updated.TotalAmt)}${docNumberSummary(updated, 'Invoice No')}`
             : JSON.stringify(result, null, 2);
           return { content: [{ type: 'text', text: summary }] };
         } catch (err: any) {
@@ -1660,6 +1633,7 @@ export async function registerMcpRoutes(
         private_note: z.string().optional().describe('Private memo'),
         department_id: z.string().optional().describe('Header DepartmentRef.value (use get_departments to find IDs)'),
         sales_term_id: z.string().optional().describe('Header SalesTermRef.value. QBO computes DueDate from TxnDate + term unless due_date is also set.'),
+        doc_number: z.string().optional().describe(`Bill no. (vendor invoice number) — ${DOC_NUMBER_PARAM_DESCRIPTION}`),
         lines: z.array(z.object({
           description: z.string().optional().describe('Line description'),
           amount: z.number().describe('Line amount'),
@@ -1672,7 +1646,9 @@ export async function registerMcpRoutes(
           class_id: z.string().optional().describe('Class ID for tracking'),
         })).describe('Bill line items'),
       },
-      async ({ client_name, vendor_id, vendor_name, txn_date, due_date, private_note, department_id, sales_term_id, lines }) => {
+      async ({ client_name, vendor_id, vendor_name, txn_date, due_date, private_note, department_id, sales_term_id, doc_number, lines }) => {
+        const docErr = docNumberError(doc_number);
+        if (docErr) return { content: [{ type: 'text', text: docErr }] };
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) {
           return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
@@ -1703,11 +1679,12 @@ export async function registerMcpRoutes(
           // due_date wins over sales-term-computed DueDate per task spec
           if (due_date) payload.DueDate = due_date;
           if (private_note) payload.PrivateNote = private_note;
+          applyDocNumberOnCreate(payload, doc_number);
 
           const result = await qboManager.transactions.createBill(realmId, payload);
           const bill = (result as any)?.Bill;
           const summary = bill
-            ? `Bill #${bill.DocNumber ?? bill.Id} created successfully.\nID: ${bill.Id} | SyncToken: ${bill.SyncToken} | Vendor: ${bill.VendorRef?.name ?? vendor_id} | Total: ${formatCurrency(bill.TotalAmt)} | Balance: ${formatCurrency(bill.Balance)}`
+            ? `Bill #${bill.DocNumber ?? bill.Id} created successfully.\nID: ${bill.Id} | SyncToken: ${bill.SyncToken} | Vendor: ${bill.VendorRef?.name ?? vendor_id} | Total: ${formatCurrency(bill.TotalAmt)} | Balance: ${formatCurrency(bill.Balance)}${docNumberSummary(bill, 'Bill No')}`
             : JSON.stringify(result, null, 2);
           return { content: [{ type: 'text', text: summary }] };
         } catch (err: any) {
@@ -1723,6 +1700,7 @@ export async function registerMcpRoutes(
       {
         client_name: z.string().describe('The name of the client company'),
         bill_id: z.string().describe('The QBO Bill ID to update'),
+        doc_number: z.string().optional().describe(`New bill no. — ${DOC_NUMBER_UPDATE_PARAM_DESCRIPTION}`),
         vendor_id: z.string().optional().describe('New vendor ID'),
         txn_date: z.string().optional().describe('New bill date (YYYY-MM-DD)'),
         due_date: z.string().optional().describe('New due date (YYYY-MM-DD)'),
@@ -1741,7 +1719,9 @@ export async function registerMcpRoutes(
           class_id: z.string().optional(),
         })).optional().describe('Replacement line items (replaces ALL lines if provided)'),
       },
-      async ({ client_name, bill_id, vendor_id, txn_date, due_date, private_note, department_id, sales_term_id, lines }) => {
+      async ({ client_name, bill_id, doc_number, vendor_id, txn_date, due_date, private_note, department_id, sales_term_id, lines }) => {
+        const docErr = docNumberError(doc_number);
+        if (docErr) return { content: [{ type: 'text', text: docErr }] };
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) {
           return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
@@ -1761,6 +1741,7 @@ export async function registerMcpRoutes(
           if (sales_term_id) payload.SalesTermRef = { value: sales_term_id };
           if (due_date) payload.DueDate = due_date;
           if (private_note !== undefined) payload.PrivateNote = private_note;
+          applyDocNumberOnUpdate(payload, doc_number);
 
           if (lines) {
             payload.Line = lines.map(l => {
@@ -1790,7 +1771,7 @@ export async function registerMcpRoutes(
             if (failure) return { content: [{ type: 'text', text: failure }] };
           }
           const summary = updated
-            ? `Bill #${updated.DocNumber ?? updated.Id} updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken} | Total: ${formatCurrency(updated.TotalAmt)}`
+            ? `Bill #${updated.DocNumber ?? updated.Id} updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken} | Total: ${formatCurrency(updated.TotalAmt)}${docNumberSummary(updated, 'Bill No')}`
             : JSON.stringify(result, null, 2);
           return { content: [{ type: 'text', text: summary }] };
         } catch (err: any) {
@@ -3171,6 +3152,7 @@ export async function registerMcpRoutes(
         payment_method_id: z.string().optional().describe('Payment method ID (use get_payment_methods)'),
         private_note: z.string().optional().describe('Memo'),
         department_id: z.string().optional().describe('Header DepartmentRef.value'),
+        doc_number: z.string().optional().describe(`Sales receipt no. — ${DOC_NUMBER_PARAM_DESCRIPTION}`),
         lines: z.array(z.object({
           description: z.string().optional(),
           amount: z.number(),
@@ -3180,7 +3162,9 @@ export async function registerMcpRoutes(
           unit_price: z.number().optional(),
         })).describe('Line items'),
       },
-      async ({ client_name, customer_id, customer_name, deposit_account_id, txn_date, payment_method_id, private_note, department_id, lines }) => {
+      async ({ client_name, customer_id, customer_name, deposit_account_id, txn_date, payment_method_id, private_note, department_id, doc_number, lines }) => {
+        const docErr = docNumberError(doc_number);
+        if (docErr) return { content: [{ type: 'text', text: docErr }] };
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) return { content: [{ type: 'text', text: `Client not found: "${client_name}".` }] };
         try {
@@ -3196,9 +3180,10 @@ export async function registerMcpRoutes(
           if (payment_method_id) payload.PaymentMethodRef = { value: payment_method_id };
           if (department_id) payload.DepartmentRef = { value: department_id };
           if (private_note) payload.PrivateNote = private_note;
+          applyDocNumberOnCreate(payload, doc_number);
           const result = await qboManager.transactions.createSalesReceipt(realmId, payload);
           const sr = (result as any)?.SalesReceipt;
-          return { content: [{ type: 'text', text: sr ? `Sales Receipt #${sr.DocNumber ?? sr.Id} created.\nID: ${sr.Id} | SyncToken: ${sr.SyncToken} | Total: ${formatCurrency(sr.TotalAmt)}` : JSON.stringify(result, null, 2) }] };
+          return { content: [{ type: 'text', text: sr ? `Sales Receipt #${sr.DocNumber ?? sr.Id} created.\nID: ${sr.Id} | SyncToken: ${sr.SyncToken} | Total: ${formatCurrency(sr.TotalAmt)}${docNumberSummary(sr, 'Sales Receipt No')}` : JSON.stringify(result, null, 2) }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error creating sales receipt: ${err?.message ?? err}` }] };
         }
@@ -3212,6 +3197,7 @@ export async function registerMcpRoutes(
       {
         client_name: z.string().describe('The name of the client company'),
         sales_receipt_id: z.string().describe('QBO Sales Receipt ID'),
+        doc_number: z.string().optional().describe(`New sales receipt no. — ${DOC_NUMBER_UPDATE_PARAM_DESCRIPTION}`),
         txn_date: z.string().optional().describe('New date YYYY-MM-DD'),
         private_note: z.string().optional().describe('New memo'),
         department_id: z.string().optional().describe('New header DepartmentRef.value'),
@@ -3224,7 +3210,9 @@ export async function registerMcpRoutes(
           unit_price: z.number().optional(),
         })).optional().describe('Replacement line items'),
       },
-      async ({ client_name, sales_receipt_id, txn_date, private_note, department_id, lines }) => {
+      async ({ client_name, sales_receipt_id, doc_number, txn_date, private_note, department_id, lines }) => {
+        const docErr = docNumberError(doc_number);
+        if (docErr) return { content: [{ type: 'text', text: docErr }] };
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) return { content: [{ type: 'text', text: `Client not found: "${client_name}".` }] };
         try {
@@ -3235,6 +3223,7 @@ export async function registerMcpRoutes(
           if (txn_date) payload.TxnDate = txn_date;
           if (department_id) payload.DepartmentRef = { value: department_id };
           if (private_note !== undefined) payload.PrivateNote = private_note;
+          applyDocNumberOnUpdate(payload, doc_number);
           if (lines) {
             payload.Line = lines.map(l => {
               const line: any = { Amount: l.amount, DetailType: 'SalesItemLineDetail', Description: l.description };
@@ -3255,7 +3244,7 @@ export async function registerMcpRoutes(
             });
             if (failure) return { content: [{ type: 'text', text: failure }] };
           }
-          return { content: [{ type: 'text', text: updated ? `Sales Receipt #${updated.DocNumber ?? updated.Id} updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken} | Total: ${formatCurrency(updated.TotalAmt)}` : JSON.stringify(result, null, 2) }] };
+          return { content: [{ type: 'text', text: updated ? `Sales Receipt #${updated.DocNumber ?? updated.Id} updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken} | Total: ${formatCurrency(updated.TotalAmt)}${docNumberSummary(updated, 'Sales Receipt No')}` : JSON.stringify(result, null, 2) }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error updating sales receipt: ${err?.message ?? err}` }] };
         }
@@ -3868,6 +3857,7 @@ export async function registerMcpRoutes(
         txn_date: z.string().optional().describe('Deposit date YYYY-MM-DD (defaults to today)'),
         private_note: z.string().optional().describe('Memo'),
         department_id: z.string().optional().describe('Header DepartmentRef.value'),
+        doc_number: z.string().optional().describe(DOC_NUMBER_PARAM_DESCRIPTION),
         linked_payment_ids: z.array(z.object({
           payment_id: z.string().describe('Payment ID to include in this deposit (from Undeposited Funds)'),
           amount: z.number().describe('Amount of this payment to deposit'),
@@ -3883,7 +3873,9 @@ export async function registerMcpRoutes(
           payment_method_id: z.string().optional().describe('QBO PaymentMethod ID for this line (DepositLineDetail.PaymentMethodRef), e.g. Cash or Check. Use get_payment_methods to find IDs.'),
         })).optional().describe('Direct deposit lines (when not using Undeposited Funds)'),
       },
-      async ({ client_name, deposit_account_id, txn_date, private_note, department_id, linked_payment_ids, deposit_lines }) => {
+      async ({ client_name, deposit_account_id, txn_date, private_note, department_id, doc_number, linked_payment_ids, deposit_lines }) => {
+        const docErr = docNumberError(doc_number);
+        if (docErr) return { content: [{ type: 'text', text: docErr }] };
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
         try {
@@ -3896,10 +3888,11 @@ export async function registerMcpRoutes(
           if (txn_date) payload.TxnDate = txn_date;
           if (department_id) payload.DepartmentRef = { value: department_id };
           if (private_note) payload.PrivateNote = private_note;
+          applyDocNumberOnCreate(payload, doc_number);
           const result = await qboManager.banking.createDeposit(realmId, payload);
           const dep = (result as any)?.Deposit;
           const summary = dep
-            ? `Deposit created.\nID: ${dep.Id} | SyncToken: ${dep.SyncToken} | Date: ${dep.TxnDate} | Total: ${formatCurrency(dep.TotalAmt)}`
+            ? `Deposit created.\nID: ${dep.Id} | SyncToken: ${dep.SyncToken} | Date: ${dep.TxnDate} | Total: ${formatCurrency(dep.TotalAmt)}${docNumberSummary(dep)}`
             : JSON.stringify(result, null, 2);
           return { content: [{ type: 'text', text: summary }] };
         } catch (err: any) {
@@ -3918,6 +3911,7 @@ export async function registerMcpRoutes(
         deposit_account_id: z.string().optional().describe('New bank account ID the deposit goes into'),
         txn_date: z.string().optional().describe('New deposit date (YYYY-MM-DD)'),
         private_note: z.string().optional().describe('New memo'),
+        doc_number: z.string().optional().describe(DOC_NUMBER_UPDATE_PARAM_DESCRIPTION),
         linked_payment_ids: z.array(z.object({
           payment_id: z.string().describe('Payment ID included in this deposit (from Undeposited Funds)'),
           amount: z.number().describe('Amount of this payment'),
@@ -3933,7 +3927,9 @@ export async function registerMcpRoutes(
           payment_method_id: z.string().optional().describe('QBO PaymentMethod ID for this line (DepositLineDetail.PaymentMethodRef), e.g. Cash or Check. Use get_payment_methods to find IDs.'),
         })).optional().describe('Replacement set of direct deposit lines (part of the full line replacement)'),
       },
-      async ({ client_name, deposit_id, deposit_account_id, txn_date, private_note, linked_payment_ids, deposit_lines }) => {
+      async ({ client_name, deposit_id, deposit_account_id, txn_date, private_note, doc_number, linked_payment_ids, deposit_lines }) => {
+        const docErr = docNumberError(doc_number);
+        if (docErr) return { content: [{ type: 'text', text: docErr }] };
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
         try {
@@ -3949,6 +3945,7 @@ export async function registerMcpRoutes(
             deposit_account_id,
             txn_date,
             private_note,
+            doc_number,
             linked_payment_ids,
             deposit_lines,
           });
@@ -3973,7 +3970,7 @@ export async function registerMcpRoutes(
             if (failure) return { content: [{ type: 'text', text: failure }] };
           }
 
-          const summary = `Deposit ${updated.Id} updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken} | Date: ${updated.TxnDate} | Total: ${formatCurrency(updated.TotalAmt)}${replacingLines ? ` | Lines: ${(updated.Line ?? []).length} (verified line replacement)` : ''}`;
+          const summary = `Deposit ${updated.Id} updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken} | Date: ${updated.TxnDate} | Total: ${formatCurrency(updated.TotalAmt)}${docNumberSummary(updated)}${replacingLines ? ` | Lines: ${(updated.Line ?? []).length} (verified line replacement)` : ''}`;
           return { content: [{ type: 'text', text: summary }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error updating deposit: ${err?.message ?? err}` }] };
@@ -4349,6 +4346,7 @@ export async function registerMcpRoutes(
           const result = {
             id: dep.Id,
             sync_token: dep.SyncToken,
+            doc_number: dep.DocNumber,
             deposit_account_id: dep.DepositToAccountRef?.value,
             deposit_account_name: dep.DepositToAccountRef?.name,
             txn_date: dep.TxnDate,
