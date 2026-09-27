@@ -20,11 +20,22 @@ import {
   swapAccountInLines,
   buildJournalEntryCreatePayload,
   buildJournalEntryUpdatePayload,
+  LineIdError,
 } from './line-converters.js';
+import {
+  buildBillLines,
+  buildBillUpdatePayload,
+  buildExpenseLines,
+  buildExpenseUpdatePayload,
+  buildSalesLines,
+  buildInvoiceUpdatePayload,
+  buildSalesReceiptUpdatePayload,
+  LINE_ID_PARAM_DESCRIPTION,
+  REPLACEMENT_LINES_BEHAVIOUR,
+} from './update-payloads.js';
 import {
   docNumberError,
   applyDocNumberOnCreate,
-  applyDocNumberOnUpdate,
   docNumberSummary,
   DOC_NUMBER_PARAM_DESCRIPTION,
   DOC_NUMBER_UPDATE_PARAM_DESCRIPTION,
@@ -1334,7 +1345,7 @@ export async function registerMcpRoutes(
     // ── update_journal_entry ─────────────────────────────────────────────────
     server.tool(
       'update_journal_entry',
-      'Update an existing journal entry. Fetches the current JE first, then applies your changes. You can replace all lines or update metadata. Supports class, department, and (where applicable) sales terms at the appropriate QBO level (header or line). NOTE: DepartmentRef is set per-line on JournalEntry, not on the header.',
+      'Update an existing journal entry. Fetches the current JE first, then applies your changes. You can replace the lines or update metadata only. ' + REPLACEMENT_LINES_BEHAVIOUR + ' Debit and credit lines share one position sequence (same order get_journal_entry returns). Supports class, department, and (where applicable) sales terms at the appropriate QBO level (header or line). NOTE: DepartmentRef is set per-line on JournalEntry, not on the header.',
       {
         client_name: z.string().describe('The name of the client company'),
         journal_entry_id: z.string().describe('The QBO Journal Entry ID to update'),
@@ -1342,6 +1353,7 @@ export async function registerMcpRoutes(
         private_note: z.string().optional().describe('New private note'),
         doc_number: z.string().optional().describe(`New Journal no. — ${DOC_NUMBER_UPDATE_PARAM_DESCRIPTION}`),
         lines: z.array(z.object({
+          line_id: z.string().optional().describe(LINE_ID_PARAM_DESCRIPTION),
           posting_type: z.enum(['Debit', 'Credit']),
           account_id: z.string(),
           account_name: z.string().optional(),
@@ -1353,7 +1365,7 @@ export async function registerMcpRoutes(
           class_id: z.string().optional(),
           class_name: z.string().optional(),
           department_id: z.string().optional().describe('Line-level DepartmentRef.value'),
-        })).optional().describe('Replacement lines (if provided, replaces ALL existing lines). Debits must equal credits.'),
+        })).optional().describe('Replacement lines — the complete new line set (omitted existing lines are removed). Carry line_id from get_journal_entry to edit in place; without line_id, Ids are matched by position. Debits must equal credits.'),
       },
       async ({ client_name, journal_entry_id, txn_date, private_note, doc_number, lines }) => {
         const docErr = docNumberError(doc_number);
@@ -1381,7 +1393,8 @@ export async function registerMcpRoutes(
 
           // Read-modify-write: Line is only replaced when `lines` is passed.
           // A doc_number / metadata-only update posts the fetched Line array
-          // verbatim (Ids intact) — see buildJournalEntryUpdatePayload.
+          // verbatim (Ids intact). Replacement lines carry existing Ids
+          // (line_id or positional) + sparse:false — see buildJournalEntryUpdatePayload.
           const payload = buildJournalEntryUpdatePayload(je, { txn_date, private_note, doc_number, lines });
 
           const result = await qboManager.journalEntries.update(realmId, payload);
@@ -1401,6 +1414,7 @@ export async function registerMcpRoutes(
             : JSON.stringify(result, null, 2);
           return { content: [{ type: 'text', text: summary }] };
         } catch (err: any) {
+          if (err instanceof LineIdError) return { content: [{ type: 'text', text: err.message }] };
           return { content: [{ type: 'text', text: `Error updating journal entry: ${err?.message ?? err}` }] };
         }
       }
@@ -1469,23 +1483,7 @@ export async function registerMcpRoutes(
         }
 
         try {
-          const invoiceLines = lines.map(l => {
-            const line: any = {
-              Amount: l.amount,
-              DetailType: l.detail_type,
-              Description: l.description,
-            };
-            if (l.detail_type === 'SalesItemLineDetail') {
-              line.SalesItemLineDetail = {
-                Qty: l.quantity ?? 1,
-                UnitPrice: l.unit_price ?? l.amount,
-              };
-              if (l.item_id) {
-                line.SalesItemLineDetail.ItemRef = { value: l.item_id, name: l.item_name };
-              }
-            }
-            return line;
-          });
+          const invoiceLines = buildSalesLines(lines);
 
           const payload: any = {
             CustomerRef: { value: customer_id, name: customer_name },
@@ -1513,7 +1511,7 @@ export async function registerMcpRoutes(
     // ── update_invoice ───────────────────────────────────────────────────────
     server.tool(
       'update_invoice',
-      'Update an existing invoice. Fetches the current invoice first, then applies changes. Use sparse update: only provided fields are changed. Supports class, department, and (where applicable) sales terms at the appropriate QBO level (header or line).',
+      'Update an existing invoice. Fetches the current invoice first, then applies changes: only the header fields you provide change. ' + REPLACEMENT_LINES_BEHAVIOUR + ' QBO subtotal rows are recomputed by QBO; discount/group rows are kept as-is. Supports class, department, and (where applicable) sales terms at the appropriate QBO level (header or line).',
       {
         client_name: z.string().describe('The name of the client company'),
         invoice_id: z.string().describe('The QBO Invoice ID to update'),
@@ -1525,6 +1523,7 @@ export async function registerMcpRoutes(
         department_id: z.string().optional().describe('New header DepartmentRef.value'),
         sales_term_id: z.string().optional().describe('New header SalesTermRef.value'),
         lines: z.array(z.object({
+          line_id: z.string().optional().describe(LINE_ID_PARAM_DESCRIPTION),
           description: z.string().optional(),
           amount: z.number(),
           detail_type: z.enum(['SalesItemLineDetail', 'DescriptionOnly']).default('SalesItemLineDetail'),
@@ -1532,7 +1531,9 @@ export async function registerMcpRoutes(
           item_name: z.string().optional(),
           quantity: z.number().optional(),
           unit_price: z.number().optional(),
-        })).optional().describe('Replacement line items (replaces ALL existing lines if provided)'),
+          class_id: z.string().optional().describe('Line ClassRef.value'),
+          tax_code_id: z.string().optional().describe('Line TaxCodeRef.value (e.g. TAX / NON)'),
+        })).optional().describe('Replacement line items — the complete new line set (omitted existing lines are removed). Pass the lines from get_invoice (with line_id) to edit in place; without line_id, Ids are matched by position.'),
       },
       async ({ client_name, invoice_id, doc_number, customer_id, txn_date, due_date, private_note, department_id, sales_term_id, lines }) => {
         const docErr = docNumberError(doc_number);
@@ -1549,25 +1550,11 @@ export async function registerMcpRoutes(
             return { content: [{ type: 'text', text: `Invoice ${invoice_id} not found.` }] };
           }
 
-          const payload: any = { ...inv };
-          if (customer_id) payload.CustomerRef = { value: customer_id };
-          if (txn_date) payload.TxnDate = txn_date;
-          if (department_id) payload.DepartmentRef = { value: department_id };
-          if (sales_term_id) payload.SalesTermRef = { value: sales_term_id };
-          if (due_date) payload.DueDate = due_date;
-          if (private_note !== undefined) payload.PrivateNote = private_note;
-          applyDocNumberOnUpdate(payload, doc_number);
-
-          if (lines) {
-            payload.Line = lines.map(l => {
-              const line: any = { Amount: l.amount, DetailType: l.detail_type, Description: l.description };
-              if (l.detail_type === 'SalesItemLineDetail') {
-                line.SalesItemLineDetail = { Qty: l.quantity ?? 1, UnitPrice: l.unit_price ?? l.amount };
-                if (l.item_id) line.SalesItemLineDetail.ItemRef = { value: l.item_id, name: l.item_name };
-              }
-              return line;
-            });
-          }
+          // Read-modify-write. Replacement lines carry existing Ids (line_id
+          // or positional) + sparse:false; no lines → fetched Line untouched.
+          const payload = buildInvoiceUpdatePayload(inv, {
+            customer_id, txn_date, due_date, private_note, department_id, sales_term_id, doc_number, lines,
+          });
 
           const result = await qboManager.transactions.updateInvoice(realmId, payload);
           const updated = (result as any)?.Invoice;
@@ -1586,6 +1573,7 @@ export async function registerMcpRoutes(
             : JSON.stringify(result, null, 2);
           return { content: [{ type: 'text', text: summary }] };
         } catch (err: any) {
+          if (err instanceof LineIdError) return { content: [{ type: 'text', text: err.message }] };
           return { content: [{ type: 'text', text: `Error updating invoice: ${err?.message ?? err}` }] };
         }
       }
@@ -1655,19 +1643,7 @@ export async function registerMcpRoutes(
         }
 
         try {
-          const billLines = lines.map(l => {
-            const line: any = { Amount: l.amount, DetailType: l.detail_type, Description: l.description };
-            if (l.detail_type === 'AccountBasedExpenseLineDetail') {
-              line.AccountBasedExpenseLineDetail = {};
-              if (l.account_id) line.AccountBasedExpenseLineDetail.AccountRef = { value: l.account_id, name: l.account_name };
-              if (l.class_id) line.AccountBasedExpenseLineDetail.ClassRef = { value: l.class_id };
-            } else {
-              line.ItemBasedExpenseLineDetail = { Qty: l.quantity ?? 1, UnitPrice: l.unit_price ?? l.amount };
-              if (l.item_id) line.ItemBasedExpenseLineDetail.ItemRef = { value: l.item_id };
-              if (l.class_id) line.ItemBasedExpenseLineDetail.ClassRef = { value: l.class_id };
-            }
-            return line;
-          });
+          const billLines = buildBillLines(lines);
 
           const payload: any = {
             VendorRef: { value: vendor_id, name: vendor_name },
@@ -1696,7 +1672,7 @@ export async function registerMcpRoutes(
     // ── update_bill ──────────────────────────────────────────────────────────
     server.tool(
       'update_bill',
-      'Update an existing bill. Fetches current bill first, then applies changes. Supports class, department, and (where applicable) sales terms at the appropriate QBO level (header or line).',
+      'Update an existing bill. Fetches current bill first, then applies changes: only the header fields you provide change. ' + REPLACEMENT_LINES_BEHAVIOUR + ' Supports class, department, and (where applicable) sales terms at the appropriate QBO level (header or line).',
       {
         client_name: z.string().describe('The name of the client company'),
         bill_id: z.string().describe('The QBO Bill ID to update'),
@@ -1708,16 +1684,18 @@ export async function registerMcpRoutes(
         department_id: z.string().optional().describe('New header DepartmentRef.value'),
         sales_term_id: z.string().optional().describe('New header SalesTermRef.value'),
         lines: z.array(z.object({
+          line_id: z.string().optional().describe(LINE_ID_PARAM_DESCRIPTION),
           description: z.string().optional(),
           amount: z.number(),
           detail_type: z.enum(['AccountBasedExpenseLineDetail', 'ItemBasedExpenseLineDetail']).default('AccountBasedExpenseLineDetail'),
           account_id: z.string().optional(),
           account_name: z.string().optional(),
           item_id: z.string().optional(),
+          item_name: z.string().optional(),
           quantity: z.number().optional(),
           unit_price: z.number().optional(),
-          class_id: z.string().optional(),
-        })).optional().describe('Replacement line items (replaces ALL lines if provided)'),
+          class_id: z.string().optional().describe('Line ClassRef.value (kept on both account- and item-based lines)'),
+        })).optional().describe('Replacement line items — the complete new line set (omitted existing lines are removed). Pass the lines from get_bill (with line_id) to edit in place; without line_id, Ids are matched by position.'),
       },
       async ({ client_name, bill_id, doc_number, vendor_id, txn_date, due_date, private_note, department_id, sales_term_id, lines }) => {
         const docErr = docNumberError(doc_number);
@@ -1734,29 +1712,11 @@ export async function registerMcpRoutes(
             return { content: [{ type: 'text', text: `Bill ${bill_id} not found.` }] };
           }
 
-          const payload: any = { ...bill };
-          if (vendor_id) payload.VendorRef = { value: vendor_id };
-          if (txn_date) payload.TxnDate = txn_date;
-          if (department_id) payload.DepartmentRef = { value: department_id };
-          if (sales_term_id) payload.SalesTermRef = { value: sales_term_id };
-          if (due_date) payload.DueDate = due_date;
-          if (private_note !== undefined) payload.PrivateNote = private_note;
-          applyDocNumberOnUpdate(payload, doc_number);
-
-          if (lines) {
-            payload.Line = lines.map(l => {
-              const line: any = { Amount: l.amount, DetailType: l.detail_type, Description: l.description };
-              if (l.detail_type === 'AccountBasedExpenseLineDetail') {
-                line.AccountBasedExpenseLineDetail = {};
-                if (l.account_id) line.AccountBasedExpenseLineDetail.AccountRef = { value: l.account_id, name: l.account_name };
-                if (l.class_id) line.AccountBasedExpenseLineDetail.ClassRef = { value: l.class_id };
-              } else {
-                line.ItemBasedExpenseLineDetail = { Qty: l.quantity ?? 1, UnitPrice: l.unit_price ?? l.amount };
-                if (l.item_id) line.ItemBasedExpenseLineDetail.ItemRef = { value: l.item_id };
-              }
-              return line;
-            });
-          }
+          // Read-modify-write. Replacement lines carry existing Ids (line_id
+          // or positional) + sparse:false; no lines → fetched Line untouched.
+          const payload = buildBillUpdatePayload(bill, {
+            vendor_id, txn_date, due_date, private_note, department_id, sales_term_id, doc_number, lines,
+          });
 
           const result = await qboManager.transactions.updateBill(realmId, payload);
           const updated = (result as any)?.Bill;
@@ -1775,6 +1735,7 @@ export async function registerMcpRoutes(
             : JSON.stringify(result, null, 2);
           return { content: [{ type: 'text', text: summary }] };
         } catch (err: any) {
+          if (err instanceof LineIdError) return { content: [{ type: 'text', text: err.message }] };
           return { content: [{ type: 'text', text: `Error updating bill: ${err?.message ?? err}` }] };
         }
       }
@@ -2069,18 +2030,7 @@ export async function registerMcpRoutes(
             entityRef = { value: resolved.id, name: resolved.name };
           }
 
-          const expenseLines = lines.map(l => {
-            const line: any = { Amount: l.amount, DetailType: l.detail_type, Description: l.description };
-            if (l.detail_type === 'AccountBasedExpenseLineDetail') {
-              line.AccountBasedExpenseLineDetail = {};
-              if (l.expense_account_id) line.AccountBasedExpenseLineDetail.AccountRef = { value: l.expense_account_id, name: l.expense_account_name };
-              if (l.class_id) line.AccountBasedExpenseLineDetail.ClassRef = { value: l.class_id };
-            } else {
-              line.ItemBasedExpenseLineDetail = { Qty: l.quantity ?? 1, UnitPrice: l.unit_price ?? l.amount };
-              if (l.item_id) line.ItemBasedExpenseLineDetail.ItemRef = { value: l.item_id };
-            }
-            return line;
-          });
+          const expenseLines = buildExpenseLines(lines);
 
           const payload: any = {
             PaymentType: payment_type,
@@ -2110,7 +2060,7 @@ export async function registerMcpRoutes(
     // ── update_expense ───────────────────────────────────────────────────────
     server.tool(
       'update_expense',
-      'Update an existing expense (Purchase) in place — edits the original transaction rather than creating a correcting entry. Auto-fetches the current Purchase + SyncToken by ID first, so you only pass the ID plus the fields you want changed. Header fields use sparse update (only provided fields change). If `lines` is provided it REPLACES ALL existing lines (same replace-all behavior as update_bill / update_journal_entry). Account/vendor/class refs are validated by QBO server-side; its error message (wrong ID, inactive entity, closed period, stale SyncToken) is surfaced on failure.',
+      'Update an existing expense (Purchase) in place — edits the original transaction rather than creating a correcting entry. Auto-fetches the current Purchase + SyncToken by ID first, so you only pass the ID plus the fields you want changed. Header fields use sparse update (only provided fields change). ' + REPLACEMENT_LINES_BEHAVIOUR + ' Account/vendor/class refs are validated by QBO server-side; its error message (wrong ID, inactive entity, closed period, stale SyncToken) is surfaced on failure.',
       {
         client_name: z.string().describe('The name of the client company'),
         expense_id: z.string().describe('The QBO Expense (Purchase) ID to update'),
@@ -2124,16 +2074,18 @@ export async function registerMcpRoutes(
         private_note: z.string().optional().describe('New private memo'),
         department_id: z.string().optional().describe('New header DepartmentRef.value'),
         lines: z.array(z.object({
+          line_id: z.string().optional().describe(LINE_ID_PARAM_DESCRIPTION),
           description: z.string().optional(),
           amount: z.number().describe('Line amount'),
           detail_type: z.enum(['AccountBasedExpenseLineDetail', 'ItemBasedExpenseLineDetail']).default('AccountBasedExpenseLineDetail'),
           expense_account_id: z.string().optional().describe('Expense account ID'),
           expense_account_name: z.string().optional().describe('Expense account name'),
           item_id: z.string().optional(),
+          item_name: z.string().optional(),
           quantity: z.number().optional(),
           unit_price: z.number().optional(),
           class_id: z.string().optional(),
-        })).optional().describe('Replacement line items (replaces ALL existing lines if provided)'),
+        })).optional().describe('Replacement line items — the complete new line set (omitted existing lines are removed). Pass the lines from get_expense (with line_id) to edit in place; without line_id, Ids are matched by position.'),
       },
       async ({ client_name, expense_id, payment_type, account_id, account_name, txn_date, doc_number, vendor_id, vendor_name, private_note, department_id, lines }) => {
         const realmId = await findRealmId(qboManager, client_name);
@@ -2162,30 +2114,12 @@ export async function registerMcpRoutes(
             return { content: [{ type: 'text', text: `Expense ${expense_id} not found.` }] };
           }
 
-          const payload: any = { ...exp };
-          if (payment_type) payload.PaymentType = payment_type;
-          if (account_id) payload.AccountRef = { value: account_id, name: account_name };
-          if (txn_date) payload.TxnDate = txn_date;
-          if (doc_number) payload.DocNumber = doc_number;
-          if (entityRef) payload.EntityRef = { ...entityRef, type: 'Vendor' };
-          if (department_id) payload.DepartmentRef = { value: department_id };
-          if (private_note !== undefined) payload.PrivateNote = private_note;
-
-          if (lines) {
-            payload.Line = lines.map(l => {
-              const line: any = { Amount: l.amount, DetailType: l.detail_type, Description: l.description };
-              if (l.detail_type === 'AccountBasedExpenseLineDetail') {
-                line.AccountBasedExpenseLineDetail = {};
-                if (l.expense_account_id) line.AccountBasedExpenseLineDetail.AccountRef = { value: l.expense_account_id, name: l.expense_account_name };
-                if (l.class_id) line.AccountBasedExpenseLineDetail.ClassRef = { value: l.class_id };
-              } else {
-                line.ItemBasedExpenseLineDetail = { Qty: l.quantity ?? 1, UnitPrice: l.unit_price ?? l.amount };
-                if (l.item_id) line.ItemBasedExpenseLineDetail.ItemRef = { value: l.item_id };
-                if (l.class_id) line.ItemBasedExpenseLineDetail.ClassRef = { value: l.class_id };
-              }
-              return line;
-            });
-          }
+          // Read-modify-write. Replacement lines carry existing Ids (line_id
+          // or positional) + sparse:false; no lines → fetched Line untouched.
+          const payload = buildExpenseUpdatePayload(exp, {
+            payment_type, account_id, account_name, txn_date, doc_number,
+            entity_ref: entityRef, private_note, department_id, lines,
+          });
 
           const result = await qboManager.transactions.updateExpense(realmId, payload);
           const updated = (result as any)?.Purchase;
@@ -2204,6 +2138,7 @@ export async function registerMcpRoutes(
             : JSON.stringify(result, null, 2);
           return { content: [{ type: 'text', text: summary }] };
         } catch (err: any) {
+          if (err instanceof LineIdError) return { content: [{ type: 'text', text: err.message }] };
           return { content: [{ type: 'text', text: `Error updating expense: ${err?.message ?? err}` }] };
         }
       }
@@ -3168,12 +3103,7 @@ export async function registerMcpRoutes(
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) return { content: [{ type: 'text', text: `Client not found: "${client_name}".` }] };
         try {
-          const srLines = lines.map(l => {
-            const line: any = { Amount: l.amount, DetailType: 'SalesItemLineDetail', Description: l.description };
-            line.SalesItemLineDetail = { Qty: l.quantity ?? 1, UnitPrice: l.unit_price ?? l.amount };
-            if (l.item_id) line.SalesItemLineDetail.ItemRef = { value: l.item_id, name: l.item_name };
-            return line;
-          });
+          const srLines = buildSalesLines(lines);
           const payload: any = { CustomerRef: { value: customer_id, name: customer_name }, Line: srLines };
           if (txn_date) payload.TxnDate = txn_date;
           if (deposit_account_id) payload.DepositToAccountRef = { value: deposit_account_id };
@@ -3193,7 +3123,7 @@ export async function registerMcpRoutes(
     // ── update_sales_receipt ──────────────────────────────────────────────────
     server.tool(
       'update_sales_receipt',
-      'Update an existing sales receipt. Fetches current record first, then applies changes. Supports class, department, and (where applicable) sales terms at the appropriate QBO level (header or line).',
+      'Update an existing sales receipt. Fetches current record first, then applies changes: only the header fields you provide change. ' + REPLACEMENT_LINES_BEHAVIOUR + ' QBO subtotal rows are recomputed by QBO; discount/group rows are kept as-is. Supports class, department, and (where applicable) sales terms at the appropriate QBO level (header or line).',
       {
         client_name: z.string().describe('The name of the client company'),
         sales_receipt_id: z.string().describe('QBO Sales Receipt ID'),
@@ -3202,13 +3132,17 @@ export async function registerMcpRoutes(
         private_note: z.string().optional().describe('New memo'),
         department_id: z.string().optional().describe('New header DepartmentRef.value'),
         lines: z.array(z.object({
+          line_id: z.string().optional().describe(LINE_ID_PARAM_DESCRIPTION),
           description: z.string().optional(),
           amount: z.number(),
+          detail_type: z.enum(['SalesItemLineDetail', 'DescriptionOnly']).default('SalesItemLineDetail'),
           item_id: z.string().optional(),
           item_name: z.string().optional(),
           quantity: z.number().optional(),
           unit_price: z.number().optional(),
-        })).optional().describe('Replacement line items'),
+          class_id: z.string().optional().describe('Line ClassRef.value'),
+          tax_code_id: z.string().optional().describe('Line TaxCodeRef.value (e.g. TAX / NON)'),
+        })).optional().describe('Replacement line items — the complete new line set (omitted existing lines are removed). Pass the lines from get_sales_receipt (with line_id) to edit in place; without line_id, Ids are matched by position.'),
       },
       async ({ client_name, sales_receipt_id, doc_number, txn_date, private_note, department_id, lines }) => {
         const docErr = docNumberError(doc_number);
@@ -3219,19 +3153,9 @@ export async function registerMcpRoutes(
           const existing = await qboManager.transactions.getSalesReceipt(realmId, sales_receipt_id) as any;
           const sr = existing?.SalesReceipt;
           if (!sr) return { content: [{ type: 'text', text: `Sales Receipt ${sales_receipt_id} not found.` }] };
-          const payload: any = { ...sr };
-          if (txn_date) payload.TxnDate = txn_date;
-          if (department_id) payload.DepartmentRef = { value: department_id };
-          if (private_note !== undefined) payload.PrivateNote = private_note;
-          applyDocNumberOnUpdate(payload, doc_number);
-          if (lines) {
-            payload.Line = lines.map(l => {
-              const line: any = { Amount: l.amount, DetailType: 'SalesItemLineDetail', Description: l.description };
-              line.SalesItemLineDetail = { Qty: l.quantity ?? 1, UnitPrice: l.unit_price ?? l.amount };
-              if (l.item_id) line.SalesItemLineDetail.ItemRef = { value: l.item_id, name: l.item_name };
-              return line;
-            });
-          }
+          // Read-modify-write. Replacement lines carry existing Ids (line_id
+          // or positional) + sparse:false; no lines → fetched Line untouched.
+          const payload = buildSalesReceiptUpdatePayload(sr, { txn_date, private_note, department_id, doc_number, lines });
           const result = await qboManager.transactions.updateSalesReceipt(realmId, payload);
           const updated = (result as any)?.SalesReceipt;
           if (updated && lines) {
@@ -3246,6 +3170,7 @@ export async function registerMcpRoutes(
           }
           return { content: [{ type: 'text', text: updated ? `Sales Receipt #${updated.DocNumber ?? updated.Id} updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken} | Total: ${formatCurrency(updated.TotalAmt)}${docNumberSummary(updated, 'Sales Receipt No')}` : JSON.stringify(result, null, 2) }] };
         } catch (err: any) {
+          if (err instanceof LineIdError) return { content: [{ type: 'text', text: err.message }] };
           return { content: [{ type: 'text', text: `Error updating sales receipt: ${err?.message ?? err}` }] };
         }
       }
@@ -4151,7 +4076,7 @@ export async function registerMcpRoutes(
     // ── get_sales_receipt ─────────────────────────────────────────────────────
     server.tool(
       'get_sales_receipt',
-      'Fetch a sales receipt in update-ready shape. The returned `lines` array can be passed directly to update_sales_receipt with no reshaping.',
+      'Fetch a sales receipt in update-ready shape. The returned `lines` array can be passed directly to update_sales_receipt with no reshaping. Each line carries its QBO line_id so the update edits those exact lines in place; lines you drop from the array are removed, lines you add without line_id are created.',
       {
         client_name: z.string().describe('The name of the client company'),
         sales_receipt_id: z.string().describe('QBO Sales Receipt ID'),
@@ -4187,7 +4112,7 @@ export async function registerMcpRoutes(
     // ── get_invoice ───────────────────────────────────────────────────────────
     server.tool(
       'get_invoice',
-      'Fetch an invoice in update-ready shape. The returned `lines` array can be passed directly to update_invoice with no reshaping.',
+      'Fetch an invoice in update-ready shape. The returned `lines` array can be passed directly to update_invoice with no reshaping. Each line carries its QBO line_id so the update edits those exact lines in place; lines you drop from the array are removed, lines you add without line_id are created.',
       {
         client_name: z.string().describe('The name of the client company'),
         invoice_id: z.string().describe('QBO Invoice ID'),
@@ -4224,7 +4149,7 @@ export async function registerMcpRoutes(
     // ── get_bill ──────────────────────────────────────────────────────────────
     server.tool(
       'get_bill',
-      'Fetch a bill in update-ready shape. The returned `lines` array can be passed directly to update_bill with no reshaping.',
+      'Fetch a bill in update-ready shape. The returned `lines` array can be passed directly to update_bill with no reshaping. Each line carries its QBO line_id so the update edits those exact lines in place; lines you drop from the array are removed, lines you add without line_id are created.',
       {
         client_name: z.string().describe('The name of the client company'),
         bill_id: z.string().describe('QBO Bill ID'),
@@ -4261,7 +4186,7 @@ export async function registerMcpRoutes(
     // ── get_journal_entry ─────────────────────────────────────────────────────
     server.tool(
       'get_journal_entry',
-      'Fetch a journal entry in update-ready shape. The returned `lines` array can be passed directly to update_journal_entry with no reshaping.',
+      'Fetch a journal entry in update-ready shape. The returned `lines` array can be passed directly to update_journal_entry with no reshaping. Each line carries its QBO line_id so the update edits those exact lines in place; lines you drop from the array are removed, lines you add without line_id are created.',
       {
         client_name: z.string().describe('The name of the client company'),
         journal_entry_id: z.string().describe('QBO Journal Entry ID'),
@@ -4293,7 +4218,7 @@ export async function registerMcpRoutes(
     // ── get_expense ───────────────────────────────────────────────────────────
     server.tool(
       'get_expense',
-      'Fetch an expense (Purchase) in update-ready shape. The returned `lines` array matches the create_expense line schema (expense_account_id for account-based lines).',
+      'Fetch an expense (Purchase) in update-ready shape. The returned `lines` array matches the create_expense / update_expense line schema (expense_account_id for account-based lines) and can be passed directly to update_expense. Each line carries its QBO line_id so the update edits those exact lines in place; lines you drop are removed, lines you add without line_id are created.',
       {
         client_name: z.string().describe('The name of the client company'),
         expense_id: z.string().describe('QBO Expense (Purchase) ID'),
@@ -4390,7 +4315,7 @@ export async function registerMcpRoutes(
             sales_term_id: cm.SalesTermRef?.value,
             total_amt: cm.TotalAmt,
             remaining_credit: cm.RemainingCredit,
-            lines: qboSalesLinesToUpdateShape(cm.Line ?? []),
+            lines: qboSalesLinesToUpdateShape(cm.Line ?? [], { includeLineId: false, editableOnly: false }),
           };
           return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
         } catch (err: any) {
@@ -4427,7 +4352,7 @@ export async function registerMcpRoutes(
             department_id: est.DepartmentRef?.value,
             sales_term_id: est.SalesTermRef?.value,
             total_amt: est.TotalAmt,
-            lines: qboSalesLinesToUpdateShape(est.Line ?? []),
+            lines: qboSalesLinesToUpdateShape(est.Line ?? [], { includeLineId: false, editableOnly: false }),
           };
           return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
         } catch (err: any) {
