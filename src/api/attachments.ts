@@ -173,6 +173,55 @@ export class AttachmentsAPI {
     return res?.QueryResponse?.Attachable?.[0] ?? null;
   }
 
+  /**
+   * Link an existing Attachable to another entity. QBO keeps ONE Attachable
+   * with many AttachableRef entries, so linking never copies the file. A
+   * sparse update replaces the whole AttachableRef array, so the existing
+   * refs are resent alongside the new one (dropping them would unlink the
+   * file from everything it was already on).
+   */
+  async link(
+    realmId: string,
+    attachable: any,
+    entityRef: { type: string; id: string },
+    includeOnSend?: boolean
+  ): Promise<{ attachable: any; alreadyLinked: boolean }> {
+    const existing: any[] = Array.isArray(attachable?.AttachableRef) ? attachable.AttachableRef : [];
+    const already = existing.some(
+      (r) => String(r?.EntityRef?.value) === String(entityRef.id) &&
+        String(r?.EntityRef?.type ?? '').toLowerCase() === entityRef.type.toLowerCase()
+    );
+    if (already) return { attachable, alreadyLinked: true };
+    const newRef: any = { EntityRef: { value: String(entityRef.id), type: entityRef.type } };
+    if (includeOnSend !== undefined) newRef.IncludeOnSend = includeOnSend;
+    const res: any = await this.client.post(realmId, 'attachable', {
+      Id: attachable.Id,
+      SyncToken: attachable.SyncToken,
+      sparse: true,
+      AttachableRef: [...existing, newRef],
+    });
+    return { attachable: res?.Attachable ?? res, alreadyLinked: false };
+  }
+
+  /** Every Attachable linked to one entity. */
+  async listForEntity(realmId: string, entityType: string, entityId: string): Promise<any[]> {
+    const res: any = await this.client.query(
+      realmId,
+      `SELECT * FROM Attachable WHERE AttachableRef.EntityRef.Type = '${escapeQboString(entityType)}' AND AttachableRef.EntityRef.value = '${escapeQboString(entityId)}'`
+    );
+    return res?.QueryResponse?.Attachable ?? [];
+  }
+
+  /** Fetch file bytes from an Attachable's TempDownloadUri (Intuit-signed, short-lived). */
+  async download(tempDownloadUri: string): Promise<Buffer> {
+    const url = assertSafeUrl(tempDownloadUri);
+    const res = await fetch(url, { redirect: 'follow' });
+    if (!res.ok) throw new Error(`Download failed: HTTP ${res.status}`);
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length > MAX_ATTACHMENT_BYTES) throw new Error(`File exceeds ${MAX_ATTACHMENT_BYTES} bytes`);
+    return buf;
+  }
+
   /** Delete an Attachable (removes the file and its links). */
   async remove(realmId: string, attachable: { Id: string; SyncToken: string }): Promise<unknown> {
     return this.client.post(realmId, 'attachable?operation=delete', {

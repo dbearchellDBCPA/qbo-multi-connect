@@ -163,6 +163,10 @@ describe('MCP report tools — requested dates reach Intuit (2026-09-05)', () =>
     expect(Object.keys(byName.get_budget.inputSchema.properties)).toEqual(expect.arrayContaining(['list_only', 'fiscal_year', 'summary_only']));
     // Annotations still injected by the registration shim.
     expect(byName.get_trial_balance.annotations).toMatchObject({ readOnlyHint: true });
+    expect(byName.get_closing_date.annotations).toMatchObject({ readOnlyHint: true });
+    expect(byName.get_attachments.annotations).toMatchObject({ readOnlyHint: true });
+    expect(byName.link_attachment.annotations).toMatchObject({ readOnlyHint: false });
+    expect(byName.link_attachment.inputSchema.required).toEqual(expect.arrayContaining(['client_name', 'attachable_id', 'entity_type', 'entity_id']));
     expect(byName.create_journal_entry.annotations).toMatchObject({ readOnlyHint: false });
     expect(byName.list_clients.inputSchema.additionalProperties).toBe(false);
   });
@@ -191,6 +195,7 @@ describe('MCP report tools — requested dates reach Intuit (2026-09-05)', () =>
     expect(getSpy).toHaveBeenCalledWith(REALM, 'reports/BalanceSheet', {
       start_date: '2025-08-01',
       end_date: '2026-08-31',
+      accounting_method: 'Accrual',
       summarize_column_by: 'Month',
     });
     const report = lastJson(texts);
@@ -211,9 +216,10 @@ describe('MCP report tools — requested dates reach Intuit (2026-09-05)', () =>
     expect(formatted.texts[0]).toMatch(/QBO applied a different period/);
   });
 
-  it('get_trial_balance: as_of_date is sent as end_date and Header.EndPeriod equals it', async () => {
+  it('get_trial_balance: as_of_date is sent as end_date with a fiscal-year start_date (QBO ignores a lone end_date)', async () => {
     const responses: any[] = [];
     getSpy.mockImplementation((_r: string, path: string, query: Record<string, string>) => {
+      if (path.startsWith('companyinfo')) return Promise.resolve({ CompanyInfo: { FiscalYearStartMonth: 'July' } });
       const report = echoReport(path, query);
       responses.push(report);
       return Promise.resolve(report);
@@ -226,13 +232,17 @@ describe('MCP report tools — requested dates reach Intuit (2026-09-05)', () =>
       expect(texts[0]).toContain('✓ BALANCED');
       expect(texts[0]).not.toContain('different period');
     }
-    expect(getSpy.mock.calls.map((c) => c[2])).toEqual([{ end_date: '2024-08-31' }, { end_date: '2025-12-31' }]);
+    const tbCalls = getSpy.mock.calls.filter((c) => c[1] === 'reports/TrialBalance').map((c) => c[2]);
+    expect(tbCalls).toEqual([
+      { start_date: '2024-07-01', end_date: '2024-08-31', accounting_method: 'Accrual' },
+      { start_date: '2025-07-01', end_date: '2025-12-31', accounting_method: 'Accrual' },
+    ]);
     expect(responses.map((r) => r.Header.EndPeriod)).toEqual(['2024-08-31', '2025-12-31']);
   });
 
   it('get_trial_balance: start_date/end_date still work and disagreeing as_of/end dates are refused', async () => {
     await callTool('get_trial_balance', { client_name: CLIENT, start_date: '2024-08-01', end_date: '2024-08-31' });
-    expect(getSpy).toHaveBeenLastCalledWith(REALM, 'reports/TrialBalance', { start_date: '2024-08-01', end_date: '2024-08-31' });
+    expect(getSpy).toHaveBeenLastCalledWith(REALM, 'reports/TrialBalance', { start_date: '2024-08-01', end_date: '2024-08-31', accounting_method: 'Accrual' });
     const { texts } = await callTool('get_trial_balance', { client_name: CLIENT, as_of_date: '2024-08-31', end_date: '2025-12-31' });
     expect(texts[0]).toMatch(/disagree/);
     expect(getSpy).toHaveBeenCalledTimes(1);
