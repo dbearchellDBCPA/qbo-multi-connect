@@ -43,6 +43,16 @@ export interface BudgetVsActualsOptions extends ReportOptions {
  * Build the query-string param object for an Intuit Reports API call.
  * Only includes the params the caller passed AND that the named report supports.
  */
+/**
+ * These tools document "Defaults to Accrual", but leaving accounting_method
+ * off makes QBO use the COMPANY's report-basis preference — on a cash-basis
+ * company a Bill then posts on its BillPayment date (found 2026-09-27: UWGA
+ * Bill 501 dated 7/20 showed on 7/24). Send Accrual explicitly.
+ */
+function withAccrualDefault<T extends ReportOptions>(options: T): T {
+  return { ...options, accountingMethod: options.accountingMethod ?? 'Accrual' };
+}
+
 function buildReportQuery(
   options: ReportOptions,
   supports: ReadonlyArray<
@@ -118,7 +128,7 @@ export class ReportsAPI {
    * Get Profit & Loss report
    */
   async profitAndLoss(realmId: string, options: ReportOptions = {}): Promise<unknown> {
-    const query = buildReportQuery(options, [
+    const query = buildReportQuery(withAccrualDefault(options), [
       'start_date',
       'end_date',
       'accounting_method',
@@ -141,7 +151,7 @@ export class ReportsAPI {
    */
   async balanceSheet(realmId: string, options: ReportOptions = {}): Promise<unknown> {
     const query = buildReportQuery(
-      { ...options, endDate: options.endDate ?? options.asOfDate },
+      withAccrualDefault({ ...options, endDate: options.endDate ?? options.asOfDate }),
       [
         'start_date',
         'end_date',
@@ -161,7 +171,7 @@ export class ReportsAPI {
    */
   async trialBalance(realmId: string, options: ReportOptions = {}): Promise<unknown> {
     const query = buildReportQuery(
-      { ...options, endDate: options.endDate ?? options.asOfDate },
+      withAccrualDefault({ ...options, endDate: options.endDate ?? options.asOfDate }),
       ['start_date', 'end_date', 'accounting_method']
     );
     return this.fetchReport(realmId, 'reports/TrialBalance', query);
@@ -200,7 +210,7 @@ export class ReportsAPI {
     realmId: string,
     options: ReportOptions & { columns?: string } = {}
   ): Promise<unknown> {
-    const query = buildReportQuery(options, [
+    const query = buildReportQuery(withAccrualDefault(options), [
       'start_date',
       'end_date',
       'accounting_method',

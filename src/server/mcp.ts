@@ -56,6 +56,7 @@ import {
   periodMismatchNote,
   formatTrialBalance,
   formatAgingReport,
+  fiscalYearStart,
 } from './report-shaping.js';
 import {
   postedLineStats,
@@ -467,6 +468,32 @@ export async function registerMcpRoutes(
       }
     );
 
+    // ── get_closing_date ──────────────────────────────────────────────────────
+    server.tool(
+      'get_closing_date',
+      "Read the company's books closing date (Preferences.AccountingInfoPrefs.BookCloseDate) and whether closing is enabled. Transactions dated on or before this date are in a closed period. Read-only; the closing password is never exposed by QBO's API.",
+      { client_name: z.string().describe('The name of the client company') },
+      async ({ client_name }) => {
+        const realmId = await findRealmId(qboManager, client_name);
+        if (!realmId) {
+          return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
+        }
+        try {
+          const prefs: any = await qboManager.company.getPreferences(realmId);
+          const acct = (prefs?.Preferences ?? prefs)?.AccountingInfoPrefs ?? {};
+          const closeDate = acct.BookCloseDate ?? null;
+          const lines = [
+            `BOOKS CLOSING DATE — ${client_name}`,
+            `Closing date: ${closeDate ?? 'not set'}`,
+          ];
+          if (acct.FirstMonthOfFiscalYear) lines.push(`Fiscal year starts: ${acct.FirstMonthOfFiscalYear}`);
+          return { content: [{ type: 'text', text: lines.join('\n') }] };
+        } catch (err: any) {
+          return { content: [{ type: 'text', text: `Error fetching closing date: ${err?.message ?? err}` }] };
+        }
+      }
+    );
+
     // ── get_profit_and_loss ───────────────────────────────────────────────────
     server.tool(
       'get_profit_and_loss',
@@ -586,12 +613,18 @@ export async function registerMcpRoutes(
           return { content: [{ type: 'text', text: `start_date ${start_date} is after ${end_date ? 'end_date' : 'as_of_date'} ${through}.` }] };
         }
         try {
+          let effectiveStart = start_date;
+          if (through && !effectiveStart) {
+            const info: any = await qboManager.company.getInfo(realmId);
+            const ci = info?.CompanyInfo ?? info;
+            effectiveStart = fiscalYearStart(through, ci?.FiscalYearStartMonth);
+          }
           const report = await qboManager.reports.trialBalance(realmId, {
-            startDate: start_date,
+            startDate: effectiveStart,
             endDate: through,
             accountingMethod: accounting_method,
           });
-          const formatted = formatTrialBalance(report, client_name, start_date, through);
+          const formatted = formatTrialBalance(report, client_name, effectiveStart, through);
           return { content: [{ type: 'text', text: formatted }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error fetching Trial Balance: ${err?.message ?? err}` }] };
@@ -4974,6 +5007,106 @@ export async function registerMcpRoutes(
           return { content: [{ type: 'text', text: `Attachment "${attachable.FileName ?? attachable_id}" (ID: ${attachable_id}) deleted.` }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error deleting attachment: ${err?.message ?? err}` }] };
+        }
+      }
+    );
+
+    // ── link_attachment ───────────────────────────────────────────────────────
+    server.tool(
+      'link_attachment',
+      'Link an EXISTING QBO attachment (Attachable) to another transaction or entity, without re-uploading. The file stays one Attachable and keeps all its current links; this adds one more. Find attachable Ids with get_attachments or query_transactions (SELECT * FROM Attachable ...). Linking to something it is already on is a no-op.',
+      {
+        client_name: z.string().describe('The name of the client company'),
+        attachable_id: z.string().describe('Id of the existing Attachable to link'),
+        entity_type: z.string().describe('QBO entity type to link to: Purchase, Invoice, Bill, JournalEntry, Vendor, Customer, Estimate, CreditMemo, Payment, BillPayment, SalesReceipt, Deposit, Transfer, PurchaseOrder'),
+        entity_id: z.string().describe('QBO Id of the entity to link to'),
+        include_on_send: z.boolean().optional().describe('Include this attachment when the linked transaction is emailed (default false)'),
+      },
+      async ({ client_name, attachable_id, entity_type, entity_id, include_on_send }) => {
+        const realmId = await findRealmId(qboManager, client_name);
+        if (!realmId) {
+          return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
+        }
+        try {
+          const attachable = await qboManager.attachments.get(realmId, attachable_id);
+          if (!attachable) {
+            return { content: [{ type: 'text', text: `Attachable ${attachable_id} not found. Nothing was changed.` }] };
+          }
+          const { attachable: updated, alreadyLinked } = await qboManager.attachments.link(
+            realmId, attachable, { type: entity_type, id: entity_id }, include_on_send
+          );
+          const refs = (updated?.AttachableRef ?? []).map((r: any) => `${r?.EntityRef?.type ?? '?'} ${r?.EntityRef?.value ?? '?'}`);
+          const head = alreadyLinked
+            ? `Attachment "${attachable.FileName ?? attachable_id}" (ID: ${attachable_id}) is already linked to ${entity_type} ${entity_id}. Nothing was changed.`
+            : `Linked attachment "${attachable.FileName ?? attachable_id}" (ID: ${attachable_id}) to ${entity_type} ${entity_id}.`;
+          return { content: [{ type: 'text', text: `${head}\nNow linked to: ${refs.join(', ') || '(none)'}` }] };
+        } catch (err: any) {
+          return { content: [{ type: 'text', text: `Error linking attachment: ${err?.message ?? err}` }] };
+        }
+      }
+    );
+
+    // ── get_attachments ───────────────────────────────────────────────────────
+    server.tool(
+      'get_attachments',
+      'List QBO attachments (Attachables) linked to a transaction/entity, or fetch one by attachable_id. Returns Id, file name, size, content type, note, every entity it is linked to, and a TEMPORARY download URL (valid ~15 minutes; fetch it promptly). Set include_content=true on a single attachable_id to also get the file bytes as base64 (files up to 5 MB).',
+      {
+        client_name: z.string().describe('The name of the client company'),
+        attachable_id: z.string().optional().describe('Fetch one attachment by Id'),
+        entity_type: z.string().optional().describe('List attachments linked to this entity type (with entity_id)'),
+        entity_id: z.string().optional().describe('List attachments linked to this entity Id (with entity_type)'),
+        include_content: z.boolean().optional().describe('With attachable_id only: include the file bytes as base64 (max 5 MB)'),
+      },
+      async ({ client_name, attachable_id, entity_type, entity_id, include_content }) => {
+        const realmId = await findRealmId(qboManager, client_name);
+        if (!realmId) {
+          return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
+        }
+        if (!attachable_id && !(entity_type && entity_id)) {
+          return { content: [{ type: 'text', text: 'Pass attachable_id, or entity_type together with entity_id.' }] };
+        }
+        if (include_content && !attachable_id) {
+          return { content: [{ type: 'text', text: 'include_content needs a single attachable_id.' }] };
+        }
+        try {
+          let list: any[];
+          if (attachable_id) {
+            const one = await qboManager.attachments.get(realmId, attachable_id);
+            if (!one) return { content: [{ type: 'text', text: `Attachable ${attachable_id} not found.` }] };
+            list = [one];
+          } else {
+            list = await qboManager.attachments.listForEntity(realmId, entity_type!, entity_id!);
+          }
+          const out: any[] = [];
+          for (const a of list) {
+            const item: any = {
+              id: a.Id,
+              file_name: a.FileName ?? null,
+              content_type: a.ContentType ?? null,
+              size: a.Size ?? null,
+              note: a.Note ?? null,
+              linked_to: (a.AttachableRef ?? []).map((r: any) => ({ type: r?.EntityRef?.type, id: r?.EntityRef?.value, include_on_send: r?.IncludeOnSend ?? false })),
+              temp_download_url: a.TempDownloadUri ?? null,
+            };
+            if (include_content) {
+              if (!a.TempDownloadUri) {
+                item.content_error = 'QBO returned no download URL (note-only attachment?).';
+              } else if (a.Size != null && Number(a.Size) > 5 * 1024 * 1024) {
+                item.content_error = `File is ${a.Size} bytes; over the 5 MB inline limit. Use temp_download_url.`;
+              } else {
+                const bytes = await qboManager.attachments.download(a.TempDownloadUri);
+                if (bytes.length > 5 * 1024 * 1024) {
+                  item.content_error = `File is ${bytes.length} bytes; over the 5 MB inline limit. Use temp_download_url.`;
+                } else {
+                  item.content_base64 = bytes.toString('base64');
+                }
+              }
+            }
+            out.push(item);
+          }
+          return { content: [{ type: 'text', text: JSON.stringify({ count: out.length, attachments: out }, null, 2) }] };
+        } catch (err: any) {
+          return { content: [{ type: 'text', text: `Error fetching attachments: ${err?.message ?? err}` }] };
         }
       }
     );

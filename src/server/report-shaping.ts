@@ -253,6 +253,10 @@ export function parseGeneralLedger(
     const transactions: any[] = [];
     let totalDebits = 0;
     let totalCredits = 0;
+    // Ending balance = the LAST running balance QBO printed, zero included.
+    // The old "last non-zero" rule reported the prior row's balance whenever
+    // an account netted to exactly 0.00 (found 2026-09-27: UWGA 1650 showed
+    // 77.75 while its own running balance ended at 0.00).
     let endingBalance = 0;
 
     for (const txnRow of row.Rows?.Row ?? []) {
@@ -284,7 +288,7 @@ export function parseGeneralLedger(
 
       totalDebits += debit;
       totalCredits += credit;
-      if (balance !== 0) endingBalance = balance; // track last non-zero balance
+      if (balIdx >= 0 && String(colVal(cd, balIdx)).trim() !== '') endingBalance = balance;
 
       transactions.push({
         date: colVal(cd, dateIdx),
@@ -303,10 +307,15 @@ export function parseGeneralLedger(
     // Ending balance from Summary if available — prefer this over last transaction
     if (row.Summary?.ColData) {
       const cd = row.Summary.ColData;
-      const summaryBalance = balIdx >= 0 && cd[balIdx]?.value
-        ? moneyValue(cd[balIdx].value)
-        : moneyValue(cd[cd.length - 1]?.value ?? '0');
-      if (summaryBalance !== 0) endingBalance = summaryBalance;
+      if (balIdx >= 0) {
+        // Only trust a printed Summary balance (QBO usually leaves it blank).
+        const raw = String(cd[balIdx]?.value ?? '').trim();
+        if (raw !== '') endingBalance = moneyValue(raw);
+      } else {
+        // No Balance column: fall back to the section total, else net activity.
+        const raw = String(cd[cd.length - 1]?.value ?? '').trim();
+        endingBalance = raw !== '' ? moneyValue(raw) : totalDebits - totalCredits;
+      }
     }
 
     accounts.push({
@@ -792,4 +801,22 @@ export function formatAgingReport(
   }
 
   return lines.join('\n');
+}
+
+// ─── Fiscal-year start ────────────────────────────────────────────────────────
+// QBO's TrialBalance ignores end_date when start_date is absent and returns
+// the default period (this month-to-date) — found 2026-09-27: as_of_date
+// 2026-07-31 came back as 9/1–9/27/2026. An "as of" TB is fiscal-YTD, so the
+// start is the first day of the fiscal year containing the end date.
+const MONTHS = ['january','february','march','april','may','june','july','august','september','october','november','december'];
+
+export function fiscalYearStart(endDate: string, fiscalStartMonth?: string | null): string {
+  const m = /^(\d{4})-(\d{2})-\d{2}$/.exec(endDate);
+  if (!m) throw new Error(`Invalid date: ${endDate}`);
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const idx = MONTHS.indexOf(String(fiscalStartMonth ?? '').trim().toLowerCase());
+  const startMonth = idx >= 0 ? idx + 1 : 1;
+  const startYear = month >= startMonth ? year : year - 1;
+  return `${startYear}-${String(startMonth).padStart(2, '0')}-01`;
 }

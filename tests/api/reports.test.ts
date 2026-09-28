@@ -19,6 +19,7 @@ describe('ReportsAPI param threading', () => {
     expect(client.get).toHaveBeenCalledWith('r', 'reports/ProfitAndLoss', {
       start_date: '2026-01-01',
       end_date: '2026-12-31',
+      accounting_method: 'Accrual',
       summarize_column_by: 'Month',
     });
   });
@@ -53,6 +54,7 @@ describe('ReportsAPI param threading', () => {
     expect(client.get).toHaveBeenCalledWith('r', 'reports/GeneralLedger', {
       start_date: '2026-01-01',
       end_date: '2026-03-31',
+      accounting_method: 'Accrual',
       columns: 'tx_date,txn_type,debt_amt,credit_amt',
     });
   });
@@ -100,6 +102,7 @@ describe('ReportsAPI param threading', () => {
     expect(client.get).toHaveBeenCalledWith('r', 'reports/BalanceSheet', {
       start_date: '2026-01-01',
       end_date: '2026-06-30',
+      accounting_method: 'Accrual',
       summarize_column_by: 'Month',
     });
   });
@@ -171,6 +174,7 @@ describe('ReportsAPI param threading', () => {
     expect(client.get).toHaveBeenCalledWith('r', 'reports/ProfitAndLoss', {
       start_date: '2026-01-01',
       end_date: '2026-12-31',
+      accounting_method: 'Accrual',
     });
   });
 
@@ -185,6 +189,7 @@ describe('ReportsAPI param threading', () => {
     expect(client.get).toHaveBeenCalledWith('r', 'reports/TrialBalance', {
       start_date: '2026-01-01',
       end_date: '2026-03-31',
+      accounting_method: 'Accrual',
     });
   });
 });
@@ -216,6 +221,7 @@ describe('ReportsAPI — as-of dates, date_macro, and Fault bodies (2026-09-05)'
     expect(client.get).toHaveBeenCalledWith('r', 'reports/TrialBalance', {
       start_date: '2025-01-01',
       end_date: '2025-12-31',
+      accounting_method: 'Accrual',
     });
   });
 
