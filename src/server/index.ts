@@ -217,7 +217,9 @@ async function startServer() {
   await oauthRoutes(fastify, qboManager);
 
   // Register MCP server at /mcp
-  await registerMcpRoutes(fastify, qboManager, apiKey, join(dirname(appConfig.db.path), 'attachments'));
+  await registerMcpRoutes(fastify, qboManager, apiKey, join(dirname(appConfig.db.path), 'attachments'), {
+    importDataDir: dirname(appConfig.db.path),
+  });
 
   // Start server
   const port = appConfig.server.port;

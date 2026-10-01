@@ -9,14 +9,15 @@
     "qbo": "./dist/cli/index.js"
   },
   "scripts": {
-    "build": "tsc && rm -rf dist/server/public && mkdir -p dist/server/public && cp -r src/server/public/. dist/server/public/ && cp src/db/schema.sql dist/db/schema.sql",
+    "build": "tsc && rm -rf dist/server/public && mkdir -p dist/server/public && cp -r src/server/public/. dist/server/public/ && cp src/db/schema.sql src/db/import-schema.sql dist/db/",
     "fonts": "cp node_modules/@fontsource-variable/inter/files/inter-latin-wght-normal.woff2 node_modules/@fontsource-variable/inter/files/inter-latin-ext-wght-normal.woff2 node_modules/@fontsource-variable/fraunces/files/fraunces-latin-full-normal.woff2 node_modules/@fontsource-variable/fraunces/files/fraunces-latin-ext-full-normal.woff2 src/server/public/fonts/",
     "dev": "tsx src/index.ts",
     "test": "vitest",
     "cli": "tsx src/cli/index.ts",
     "server": "tsx src/server/index.ts",
     "start": "node dist/server/index.js",
-    "sandbox:coa": "tsx scripts/sandbox-coa-hierarchy.ts"
+    "sandbox:coa": "tsx scripts/sandbox-coa-hierarchy.ts",
+    "sandbox:import": "tsx scripts/sandbox-import.ts"
   },
   "keywords": [
     "quickbooks",

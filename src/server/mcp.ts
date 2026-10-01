@@ -6,6 +6,9 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import type { QBOManager } from '../index.js';
 import { resolveAuth, createScopedManager, type AuthScope, type ScopedQBOManager } from './auth.js';
 import { publicBaseUrl, resolvePublicUrl } from './public-url.js';
+import { registerImportTools } from './import-tools.js';
+import type { BatchRunnerOptions } from './qbo-batch.js';
+import { ImportStoreHandle, IMPORT_STORE_FILENAME } from '../db/import-store.js';
 import {
   qboSalesLinesToUpdateShape,
   qboBillLinesToUpdateShape,
@@ -102,7 +105,7 @@ import {
   DOC_NUMBER_DESCRIPTION,
 } from './entity-fields.js';
 import { readFile, readdir, stat } from 'node:fs/promises';
-import { basename } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import {
   contentTypeForFile,
   supportedExtensions,
@@ -348,11 +351,13 @@ const DESTRUCTIVE_TOOLS = new Set<string>([
   'delete_deposit',
   'delete_expense',
   'delete_bill_payment',
+  'delete_imported_transactions',
 ]);
 
 // Read-only tools never mutate QBO state. All get_*/list_* tools plus the query tool.
+// import_status only reads the server's import store.
 function isReadOnlyTool(name: string): boolean {
-  return name.startsWith('get_') || name.startsWith('list_') || name === 'query_transactions';
+  return name.startsWith('get_') || name.startsWith('list_') || name === 'query_transactions' || name === 'import_status';
 }
 
 function annotationsForTool(name: string): ToolAnnotations {
@@ -381,8 +386,18 @@ export async function registerMcpRoutes(
   fastify: FastifyInstance,
   qboRoot: QBOManager,
   masterApiKey: string,
-  attachmentsDir?: string
+  attachmentsDir?: string,
+  options: { importDataDir?: string; importRunnerOptions?: BatchRunnerOptions } = {}
 ): Promise<void> {
+  // Bulk-import mapping store + run logs live in the server's data directory
+  // (next to QBO_DB_PATH — the persistent /data volume on Railway), in their
+  // own SQLite file so nothing touches the connections DB.
+  const importDataDir =
+    options.importDataDir ??
+    (attachmentsDir ? dirname(attachmentsDir) : dirname(process.env.QBO_DB_PATH || './qbo-connections.db'));
+  const importStore = new ImportStoreHandle(join(importDataDir, IMPORT_STORE_FILENAME));
+  fastify.addHook('onClose', async () => importStore.close());
+
   // Each request builds a server scoped to the caller's API key. The tools
   // below close over `qboManager`, which is the scoped view — member keys
   // only ever see and reach their assigned companies.
@@ -433,6 +448,13 @@ export async function registerMcpRoutes(
       }
       return (registerToolRaw as any)(name, ...rest);
     };
+
+    // ── Bulk transaction import (src/server/import-tools.ts) ─────────────────
+    registerImportTools(server, qboManager, (name) => findRealmId(qboManager, name), {
+      dataDir: importDataDir,
+      store: importStore,
+      runner: options.importRunnerOptions,
+    });
 
     // ── list_clients ──────────────────────────────────────────────────────────
     server.tool('list_clients', 'List all connected QuickBooks Online companies', {}, async () => {

@@ -30,3 +30,6 @@ Thumbs.db
 
 # Test coverage
 coverage/
+
+# Bulk-import run logs (written next to the DB in the server data dir)
+import-runs/
