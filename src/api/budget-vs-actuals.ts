@@ -320,6 +320,80 @@ export function extractPnlActuals(report: any, classes: any[] = []): PnlActuals 
   };
 }
 
+// ─── Labels and budget lines ──────────────────────────────────────────────────
+
+/**
+ * The ONE label every Budget vs Actuals row uses: "<AcctNum> <Name>" when the
+ * account has a number, else its Name — always from the Account entity.
+ * Report text ("4100 Contributions") and budget text
+ * ("PERSONNEL:Anniversary", "WDPS, Registration Fees") are only fallbacks
+ * for an account missing from the chart of accounts.
+ */
+export function accountLabel(account: any | undefined, fallback?: string): string {
+  const name = String(account?.Name ?? '').trim();
+  const num = String(account?.AcctNum ?? '').trim();
+  if (name) return num ? `${num} ${name}` : name;
+  return String(fallback ?? '').trim();
+}
+
+function refOut(ref: any, nameById: Map<string, string>): { id: string; name: string | null } | null {
+  if (!ref || ref.value == null || ref.value === '') return null;
+  const id = String(ref.value);
+  const name = ref.name != null && ref.name !== '' ? String(ref.name) : nameById.get(id) ?? null;
+  return { id, name };
+}
+
+export interface BudgetEntryLookups {
+  accounts?: any[];
+  classes?: any[];
+  departments?: any[];
+  customers?: any[];
+}
+
+/**
+ * get_budget's per-line view of a Budget entity: account (number + name from
+ * the Account entity), period, amount, and every dimension ref the line
+ * carries — ClassRef, DepartmentRef, CustomerRef — as {id, name}, or null.
+ */
+export function budgetEntries(budget: BudgetMeta, lookups: BudgetEntryLookups = {}): any[] {
+  const accountById = new Map<string, any>();
+  for (const a of lookups.accounts ?? []) if (a?.Id != null) accountById.set(String(a.Id), a);
+  const names = (list: any[] | undefined, field = 'FullyQualifiedName') => {
+    const m = new Map<string, string>();
+    for (const x of list ?? []) if (x?.Id != null) m.set(String(x.Id), String(x[field] ?? x.Name ?? x.DisplayName ?? ''));
+    return m;
+  };
+  const classNames = names(lookups.classes);
+  const deptNames = names(lookups.departments);
+  const customerNames = names(lookups.customers, 'DisplayName');
+  return (budget.BudgetDetail ?? []).map((d: any) => {
+    const accountId = String(d?.AccountRef?.value ?? '');
+    const account = accountById.get(accountId);
+    return {
+      account_id: accountId,
+      account_number: account?.AcctNum ?? null,
+      account_name: accountLabel(account, d?.AccountRef?.name),
+      period: { start: d?.BudgetDate ?? null, end: d?.EndDate ?? null },
+      amount: parseFloat(String(d?.Amount ?? '0')) || 0,
+      class: refOut(d?.ClassRef, classNames),
+      department: refOut(d?.DepartmentRef, deptNames),
+      customer: refOut(d?.CustomerRef, customerNames),
+    };
+  });
+}
+
+/** Ids referenced by a budget's lines that carry no name (so a lookup is needed). */
+export function unnamedRefIds(budgets: BudgetMeta[], refKey: 'ClassRef' | 'DepartmentRef' | 'CustomerRef'): string[] {
+  const ids = new Set<string>();
+  for (const b of budgets) {
+    for (const d of b.BudgetDetail ?? []) {
+      const r = (d as any)?.[refKey];
+      if (r?.value != null && r.value !== '' && (r.name == null || r.name === '')) ids.add(String(r.value));
+    }
+  }
+  return Array.from(ids);
+}
+
 // ─── Assembly ─────────────────────────────────────────────────────────────────
 
 const SECTION_ORDER = ['Income', 'Cost of Goods Sold', 'Expenses', 'Other Income', 'Other Expenses'] as const;
@@ -450,7 +524,7 @@ export function computeBudgetVsActuals(input: ComputeBvaInput): any {
     const a = accountById.get(l.account_id);
     const acc = rows.get(key) ?? {
       key, account_id: l.account_id,
-      account_name: String(a?.FullyQualifiedName ?? a?.Name ?? l.account_name ?? `Account ${l.account_id}`),
+      account_name: accountLabel(a, l.account_name ?? `Account ${l.account_id}`),
       pnlSection: null, actual: 0, budget: 0, byClass: new Map(),
     };
     acc.budget += l.amount;
@@ -469,7 +543,7 @@ export function computeBudgetVsActuals(input: ComputeBvaInput): any {
     const out: any = {
       account_id: acc.account_id,
       account_number: a?.AcctNum ?? null,
-      account_name: acc.account_name,
+      account_name: a ? accountLabel(a, acc.account_name) : acc.account_name,
       ...variance(acc.actual, acc.budget),
     };
     if (splitByClass) {

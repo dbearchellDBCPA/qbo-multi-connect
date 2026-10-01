@@ -244,7 +244,19 @@ describe('ReportsAPI — as-of dates, date_macro, and Fault bodies (2026-09-05)'
     await reports.budgetVsActuals('r', { dateMacro: 'This Fiscal Year-to-date', budgetId: '1000000021' });
     expect(client.get).toHaveBeenCalledWith('r', 'reports/BudgetVsActuals', {
       date_macro: 'This Fiscal Year-to-date',
+      accounting_method: 'Accrual',
       budget: '1000000021',
+    });
+  });
+
+  it('budgetVsActuals defaults to Accrual (not the company preference) and passes rowaxis only when given', async () => {
+    await reports.budgetVsActuals('r', { startDate: '2025-07-01', endDate: '2025-09-30', budgetId: '1000000131', rowaxis: 'primary' });
+    expect(client.get).toHaveBeenLastCalledWith('r', 'reports/BudgetVsActuals', {
+      start_date: '2025-07-01', end_date: '2025-09-30', accounting_method: 'Accrual', budget: '1000000131', rowaxis: 'primary',
+    });
+    await reports.budgetVsActuals('r', { startDate: '2025-07-01', endDate: '2025-09-30', budgetId: '1000000131', accountingMethod: 'Cash' });
+    expect(client.get).toHaveBeenLastCalledWith('r', 'reports/BudgetVsActuals', {
+      start_date: '2025-07-01', end_date: '2025-09-30', accounting_method: 'Cash', budget: '1000000131',
     });
   });
 
