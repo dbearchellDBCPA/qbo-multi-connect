@@ -152,7 +152,7 @@ describe('ReportsAPI param threading', () => {
     });
   });
 
-  it('budgetVsActuals threads budgetId', async () => {
+  it('budgetVsActuals sends budgetId as Intuit\'s `budget` param (budget_id is silently ignored)', async () => {
     await reports.budgetVsActuals('r', {
       startDate: '2026-01-01',
       endDate: '2026-12-31',
@@ -165,8 +165,9 @@ describe('ReportsAPI param threading', () => {
       end_date: '2026-12-31',
       accounting_method: 'Accrual',
       summarize_column_by: 'Month',
-      budget_id: '42',
+      budget: '42',
     });
+    expect(client.get.mock.calls[0][2]).not.toHaveProperty('budget_id');
   });
 
   it('omits undefined / empty options entirely', async () => {
@@ -243,7 +244,7 @@ describe('ReportsAPI — as-of dates, date_macro, and Fault bodies (2026-09-05)'
     await reports.budgetVsActuals('r', { dateMacro: 'This Fiscal Year-to-date', budgetId: '1000000021' });
     expect(client.get).toHaveBeenCalledWith('r', 'reports/BudgetVsActuals', {
       date_macro: 'This Fiscal Year-to-date',
-      budget_id: '1000000021',
+      budget: '1000000021',
     });
   });
 

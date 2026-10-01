@@ -1,4 +1,10 @@
 import { QBOClient, QBOError } from './client.js';
+import { escapeQboString } from '../server/entity-fields.js';
+import {
+  resolveBudget,
+  computeBudgetVsActuals,
+  type PartialPeriodMode,
+} from './budget-vs-actuals.js';
 
 export type SummarizeColumnBy =
   | 'Total'
@@ -38,6 +44,33 @@ export interface ReportOptions {
 export interface BudgetVsActualsOptions extends ReportOptions {
   budgetId?: string;
 }
+
+export interface ComputedBudgetVsActualsOptions {
+  clientName: string;
+  budgetId?: string;
+  budgetName?: string;
+  startDate: string;
+  endDate: string;
+  accountingMethod?: 'Accrual' | 'Cash';
+  /** Add a per-class breakdown under every account (P&L summarized by Classes). */
+  splitByClass?: boolean;
+  /** Limit both sides to one QBO Class Id. */
+  classId?: string;
+  partialPeriods?: PartialPeriodMode;
+  includeZeroRows?: boolean;
+}
+
+/** A request that cannot run (bad/ambiguous budget, bad dates) — message is user-facing. */
+export class BudgetRequestError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'BudgetRequestError';
+  }
+}
+
+/** Metadata-only Budget query (no BudgetDetail — a few hundred bytes per budget). */
+export const BUDGET_META_QUERY =
+  'SELECT Id, Name, StartDate, EndDate, BudgetType, BudgetEntryType, Active FROM Budget MAXRESULTS 1000';
 
 /**
  * Build the query-string param object for an Intuit Reports API call.
@@ -239,11 +272,13 @@ export class ReportsAPI {
   }
 
   /**
-   * Get Budget vs Actuals report. `budgetId` selects which budget to compare
-   * against (if omitted, QBO uses the company's default). The period is
-   * either `dateMacro` (Intuit's predefined ranges, e.g. "This Fiscal
-   * Year-to-date") or start/end dates that fall inside the budget's own
-   * StartDate..EndDate.
+   * Intuit's Budget vs Actuals report. The budget is selected with the
+   * `budget` query param — NOT `budget_id`. QBO silently ignores unknown
+   * params, so sending `budget_id` (as this method did until 2026-09-30)
+   * always produced the company's default budget (Northway: FY27 whatever
+   * was asked). Even with the right param, Total mode has been seen to
+   * ignore start/end and return all-time actuals, so the MCP tool defaults
+   * to computedBudgetVsActuals() and this is the opt-in raw view.
    */
   async budgetVsActuals(realmId: string, options: BudgetVsActualsOptions = {}): Promise<unknown> {
     const query = buildReportQuery(options, [
@@ -253,7 +288,74 @@ export class ReportsAPI {
       'accounting_method',
       'summarize_column_by',
     ]);
-    if (options.budgetId) query.budget_id = options.budgetId;
+    if (options.budgetId) query.budget = options.budgetId;
     return this.fetchReport(realmId, 'reports/BudgetVsActuals', query);
+  }
+
+  /** Budget metadata for every budget in the company (no detail lines). */
+  async listBudgets(realmId: string): Promise<any[]> {
+    const res: any = await this.client.query(realmId, BUDGET_META_QUERY);
+    return res?.QueryResponse?.Budget ?? [];
+  }
+
+  /** One full Budget entity (with BudgetDetail), or null. */
+  async getBudget(realmId: string, budgetId: string): Promise<any | null> {
+    const res: any = await this.client.query(realmId, `SELECT * FROM Budget WHERE Id = '${escapeQboString(String(budgetId))}'`);
+    return res?.QueryResponse?.Budget?.[0] ?? null;
+  }
+
+  /**
+   * Budget vs Actuals built from the Budget entity (resolved by Id or name)
+   * plus a ProfitAndLoss for exactly startDate..endDate on the requested
+   * basis — both of which QBO scopes reliably. See budget-vs-actuals.ts.
+   */
+  async computedBudgetVsActuals(realmId: string, options: ComputedBudgetVsActualsOptions): Promise<any> {
+    const iso = /^\d{4}-\d{2}-\d{2}$/;
+    if (!options.startDate || !options.endDate) {
+      throw new BudgetRequestError('start_date and end_date are both required (YYYY-MM-DD).');
+    }
+    for (const [label, v] of [['start_date', options.startDate], ['end_date', options.endDate]] as const) {
+      if (!iso.test(v)) throw new BudgetRequestError(`${label} must be YYYY-MM-DD (got "${v}").`);
+    }
+    if (options.startDate > options.endDate) {
+      throw new BudgetRequestError(`start_date ${options.startDate} is after end_date ${options.endDate}.`);
+    }
+
+    const budgets = await this.listBudgets(realmId);
+    const picked = resolveBudget(budgets, { budgetId: options.budgetId, budgetName: options.budgetName });
+    if (picked.error || !picked.budget) throw new BudgetRequestError(picked.error ?? 'Budget not found.');
+    const budget = await this.getBudget(realmId, String(picked.budget.Id));
+    if (!budget) throw new BudgetRequestError(`Budget ${picked.budget.Id} could not be loaded.`);
+
+    const accountingMethod = options.accountingMethod ?? 'Accrual';
+    const wantClasses = Boolean(options.splitByClass || options.classId);
+    const [pnl, accountsRes, classesRes] = await Promise.all([
+      this.profitAndLoss(realmId, {
+        startDate: options.startDate,
+        endDate: options.endDate,
+        accountingMethod,
+        summarizeColumnBy: options.splitByClass ? 'Classes' : undefined,
+        classId: options.classId,
+      }),
+      this.client.query<any>(realmId, 'SELECT * FROM Account WHERE Active IN (true, false) MAXRESULTS 1000'),
+      wantClasses
+        ? this.client.query<any>(realmId, 'SELECT * FROM Class MAXRESULTS 1000')
+        : Promise.resolve(null),
+    ]);
+
+    return computeBudgetVsActuals({
+      clientName: options.clientName,
+      budget,
+      startDate: options.startDate,
+      endDate: options.endDate,
+      accountingMethod,
+      pnl,
+      accounts: accountsRes?.QueryResponse?.Account ?? [],
+      classes: classesRes?.QueryResponse?.Class ?? [],
+      splitByClass: options.splitByClass,
+      classId: options.classId,
+      partialPeriods: options.partialPeriods,
+      includeZeroRows: options.includeZeroRows,
+    });
   }
 }

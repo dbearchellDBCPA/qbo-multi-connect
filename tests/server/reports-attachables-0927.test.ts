@@ -111,6 +111,6 @@ describe('AttachmentsAPI.listForEntity / download', () => {
 
   it('refuses non-https download URLs', async () => {
     const api = new AttachmentsAPI({ post: vi.fn(), query: vi.fn() } as any);
-    await expect(api.download('http://example.com/x')).rejects.toThrow(/https/);
+    await expect(api.download('r', 'http://example.com/x')).rejects.toThrow(/https/);
   });
 });
