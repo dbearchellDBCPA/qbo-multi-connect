@@ -54,6 +54,8 @@ import {
   precheckBudgetVsActuals,
   explainBudgetVsActualsFailure,
   bvaReportBanner,
+  checkBvaActuals,
+  bvaVerifiedNote,
   BVA_COMPUTED_RECOMMENDATION,
   reportPeriodWarning,
   formatCurrency,
@@ -63,7 +65,7 @@ import {
   formatAgingReport,
   fiscalYearStart,
 } from './report-shaping.js';
-import { resolveBudget, budgetEntries, unnamedRefIds } from '../api/budget-vs-actuals.js';
+import { resolveBudget, budgetEntries, unnamedRefIds, extractPnlActuals } from '../api/budget-vs-actuals.js';
 import {
   redactUrl,
   redactToolResult,
@@ -1295,11 +1297,12 @@ export async function registerMcpRoutes(
     // Default source is COMPUTED (Budget entity + ProfitAndLoss). Intuit's own
     // BudgetVsActuals report proved unreliable on 2026-09-30 (Northway
     // Church): the budget param this server sent was ignored (always FY27),
-    // and its Actual column ignored the dates (all-time). See
-    // src/api/budget-vs-actuals.ts.
+    // and without rowaxis=primary its Actual column ignored the dates
+    // (all-time). qbo_report now defaults rowaxis=primary and cross-checks
+    // the Actual column against ProfitAndLoss. See src/api/budget-vs-actuals.ts.
     server.tool(
       'get_budget_vs_actuals',
-      'Budget vs Actuals for a QBO client: per account, the actual for start_date..end_date (from QBO\'s ProfitAndLoss, on the requested accounting_method) against the budget for the same period (from the Budget entity you name), with over_budget (actual − budget) and pct_of_budget, section subtotals (Income, COGS, Expenses, Other Income, Other Expenses) and net income. Pick the budget with budget_id or budget_name (exact name, or a unique part of it — get_budget lists them). Budget periods only partly inside the range are pro-rated by days (partial_periods="full" counts them whole). split_by_class=true adds a by_class breakdown under every account (P&L by Classes + the budget\'s ClassRef lines); class_id limits both sides to one class. Every response states the budget used, the period QBO applied to the actuals, and any warnings (e.g. the budget does not cover the dates, or the account rows do not reconcile to QBO\'s Net Income). source="qbo_report" instead returns Intuit\'s raw BudgetVsActuals report JSON — NOT RECOMMENDED: verified 2026-09-30, it ignores start/end dates AND date_macro and returns ALL-TIME actuals (flagged with a WARNING banner when its Header has no period), and summarize_by Month/Quarter/Year fault inside Intuit. Use it only to see Intuit\'s own layout. Defaults to Accrual basis.',
+      'Budget vs Actuals for a QBO client: per account, the actual for start_date..end_date (from QBO\'s ProfitAndLoss, on the requested accounting_method) against the budget for the same period (from the Budget entity you name), with over_budget (actual − budget) and pct_of_budget, section subtotals (Income, COGS, Expenses, Other Income, Other Expenses) and net income. Pick the budget with budget_id or budget_name (exact name, or a unique part of it — get_budget lists them). Budget periods only partly inside the range are pro-rated by days (partial_periods="full" counts them whole). split_by_class=true adds a by_class breakdown under every account (P&L by Classes + the budget\'s ClassRef lines); class_id limits both sides to one class. Every response states the budget used, the period QBO applied to the actuals, and any warnings (e.g. the budget does not cover the dates, or the account rows do not reconcile to QBO\'s Net Income). source="qbo_report" instead returns Intuit\'s raw BudgetVsActuals report JSON (Intuit\'s own layout; also takes date_macro and summarize_by). It sends rowaxis=primary by default — verified 2026-09-30 that without it QBO ignores start/end and date_macro and returns ALL-TIME actuals. Intuit never echoes the period in this report\'s Header, so every qbo_report response is cross-checked: its Actual net income is compared to a ProfitAndLoss for the same period and basis, and the response leads with "✓ Verified" on a match or a "⚠⚠⚠ WARNING — DO NOT USE THESE ACTUALS" banner (plus WARNING/recommended keys in the JSON) when it does not match or cannot be checked. Note QBO\'s Budget column counts partly-covered budget months in full. Defaults to Accrual basis.',
       {
         client_name: z.string().describe('The name of the client company'),
         budget_id: z.string().optional().describe('Budget Id (from get_budget). Pass this or budget_name.'),
@@ -1311,10 +1314,10 @@ export async function registerMcpRoutes(
         class_id: z.string().optional().describe('Optional: limit actuals and budget to one QBO Class Id.'),
         partial_periods: z.enum(['prorate', 'full']).optional().describe('Budget periods only partly inside start..end: "prorate" by days (default) or count "full".'),
         include_zero_rows: z.boolean().optional().describe('Keep accounts whose actual and budget are both 0. Default false.'),
-        source: z.enum(['computed', 'qbo_report']).optional().describe('"computed" (default): Budget entity + ProfitAndLoss. "qbo_report": Intuit\'s raw BudgetVsActuals report (unreliable dates; see description).'),
+        source: z.enum(['computed', 'qbo_report']).optional().describe('"computed" (default): Budget entity + ProfitAndLoss. "qbo_report": Intuit\'s raw BudgetVsActuals report, cross-checked against ProfitAndLoss (see description).'),
         date_macro: z.string().optional().describe('source="qbo_report" only: an Intuit predefined period (e.g. "This Fiscal Year-to-date") instead of start/end dates.'),
-        summarize_by: z.enum(['Total', 'Month', 'Quarter', 'Year']).optional().describe('source="qbo_report" only: column summarization. Month/Quarter/Year fault inside Intuit\'s report engine.'),
-        rowaxis: z.string().optional().describe('source="qbo_report" only, EXPERIMENTAL: Intuit\'s undocumented rowaxis report param (e.g. "primary"), passed through as-is.'),
+        summarize_by: z.enum(['Total', 'Month', 'Quarter', 'Year']).optional().describe('source="qbo_report" only: column summarization. Month verified working with rowaxis=primary (2026-09-30); without rowaxis, Month/Quarter/Year fault inside Intuit.'),
+        rowaxis: z.string().optional().describe('source="qbo_report" only: Intuit\'s undocumented rowaxis report param. Default "primary" (required for QBO to honor the dates); "none" omits it. Other values are passed through as-is.'),
       },
       async ({ client_name, budget_id, budget_name, start_date, end_date, accounting_method, split_by_class, class_id, partial_periods, include_zero_rows, source = 'computed', date_macro, summarize_by, rowaxis }) => {
         const realmId = await findRealmId(qboManager, client_name);
@@ -1386,15 +1389,40 @@ export async function registerMcpRoutes(
             rowaxis,
           });
           const content: Array<{ type: 'text'; text: string }> = [];
-          // An all-time Actual column must be impossible to miss: the banner
-          // leads the response AND rides at the top of the JSON itself.
-          const banner = bvaReportBanner(report, { start: start_date, end: end_date, dateMacro: date_macro });
-          const mismatch = banner ? null : reportPeriodWarning(report, { start: start_date, end: end_date }, 'Budget vs Actuals');
+          const requested = { start: start_date, end: end_date, dateMacro: date_macro, rowaxis: rowaxis === undefined ? 'primary' : (rowaxis && rowaxis.toLowerCase() !== 'none' ? rowaxis : undefined) };
+          // Intuit never echoes StartPeriod/EndPeriod for this report, so the
+          // Header cannot tell an honored period from an all-time Actual
+          // column. Cross-check net income against a ProfitAndLoss for the
+          // same period and basis instead.
+          let actualsCheck: ReturnType<typeof checkBvaActuals> | null = null;
+          const hp = headerPeriod(report);
+          if (!hp.start && !hp.end) {
+            const basis = accounting_method ?? 'Accrual';
+            try {
+              const pnl = await qboManager.reports.profitAndLoss(realmId, {
+                startDate: start_date,
+                endDate: end_date,
+                dateMacro: date_macro,
+                accountingMethod: basis,
+              });
+              actualsCheck = checkBvaActuals(report, pnl, basis, extractPnlActuals(pnl).net_income);
+            } catch {
+              actualsCheck = null; // unverifiable -> banner below
+            }
+          }
+          // A wrong or unverifiable Actual column must be impossible to miss:
+          // the banner leads the response AND rides at the top of the JSON.
+          const banner = bvaReportBanner(report, requested, actualsCheck);
+          const mismatch = banner || actualsCheck?.matches ? null : reportPeriodWarning(report, { start: start_date, end: end_date }, 'Budget vs Actuals');
           const warning = banner ?? mismatch;
+          const verified = !warning && actualsCheck?.matches ? bvaVerifiedNote(actualsCheck, requested) : null;
           if (warning) content.push({ type: 'text', text: warning });
+          if (verified) content.push({ type: 'text', text: verified });
           const body = warning
-            ? { WARNING: warning, recommended: `For reliable figures, ${BVA_COMPUTED_RECOMMENDATION}`, ...(report as any) }
-            : report;
+            ? { WARNING: warning, recommended: `For reliable figures, ${BVA_COMPUTED_RECOMMENDATION}`, ...(actualsCheck ? { actuals_check: actualsCheck } : {}), ...(report as any) }
+            : verified
+              ? { verified, actuals_check: actualsCheck, ...(report as any) }
+              : report;
           content.push({ type: 'text', text: JSON.stringify(body, null, 2) });
           return { content };
         } catch (err: any) {

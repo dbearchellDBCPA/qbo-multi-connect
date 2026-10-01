@@ -45,8 +45,9 @@ export interface BudgetVsActualsOptions extends ReportOptions {
   budgetId?: string;
   /**
    * Intuit's undocumented `rowaxis` param (Intuit support has called it
-   * required alongside budget/start_date/end_date, e.g. "primary").
-   * Experimental: sent only when given.
+   * required alongside budget/start_date/end_date). Defaults to "primary":
+   * verified 2026-09-30 that without it QBO ignores the period and returns
+   * all-time actuals. Pass "none" to omit it.
    */
   rowaxis?: string;
 }
@@ -176,6 +177,7 @@ export class ReportsAPI {
       'department',
       'customer',
       'vendor',
+      'date_macro',
     ]);
     return this.fetchReport(realmId, 'reports/ProfitAndLoss', query);
   }
@@ -282,9 +284,10 @@ export class ReportsAPI {
    * `budget` query param — NOT `budget_id`. QBO silently ignores unknown
    * params, so sending `budget_id` (as this method did until 2026-09-30)
    * always produced the company's default budget (Northway: FY27 whatever
-   * was asked). Even with the right param, Total mode has been seen to
-   * ignore start/end and return all-time actuals, so the MCP tool defaults
-   * to computedBudgetVsActuals() and this is the opt-in raw view.
+   * was asked). Even with the right param, the report ignores start/end and
+   * date_macro (all-time actuals) unless `rowaxis=primary` is sent, so that
+   * is the default here. The MCP tool still defaults to
+   * computedBudgetVsActuals(); this is the opt-in raw view.
    */
   async budgetVsActuals(realmId: string, options: BudgetVsActualsOptions = {}): Promise<unknown> {
     // Accrual unless asked otherwise, like every other report here — left
@@ -297,7 +300,11 @@ export class ReportsAPI {
       'summarize_column_by',
     ]);
     if (options.budgetId) query.budget = options.budgetId;
-    if (options.rowaxis) query.rowaxis = options.rowaxis;
+    // rowaxis=primary is what makes Intuit honor the period (verified live
+    // 2026-09-30): without it start/end and date_macro were ignored and the
+    // Actual column was all-time. Default it; "none" (or "") omits it.
+    const rowaxis = options.rowaxis === undefined ? 'primary' : options.rowaxis;
+    if (rowaxis && rowaxis.toLowerCase() !== 'none') query.rowaxis = rowaxis;
     return this.fetchReport(realmId, 'reports/BudgetVsActuals', query);
   }
 

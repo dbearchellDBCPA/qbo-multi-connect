@@ -292,6 +292,7 @@ describe('MCP report tools — requested dates reach Intuit (2026-09-05)', () =>
       accounting_method: 'Accrual',
       summarize_column_by: 'Month',
       budget: '1000000021',
+      rowaxis: 'primary',
     });
     expect(texts[0]).toMatch(/Intuit's report engine rejected/);
     expect(texts[0]).toMatch(/NullPointerException/);
@@ -307,7 +308,8 @@ describe('MCP report tools — requested dates reach Intuit (2026-09-05)', () =>
     expect(flagged.texts).toHaveLength(2);
     // 2026-09-30: the banner leads the response and rides inside the JSON.
     expect(flagged.texts[0]).toMatch(/^⚠⚠⚠ WARNING — DO NOT USE THESE ACTUALS/);
-    expect(flagged.texts[0]).toMatch(/ignored 2026-01-01 to 2026-12-31/);
+    expect(flagged.texts[0]).toMatch(/no StartPeriod\/EndPeriod for 2026-01-01 to 2026-12-31/);
+    expect(flagged.texts[0]).toMatch(/could not be checked against a ProfitAndLoss/);
     expect(flagged.texts[0]).toMatch(/ALL-TIME/);
     expect(flagged.texts[0]).toMatch(/RECOMMENDED: call get_budget_vs_actuals again WITHOUT source/);
     const flaggedJson = lastJson(flagged.texts);
@@ -325,7 +327,9 @@ describe('MCP report tools — requested dates reach Intuit (2026-09-05)', () =>
     getSpy.mockResolvedValueOnce({ Header: { ReportName: 'BudgetVsActuals', DateMacro: 'last fiscal year', ReportBasis: 'Cash' }, Rows: { Row: [] } });
     const r = await callTool('get_budget_vs_actuals', { client_name: CLIENT, date_macro: 'Last Fiscal Year', budget_id: '1000000021', source: 'qbo_report', accounting_method: 'Cash' });
     expect(r.texts[0]).toMatch(/DO NOT USE THESE ACTUALS/);
-    expect(r.texts[0]).toMatch(/ignored date_macro "Last Fiscal Year"/);
+    expect(r.texts[0]).toMatch(/for date_macro "Last Fiscal Year"/);
+    // the cross-check P&L used the same date_macro and basis
+    expect(getSpy).toHaveBeenCalledWith(REALM, 'reports/ProfitAndLoss', { date_macro: 'Last Fiscal Year', accounting_method: 'Cash' });
   });
 
   it('get_budget_vs_actuals qbo_report: rowaxis is passed through; rejected in computed mode', async () => {
@@ -335,12 +339,50 @@ describe('MCP report tools — requested dates reach Intuit (2026-09-05)', () =>
     expect(computed.texts[0]).toMatch(/rowaxis only apply to source="qbo_report"/);
   });
 
+  /** A BvA report shaped like Intuit's (no Header period; Total → Actual/Budget/over/% sub-columns). */
+  const bvaWith = (netActual: string) => ({
+    Header: { ReportName: 'BudgetVsActuals', SummarizeColumnsBy: 'Total', ReportBasis: 'Cash' },
+    Columns: { Column: [{ ColTitle: '', ColType: 'Account' }, { ColTitle: 'Total', ColType: 'Money', Columns: { Column: [{ ColTitle: 'Actual' }, { ColTitle: 'Budget' }, { ColTitle: 'over Budget' }, { ColTitle: '% of Budget' }] } }] },
+    Rows: { Row: [{ group: 'NetIncome', type: 'Section', Summary: { ColData: [{ value: 'Net Revenue' }, { value: netActual }, { value: '-4095.69' }, { value: '' }, { value: '' }] } }] },
+  });
+  const pnlWith = (net: string) => ({
+    Header: { ReportName: 'ProfitAndLoss', StartPeriod: '2026-07-01', EndPeriod: '2026-09-28' },
+    Columns: { Column: [{ ColTitle: '', ColType: 'Account' }, { ColTitle: 'Total', ColType: 'Money', MetaData: [{ Name: 'ColKey', Value: 'total' }] }] },
+    Rows: { Row: [{ group: 'NetIncome', type: 'Section', Summary: { ColData: [{ value: 'Net Revenue' }, { value: net }] } }] },
+  });
+
+  it('get_budget_vs_actuals qbo_report: Actual net income that matches ProfitAndLoss is marked verified, no banner', async () => {
+    getSpy.mockImplementation((_r: string, path: string) => Promise.resolve(path === 'reports/BudgetVsActuals' ? bvaWith('-6688.64') : pnlWith('-6688.64')));
+    const { texts } = await callTool('get_budget_vs_actuals', { client_name: CLIENT, start_date: '2026-07-01', end_date: '2026-09-28', budget_id: '1000000021', source: 'qbo_report', accounting_method: 'Cash' });
+    expect(getSpy).toHaveBeenCalledWith(REALM, 'reports/ProfitAndLoss', { start_date: '2026-07-01', end_date: '2026-09-28', accounting_method: 'Cash' });
+    expect(texts).toHaveLength(2);
+    expect(texts[0]).toMatch(/^✓ Verified: the Actual column's net income \(-6,688\.64\) matches a ProfitAndLoss for 2026-07-01 to 2026-09-28 \(Cash\)/);
+    expect(texts[0]).toMatch(/partly inside the range IN FULL/);
+    const json = lastJson(texts);
+    expect(json).not.toHaveProperty('WARNING');
+    expect(json.actuals_check).toMatchObject({ report_net_income: -6688.64, pnl_net_income: -6688.64, matches: true });
+  });
+
+  it('get_budget_vs_actuals qbo_report: a mismatch with ProfitAndLoss gets the DO NOT USE banner with both numbers', async () => {
+    getSpy.mockImplementation((_r: string, path: string) => Promise.resolve(path === 'reports/BudgetVsActuals' ? bvaWith('-2,467,712.48') : pnlWith('-118227.91')));
+    const { texts } = await callTool('get_budget_vs_actuals', { client_name: CLIENT, start_date: '2026-07-01', end_date: '2026-09-28', budget_id: '1000000021', source: 'qbo_report', rowaxis: 'none' });
+    expect(texts[0]).toMatch(/^⚠⚠⚠ WARNING — DO NOT USE THESE ACTUALS ⚠⚠⚠/);
+    expect(texts[0]).toMatch(/report net income -2,467,712\.48 vs ProfitAndLoss -118,227\.91/);
+    expect(texts[0]).toMatch(/Sent no rowaxis/);
+    expect(texts[0]).toMatch(/RECOMMENDED: call get_budget_vs_actuals again WITHOUT source/);
+    const json = lastJson(texts);
+    expect(Object.keys(json).slice(0, 3)).toEqual(['WARNING', 'recommended', 'actuals_check']);
+    expect(json.actuals_check.matches).toBe(false);
+    expect(getSpy.mock.calls.find((c: any[]) => c[1] === 'reports/BudgetVsActuals')![2]).not.toHaveProperty('rowaxis');
+  });
+
   it('get_budget_vs_actuals: date_macro replaces start/end dates', async () => {
     await callTool('get_budget_vs_actuals', { client_name: CLIENT, date_macro: 'This Fiscal Year-to-date', budget_id: '1000000021', source: 'qbo_report' });
     expect(getSpy).toHaveBeenCalledWith(REALM, 'reports/BudgetVsActuals', {
       date_macro: 'This Fiscal Year-to-date',
       accounting_method: 'Accrual',
       budget: '1000000021',
+      rowaxis: 'primary',
     });
     const { texts } = await callTool('get_budget_vs_actuals', { client_name: CLIENT, budget_id: '1000000021', source: 'qbo_report' });
     expect(texts[0]).toMatch(/start_date \+ end_date or date_macro/);

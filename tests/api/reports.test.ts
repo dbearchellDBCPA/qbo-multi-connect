@@ -166,6 +166,7 @@ describe('ReportsAPI param threading', () => {
       accounting_method: 'Accrual',
       summarize_column_by: 'Month',
       budget: '42',
+      rowaxis: 'primary',
     });
     expect(client.get.mock.calls[0][2]).not.toHaveProperty('budget_id');
   });
@@ -246,18 +247,27 @@ describe('ReportsAPI — as-of dates, date_macro, and Fault bodies (2026-09-05)'
       date_macro: 'This Fiscal Year-to-date',
       accounting_method: 'Accrual',
       budget: '1000000021',
+      rowaxis: 'primary',
     });
   });
 
-  it('budgetVsActuals defaults to Accrual (not the company preference) and passes rowaxis only when given', async () => {
-    await reports.budgetVsActuals('r', { startDate: '2025-07-01', endDate: '2025-09-30', budgetId: '1000000131', rowaxis: 'primary' });
+  it('budgetVsActuals defaults to Accrual and rowaxis=primary; rowaxis "none" omits it, other values pass through', async () => {
+    // 2026-09-30: without rowaxis=primary QBO ignored the dates (all-time actuals).
+    await reports.budgetVsActuals('r', { startDate: '2025-07-01', endDate: '2025-09-30', budgetId: '1000000131' });
     expect(client.get).toHaveBeenLastCalledWith('r', 'reports/BudgetVsActuals', {
       start_date: '2025-07-01', end_date: '2025-09-30', accounting_method: 'Accrual', budget: '1000000131', rowaxis: 'primary',
     });
-    await reports.budgetVsActuals('r', { startDate: '2025-07-01', endDate: '2025-09-30', budgetId: '1000000131', accountingMethod: 'Cash' });
+    await reports.budgetVsActuals('r', { startDate: '2025-07-01', endDate: '2025-09-30', budgetId: '1000000131', accountingMethod: 'Cash', rowaxis: 'none' });
     expect(client.get).toHaveBeenLastCalledWith('r', 'reports/BudgetVsActuals', {
       start_date: '2025-07-01', end_date: '2025-09-30', accounting_method: 'Cash', budget: '1000000131',
     });
+    await reports.budgetVsActuals('r', { startDate: '2025-07-01', endDate: '2025-09-30', budgetId: '1000000131', rowaxis: 'secondary' });
+    expect(client.get.mock.calls.at(-1)[2]).toMatchObject({ rowaxis: 'secondary' });
+  });
+
+  it('profitAndLoss threads dateMacro → date_macro (used to verify qbo_report BudgetVsActuals)', async () => {
+    await reports.profitAndLoss('r', { dateMacro: 'Last Fiscal Year', accountingMethod: 'Cash' });
+    expect(client.get).toHaveBeenLastCalledWith('r', 'reports/ProfitAndLoss', { date_macro: 'Last Fiscal Year', accounting_method: 'Cash' });
   });
 
   it('throws a QBOError when Intuit answers 200 with a Fault body', async () => {
