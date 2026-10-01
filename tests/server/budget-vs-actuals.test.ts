@@ -103,8 +103,9 @@ describe('explainBudgetVsActualsFailure', () => {
     expect(text).toMatch(/Intuit's report engine rejected/);
     expect(text).toMatch(/Sent: budget_id=1000000021, start_date=2026-01-01, end_date=2026-12-31, summarize_column_by=Month/);
     expect(text).toMatch(/Budget: 1000000021 "Budget_FY26_P&L" — ProfitAndLoss, Monthly, 2026-01-01 → 2026-12-31/);
-    expect(text).toMatch(/omit summarize_by/);
-    expect(text).toMatch(/date_macro/);
+    // date_macro is no longer offered as a workaround: on 2026-09-30 it too returned all-time actuals.
+    expect(text).toMatch(/RECOMMENDED: call get_budget_vs_actuals again WITHOUT source \(the default computed mode\)/);
+    expect(text).not.toMatch(/use date_macro/);
     expect(text).toMatch(/get_budget\(budget_id=…\).*get_profit_and_loss\(summarize_by="Month"\)/);
   });
 

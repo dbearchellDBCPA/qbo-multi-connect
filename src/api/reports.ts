@@ -43,6 +43,12 @@ export interface ReportOptions {
 
 export interface BudgetVsActualsOptions extends ReportOptions {
   budgetId?: string;
+  /**
+   * Intuit's undocumented `rowaxis` param (Intuit support has called it
+   * required alongside budget/start_date/end_date, e.g. "primary").
+   * Experimental: sent only when given.
+   */
+  rowaxis?: string;
 }
 
 export interface ComputedBudgetVsActualsOptions {
@@ -281,7 +287,9 @@ export class ReportsAPI {
    * to computedBudgetVsActuals() and this is the opt-in raw view.
    */
   async budgetVsActuals(realmId: string, options: BudgetVsActualsOptions = {}): Promise<unknown> {
-    const query = buildReportQuery(options, [
+    // Accrual unless asked otherwise, like every other report here — left
+    // off, QBO used the company preference (Northway: Cash).
+    const query = buildReportQuery(withAccrualDefault(options), [
       'start_date',
       'end_date',
       'date_macro',
@@ -289,6 +297,7 @@ export class ReportsAPI {
       'summarize_column_by',
     ]);
     if (options.budgetId) query.budget = options.budgetId;
+    if (options.rowaxis) query.rowaxis = options.rowaxis;
     return this.fetchReport(realmId, 'reports/BudgetVsActuals', query);
   }
 

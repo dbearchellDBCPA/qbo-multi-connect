@@ -225,6 +225,50 @@ describe('MCP get_budget_vs_actuals + attachment URL redaction (2026-09-30)', ()
     expect(Object.keys(a.inputSchema.properties)).toEqual(expect.arrayContaining(['include_content', 'include_download_url']));
   });
 
+  it('get_budget (full detail) returns class / department / customer refs per line, looking up only unnamed ids', async () => {
+    const budget = {
+      ...META[1],
+      BudgetDetail: [
+        { BudgetDate: '2025-07-01', Amount: 200, AccountRef: { value: '10', name: 'REVENUE:Tithes' }, ClassRef: { value: '5', name: 'Worship' } },
+        { BudgetDate: '2025-07-01', Amount: 100, AccountRef: { value: '10' }, ClassRef: { value: '6' }, DepartmentRef: { value: '3', name: 'Main Campus' }, CustomerRef: { value: '77' } },
+      ],
+    };
+    const base = querySpy.getMockImplementation()!;
+    querySpy.mockImplementation((r: string, sql: string) => {
+      if (/FROM Budget WHERE Id/i.test(sql)) return Promise.resolve({ QueryResponse: { Budget: [budget] } });
+      if (/FROM Customer WHERE Id IN \('77'\)/i.test(sql)) return Promise.resolve({ QueryResponse: { Customer: [{ Id: '77', DisplayName: 'Smith Family' }] } });
+      if (/FROM Class WHERE Id IN \('6'\)/i.test(sql)) return Promise.resolve({ QueryResponse: { Class: [{ Id: '6', Name: 'Youth', FullyQualifiedName: 'Youth' }] } });
+      return base(r, sql);
+    });
+    const out = json(await callTool('get_budget', { client_name: CLIENT, budget_id: '1000000131' }));
+    const entries = out.budgets[0].entries;
+    expect(entries[0]).toMatchObject({ account_id: '10', account_number: '4000', account_name: '4000 Tithes', class: { id: '5', name: 'Worship' }, department: null, customer: null });
+    expect(entries[1]).toMatchObject({ class: { id: '6', name: 'Youth' }, department: { id: '3', name: 'Main Campus' }, customer: { id: '77', name: 'Smith Family' } });
+    const sqls = querySpy.mock.calls.map((c) => c[1] as string);
+    expect(sqls.some((q) => /FROM Department/.test(q))).toBe(false); // every DepartmentRef already had a name
+    expect(sqls).toContain('SELECT * FROM Account WHERE Active IN (true, false) MAXRESULTS 1000');
+  });
+
+  it('computed rows use one "NNNN Name" label from the Account entity, even for budget-only accounts', async () => {
+    const accounts = [
+      { Id: '10', Name: 'Tithes', FullyQualifiedName: 'REVENUE:Tithes', AcctNum: '4000', AccountType: 'Income' },
+      { Id: '181', Name: 'Anniversary', FullyQualifiedName: 'PERSONNEL:Anniversary', AcctNum: '5047', AccountType: 'Expense' },
+    ];
+    const base = querySpy.getMockImplementation()!;
+    querySpy.mockImplementation((r: string, sql: string) => {
+      if (/FROM Account/i.test(sql)) return Promise.resolve({ QueryResponse: { Account: accounts } });
+      if (/FROM Budget WHERE Id/i.test(sql)) {
+        const b = fullBudget('1000000141');
+        b.BudgetDetail.push({ BudgetDate: '2026-07-01', Amount: 50, AccountRef: { value: '181', name: 'PERSONNEL:Anniversary' } } as any);
+        return Promise.resolve({ QueryResponse: { Budget: [b] } });
+      }
+      return base(r, sql);
+    });
+    const out = json(await callTool('get_budget_vs_actuals', { ...REPRO, budget_id: '1000000141' }));
+    const labels = out.sections.flatMap((s: any) => s.accounts.map((a: any) => a.account_name));
+    expect(labels).toEqual(['4000 Tithes', '5047 Anniversary']);
+  });
+
   // ── Redaction ──────────────────────────────────────────────────────────────
 
   it('get_attachments never echoes intuit_apikey / user-auth-info by default', async () => {

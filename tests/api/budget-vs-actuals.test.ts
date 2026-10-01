@@ -5,6 +5,9 @@ import {
   budgetCoverage,
   extractPnlActuals,
   computeBudgetVsActuals,
+  accountLabel,
+  budgetEntries,
+  unnamedRefIds,
 } from '../../src/api/budget-vs-actuals.js';
 
 // Budget metadata as get_budget listed it for Northway Church on 2026-09-30.
@@ -218,5 +221,76 @@ describe('computeBudgetVsActuals', () => {
     const out = computeBudgetVsActuals({ ...base, endDate: '2026-09-28', pnl: report });
     expect(out.warnings.join('\n')).toMatch(/2026-09-01\.\.2026-09-30 × 0\.9333/);
     expect(out.warnings.join('\n')).toMatch(/Reconciliation/);
+  });
+});
+
+// ─── 2026-09-30 polish: one label per account, budget-line dimensions ─────────
+
+describe('accountLabel — one consistent "NNNN Name" label from the Account entity', () => {
+  it('uses AcctNum + Name, never the FullyQualifiedName path or report/budget text', () => {
+    expect(accountLabel({ Id: '181', Name: 'Anniversary', FullyQualifiedName: 'PERSONNEL:Anniversary', AcctNum: '5047' }, 'PERSONNEL:Anniversary')).toBe('5047 Anniversary');
+    expect(accountLabel({ Id: '160', Name: 'WDPS, Registration Fees', AcctNum: '4610' }, 'WDPS, Registration Fees')).toBe('4610 WDPS, Registration Fees');
+    expect(accountLabel({ Id: '9', Name: 'Ask My Accountant' }, '9999 Something')).toBe('Ask My Accountant');
+    expect(accountLabel(undefined, '4100 Contributions')).toBe('4100 Contributions');
+  });
+
+  it('computed Budget vs Actuals labels budget-only and actual rows the same way', () => {
+    const accounts = [
+      { Id: '150', Name: 'Contributions', FullyQualifiedName: 'REVENUE:Contributions', AcctNum: '4100', AccountType: 'Income' },
+      { Id: '160', Name: 'WDPS, Registration Fees', FullyQualifiedName: 'REVENUE:WDPS, Registration Fees', AcctNum: '4610', AccountType: 'Income' },
+      { Id: '181', Name: 'Anniversary', FullyQualifiedName: 'PERSONNEL:Anniversary', AcctNum: '5047', AccountType: 'Expense' },
+      { Id: '305', Name: 'CathCoffee, Marketing Exp.', FullyQualifiedName: 'OPERATIONS:CathCoffee, Expenses:Cathedral Coffee Marketing:CathCoffee, Marketing Exp.', AcctNum: '7732', AccountType: 'Expense' },
+    ];
+    const budget = {
+      Id: '1000000141', Name: 'FY27 Budget by Class', StartDate: '2026-07-01', EndDate: '2027-06-30', BudgetEntryType: 'Monthly',
+      BudgetDetail: [
+        { BudgetDate: '2026-07-01', Amount: 1000, AccountRef: { value: '150', name: 'REVENUE:Contributions' } },
+        { BudgetDate: '2026-07-01', Amount: 500, AccountRef: { value: '160', name: 'WDPS, Registration Fees' } },
+        { BudgetDate: '2026-07-01', Amount: 50, AccountRef: { value: '181', name: 'PERSONNEL:Anniversary' } },
+        { BudgetDate: '2026-07-01', Amount: 70, AccountRef: { value: '305', name: 'OPERATIONS:CathCoffee, Expenses:Cathedral Coffee Marketing:CathCoffee, Marketing Exp.' } },
+      ],
+    };
+    const report = {
+      Header: { StartPeriod: '2026-07-01', EndPeriod: '2026-07-31', ReportBasis: 'Cash' },
+      Columns: { Column: [{ ColTitle: '', ColType: 'Account' }, { ColTitle: 'Total', ColType: 'Money' }] },
+      Rows: { Row: [{ group: 'Income', Rows: { Row: [{ ColData: [{ value: '4100 Contributions (report text)', id: '150' }, { value: '900.00' }] }] }, Summary: { ColData: [{ value: 'Total Income' }, { value: '900.00' }] } }] },
+    };
+    const out = computeBudgetVsActuals({ clientName: 'Northway Church', budget, startDate: '2026-07-01', endDate: '2026-07-31', accountingMethod: 'Cash', pnl: report, accounts });
+    const labels = out.sections.flatMap((s: any) => s.accounts.map((a: any) => a.account_name));
+    expect(labels).toEqual(['4100 Contributions', '4610 WDPS, Registration Fees', '5047 Anniversary', '7732 CathCoffee, Marketing Exp.']);
+    for (const l of labels) expect(l).toMatch(/^\d{4} [^:]+$/);
+  });
+});
+
+describe('budgetEntries — get_budget lines carry class / department / customer', () => {
+  const budget = {
+    Id: '1000000131', Name: 'FY26 Budget by Class', StartDate: '2025-07-01', EndDate: '2026-06-30',
+    BudgetDetail: [
+      { BudgetDate: '2025-07-01', Amount: 5833.33, AccountRef: { value: '325', name: 'OPERATIONS:Facilities:Repair & Maintenance' }, ClassRef: { value: '1900000000000747661', name: 'Unrestricted' } },
+      { BudgetDate: '2025-07-01', Amount: '100', AccountRef: { value: '325' }, ClassRef: { value: '1900000000000747662' }, DepartmentRef: { value: '3', name: 'Main Campus' }, CustomerRef: { value: '77' } },
+      { BudgetDate: '2025-08-01', Amount: 1, AccountRef: { value: '999', name: 'Old account' } },
+    ],
+  };
+  const accounts = [{ Id: '325', Name: 'Repair & Maintenance', FullyQualifiedName: 'OPERATIONS:Facilities:Repair & Maintenance', AcctNum: '7365' }];
+
+  it('adds {id, name} refs from the line, falling back to lookups; null when absent', () => {
+    const e = budgetEntries(budget, {
+      accounts,
+      classes: [{ Id: '1900000000000747662', Name: 'WDPS', FullyQualifiedName: 'WDPS' }],
+      customers: [{ Id: '77', DisplayName: 'Smith Family' }],
+    });
+    expect(e[0]).toEqual({
+      account_id: '325', account_number: '7365', account_name: '7365 Repair & Maintenance',
+      period: { start: '2025-07-01', end: null }, amount: 5833.33,
+      class: { id: '1900000000000747661', name: 'Unrestricted' }, department: null, customer: null,
+    });
+    expect(e[1]).toMatchObject({ amount: 100, class: { id: '1900000000000747662', name: 'WDPS' }, department: { id: '3', name: 'Main Campus' }, customer: { id: '77', name: 'Smith Family' } });
+    expect(e[2]).toMatchObject({ account_id: '999', account_number: null, account_name: 'Old account', class: null });
+  });
+
+  it('unnamedRefIds lists only refs that arrive without a name', () => {
+    expect(unnamedRefIds([budget], 'ClassRef')).toEqual(['1900000000000747662']);
+    expect(unnamedRefIds([budget], 'DepartmentRef')).toEqual([]);
+    expect(unnamedRefIds([budget], 'CustomerRef')).toEqual(['77']);
   });
 });

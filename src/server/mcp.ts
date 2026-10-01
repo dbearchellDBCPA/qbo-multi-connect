@@ -53,6 +53,8 @@ import {
   budgetToSummary,
   precheckBudgetVsActuals,
   explainBudgetVsActualsFailure,
+  bvaReportBanner,
+  BVA_COMPUTED_RECOMMENDATION,
   reportPeriodWarning,
   formatCurrency,
   headerPeriod,
@@ -61,7 +63,7 @@ import {
   formatAgingReport,
   fiscalYearStart,
 } from './report-shaping.js';
-import { resolveBudget } from '../api/budget-vs-actuals.js';
+import { resolveBudget, budgetEntries, unnamedRefIds } from '../api/budget-vs-actuals.js';
 import {
   redactUrl,
   redactToolResult,
@@ -1210,7 +1212,7 @@ export async function registerMcpRoutes(
     // ── get_budget ────────────────────────────────────────────────────────────
     server.tool(
       'get_budget',
-      'Get budget(s) for a QBO client. DEFAULT (no budget_id): returns a lightweight LIST — one row per budget with budget_id, name, budget_type (ProfitAndLoss — the only type Intuit\'s API currently supports), budget_entry_type (Monthly | Quarterly | Annually), start/end dates, active, and entry_count — so the right budget can be found without pulling everything. Pass budget_id for full (account × period) entries of one budget, or list_only=false to force full entries for every matched budget. SIZE: a full-detail all-budgets pull can exceed 3M characters for companies with many budgets — stay in list mode until you know which budget you need. Narrow with fiscal_year (e.g. 2026), name_contains and/or active_on.',
+      'Get budget(s) for a QBO client. DEFAULT (no budget_id): returns a lightweight LIST — one row per budget with budget_id, name, budget_type (ProfitAndLoss — the only type Intuit\'s API currently supports), budget_entry_type (Monthly | Quarterly | Annually), start/end dates, active, and entry_count — so the right budget can be found without pulling everything. Pass budget_id for full (account × period) entries of one budget — each entry carries account_id, account_number, account_name ("NNNN Name" from the chart of accounts), period, amount, and the line\'s class / department / customer as {id, name} (null when the line has none), or list_only=false to force full entries for every matched budget. SIZE: a full-detail all-budgets pull can exceed 3M characters for companies with many budgets — stay in list mode until you know which budget you need. Narrow with fiscal_year (e.g. 2026), name_contains and/or active_on.',
       {
         client_name: z.string().describe('The name of the client company'),
         budget_id: z.string().optional().describe('Optional: a specific Budget ID. When provided, full entries are returned by default.'),
@@ -1256,34 +1258,31 @@ export async function registerMcpRoutes(
             return { content: [{ type: 'text', text: JSON.stringify({ client: client_name, total_budgets: output.length, detail_level: 'summary', hint: 'Pass budget_id (or list_only=false) for full account × period entries.', budgets: output }, null, 2) }] };
           }
 
-          // Resolve account IDs → names from the chart of accounts
-          const accountsResp: any = await qboManager.accounts.getAll(realmId);
+          // Account labels come from the Account entity ("NNNN Name");
+          // inactive accounts included, since old budgets reference them.
+          const accountsResp: any = await qboManager.accounts.getAll(realmId, { includeInactive: true });
           const accountList: any[] = accountsResp?.QueryResponse?.Account ?? [];
-          const accountNameById = new Map<string, string>();
-          for (const a of accountList) {
-            if (a.Id) accountNameById.set(String(a.Id), a.Name ?? a.FullyQualifiedName ?? '');
-          }
-
-          const output = budgets.map((b: any) => {
-            const entries: any[] = [];
-            for (const detail of (b.BudgetDetail ?? [])) {
-              const accountId = String(detail.AccountRef?.value ?? '');
-              const accountName = accountNameById.get(accountId) ?? detail.AccountRef?.name ?? '';
-              entries.push({
-                account_id: accountId,
-                account_name: accountName,
-                period: {
-                  start: detail.BudgetDate ?? null,
-                  end: detail.EndDate ?? null,
-                },
-                amount: parseFloat(detail.Amount ?? '0') || 0,
-              });
+          // Budget lines usually carry ClassRef/DepartmentRef/CustomerRef
+          // names; look up only the ids that arrive without one.
+          const lookup = async (entity: 'Class' | 'Department' | 'Customer', ids: string[]): Promise<any[]> => {
+            const out: any[] = [];
+            for (let i = 0; i < ids.length; i += 50) {
+              const inList = ids.slice(i, i + 50).map((id) => `'${escapeQboString(id)}'`).join(', ');
+              const r: any = await qboManager.transactions.rawQuery(realmId, `SELECT * FROM ${entity} WHERE Id IN (${inList}) MAXRESULTS 1000`);
+              out.push(...(r?.QueryResponse?.[entity] ?? []));
             }
-            return {
-              ...budgetToSummary(b),
-              entries,
-            };
-          });
+            return out;
+          };
+          const [classes, departments, customers] = await Promise.all([
+            lookup('Class', unnamedRefIds(budgets, 'ClassRef')),
+            lookup('Department', unnamedRefIds(budgets, 'DepartmentRef')),
+            lookup('Customer', unnamedRefIds(budgets, 'CustomerRef')),
+          ]);
+
+          const output = budgets.map((b: any) => ({
+            ...budgetToSummary(b),
+            entries: budgetEntries(b, { accounts: accountList, classes, departments, customers }),
+          }));
 
           return { content: [{ type: 'text', text: JSON.stringify({ client: client_name, total_budgets: output.length, detail_level: 'full', budgets: output }, null, 2) }] };
         } catch (err: any) {
@@ -1300,7 +1299,7 @@ export async function registerMcpRoutes(
     // src/api/budget-vs-actuals.ts.
     server.tool(
       'get_budget_vs_actuals',
-      'Budget vs Actuals for a QBO client: per account, the actual for start_date..end_date (from QBO\'s ProfitAndLoss, on the requested accounting_method) against the budget for the same period (from the Budget entity you name), with over_budget (actual − budget) and pct_of_budget, section subtotals (Income, COGS, Expenses, Other Income, Other Expenses) and net income. Pick the budget with budget_id or budget_name (exact name, or a unique part of it — get_budget lists them). Budget periods only partly inside the range are pro-rated by days (partial_periods="full" counts them whole). split_by_class=true adds a by_class breakdown under every account (P&L by Classes + the budget\'s ClassRef lines); class_id limits both sides to one class. Every response states the budget used, the period QBO applied to the actuals, and any warnings (e.g. the budget does not cover the dates, or the account rows do not reconcile to QBO\'s Net Income). source="qbo_report" instead returns Intuit\'s raw BudgetVsActuals report JSON (supports date_macro / summarize_by) — NOT recommended: that report has returned all-time actuals and Month/Quarter faults. Defaults to Accrual basis.',
+      'Budget vs Actuals for a QBO client: per account, the actual for start_date..end_date (from QBO\'s ProfitAndLoss, on the requested accounting_method) against the budget for the same period (from the Budget entity you name), with over_budget (actual − budget) and pct_of_budget, section subtotals (Income, COGS, Expenses, Other Income, Other Expenses) and net income. Pick the budget with budget_id or budget_name (exact name, or a unique part of it — get_budget lists them). Budget periods only partly inside the range are pro-rated by days (partial_periods="full" counts them whole). split_by_class=true adds a by_class breakdown under every account (P&L by Classes + the budget\'s ClassRef lines); class_id limits both sides to one class. Every response states the budget used, the period QBO applied to the actuals, and any warnings (e.g. the budget does not cover the dates, or the account rows do not reconcile to QBO\'s Net Income). source="qbo_report" instead returns Intuit\'s raw BudgetVsActuals report JSON — NOT RECOMMENDED: verified 2026-09-30, it ignores start/end dates AND date_macro and returns ALL-TIME actuals (flagged with a WARNING banner when its Header has no period), and summarize_by Month/Quarter/Year fault inside Intuit. Use it only to see Intuit\'s own layout. Defaults to Accrual basis.',
       {
         client_name: z.string().describe('The name of the client company'),
         budget_id: z.string().optional().describe('Budget Id (from get_budget). Pass this or budget_name.'),
@@ -1314,17 +1313,18 @@ export async function registerMcpRoutes(
         include_zero_rows: z.boolean().optional().describe('Keep accounts whose actual and budget are both 0. Default false.'),
         source: z.enum(['computed', 'qbo_report']).optional().describe('"computed" (default): Budget entity + ProfitAndLoss. "qbo_report": Intuit\'s raw BudgetVsActuals report (unreliable dates; see description).'),
         date_macro: z.string().optional().describe('source="qbo_report" only: an Intuit predefined period (e.g. "This Fiscal Year-to-date") instead of start/end dates.'),
-        summarize_by: z.enum(['Total', 'Month', 'Quarter', 'Year']).optional().describe('source="qbo_report" only: column summarization. Month/Quarter often fault inside Intuit\'s report engine.'),
+        summarize_by: z.enum(['Total', 'Month', 'Quarter', 'Year']).optional().describe('source="qbo_report" only: column summarization. Month/Quarter/Year fault inside Intuit\'s report engine.'),
+        rowaxis: z.string().optional().describe('source="qbo_report" only, EXPERIMENTAL: Intuit\'s undocumented rowaxis report param (e.g. "primary"), passed through as-is.'),
       },
-      async ({ client_name, budget_id, budget_name, start_date, end_date, accounting_method, split_by_class, class_id, partial_periods, include_zero_rows, source = 'computed', date_macro, summarize_by }) => {
+      async ({ client_name, budget_id, budget_name, start_date, end_date, accounting_method, split_by_class, class_id, partial_periods, include_zero_rows, source = 'computed', date_macro, summarize_by, rowaxis }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) {
           return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
         }
 
         if (source === 'computed') {
-          if (date_macro || summarize_by) {
-            return { content: [{ type: 'text', text: 'date_macro and summarize_by only apply to source="qbo_report". The computed report needs start_date and end_date (YYYY-MM-DD) and returns the period total.' }] };
+          if (date_macro || summarize_by || rowaxis) {
+            return { content: [{ type: 'text', text: 'date_macro, summarize_by and rowaxis only apply to source="qbo_report". The computed report needs start_date and end_date (YYYY-MM-DD) and returns the period total.' }] };
           }
           try {
             const result = await qboManager.reports.computedBudgetVsActuals(realmId, {
@@ -1383,11 +1383,19 @@ export async function registerMcpRoutes(
             budgetId: resolvedId,
             summarizeColumnBy: summarize_by,
             accountingMethod: accounting_method,
+            rowaxis,
           });
           const content: Array<{ type: 'text'; text: string }> = [];
-          const warning = reportPeriodWarning(report, { start: start_date, end: end_date }, 'Budget vs Actuals');
+          // An all-time Actual column must be impossible to miss: the banner
+          // leads the response AND rides at the top of the JSON itself.
+          const banner = bvaReportBanner(report, { start: start_date, end: end_date, dateMacro: date_macro });
+          const mismatch = banner ? null : reportPeriodWarning(report, { start: start_date, end: end_date }, 'Budget vs Actuals');
+          const warning = banner ?? mismatch;
           if (warning) content.push({ type: 'text', text: warning });
-          content.push({ type: 'text', text: JSON.stringify(report, null, 2) });
+          const body = warning
+            ? { WARNING: warning, recommended: `For reliable figures, ${BVA_COMPUTED_RECOMMENDATION}`, ...(report as any) }
+            : report;
+          content.push({ type: 'text', text: JSON.stringify(body, null, 2) });
           return { content };
         } catch (err: any) {
           return { content: [{ type: 'text', text: explainBudgetVsActualsFailure(err, request(), budget) }] };

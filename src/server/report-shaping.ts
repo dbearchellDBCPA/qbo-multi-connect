@@ -483,6 +483,35 @@ export function precheckBudgetVsActuals(
   return { budget, error: null };
 }
 
+export const BVA_COMPUTED_RECOMMENDATION =
+  'call get_budget_vs_actuals again WITHOUT source (the default computed mode): budget from the Budget entity you name, actuals from a ProfitAndLoss for exactly start_date..end_date on your accounting_method, reconciled to QBO\'s Net Income.';
+
+/**
+ * Banner for source="qbo_report" when Intuit's Header does not carry
+ * StartPeriod/EndPeriod — the signature of an ALL-TIME Actual column.
+ * Probed live on 2026-09-30 (Northway Church, FY25/FY26 budgets): start/end
+ * dates (Total), date_macro ("Last Fiscal Year"), and Cash/Accrual/default
+ * basis all returned the same all-time income (23,296,435.83) with no
+ * period in the Header, and the Budget column was the budget's FULL year
+ * even for a one-quarter range; summarize_by Month and Year faulted.
+ * Returns null when the Header confirms a period.
+ */
+export function bvaReportBanner(reportData: any, requested: { start?: string; end?: string; dateMacro?: string }): string | null {
+  const actual = headerPeriod(reportData);
+  if (actual.start || actual.end) return null;
+  const asked = requested.start || requested.end
+    ? `${requested.start ?? '…'} to ${requested.end ?? '…'}`
+    : requested.dateMacro
+      ? `date_macro "${requested.dateMacro}"`
+      : 'the requested period';
+  return [
+    '⚠⚠⚠ WARNING — DO NOT USE THESE ACTUALS ⚠⚠⚠',
+    `QBO's BudgetVsActuals report ignored ${asked}: its Header has no StartPeriod/EndPeriod, so the Actual column is ALL-TIME (every transaction the company has ever posted), and the Budget column may be the budget's full year rather than your period.`,
+    'This is Intuit\'s report engine, not a bad request: on 2026-09-30 start/end dates, date_macro and every accounting_method returned the same all-time actuals, and summarize_by Month/Year failed.',
+    `RECOMMENDED: ${BVA_COMPUTED_RECOMMENDATION}`,
+  ].join('\n');
+}
+
 /** True when an error is Intuit's opaque report-engine failure (code 10000 / NullPointerException). */
 export function isIntuitSystemFailure(err: any): boolean {
   const text = `${err?.message ?? ''} ${typeof err?.response === 'string' ? err.response : JSON.stringify(err?.response ?? '')}`;
@@ -514,8 +543,9 @@ export function explainBudgetVsActualsFailure(err: any, req: BvaRequest, budget:
       lines.push(`Budget: ${m.budget_id} "${m.name}" — ${m.budget_type}, ${m.budget_entry_type}, ${m.start_date} → ${m.end_date}.`);
     }
     lines.push(
-      'This failure is on Intuit\'s side, not a bad budget_id: it was reproduced on 2026-09-05 for every summarize_by other than Total (Month and Quarter, three separate budgets, dates fully inside each budget\'s year).',
-      'What works: (1) omit summarize_by (Total) — then check the Header for StartPeriod/EndPeriod, because a Total response that omits them is NOT limited to your dates; (2) use date_macro (e.g. "This Fiscal Year-to-date", "Last Month") instead of start_date/end_date; (3) for a month-by-month view, build it yourself: get_budget(budget_id=…) gives the monthly budget lines and get_profit_and_loss(summarize_by="Month") gives the actuals for the same accounts.'
+      'This failure is on Intuit\'s side, not a bad budget_id: it was reproduced on 2026-09-05 and again on 2026-09-30 for every summarize_by other than Total (Month, Quarter, Year; four separate budgets, dates fully inside each budget\'s year).',
+      `RECOMMENDED: ${BVA_COMPUTED_RECOMMENDATION}`,
+      'For a month-by-month view: get_budget(budget_id=…) gives the monthly budget lines and get_profit_and_loss(summarize_by="Month") gives the actuals for the same accounts.'
     );
   } else {
     lines.push(`Error fetching Budget vs Actuals: ${err?.message ?? err}`);
