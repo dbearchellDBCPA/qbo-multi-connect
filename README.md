@@ -486,6 +486,41 @@ It loads a `ZZT`-prefixed three-level chart (numbers 9900–9993), reads it
 back, re-runs the batch to prove idempotency, exercises every rule, then
 deactivates everything it created.
 
+## MCP Tools — Bulk transaction-history import
+
+Six tools load a month (or years) of history from any source system into a
+QBO company as real transactions. The agent first converts the source export
+to the normalized schema in [docs/import-schema.md](docs/import-schema.md),
+which has one example per `txn_type`.
+
+| Tool | Summary |
+|---|---|
+| `batch_create_names` | Bulk vendors, customers and employees. DisplayName is checked across all three lists, and a cross-type conflict fails with a clear message. |
+| `ensure_items` | A Service item per income account, so sales lines can be given by account. |
+| `import_transactions` | Up to 500 rows per call across 15 types (JE, Expense, Check, card charge and credit, Deposit, Transfer, Bill, BillPayment, VendorCredit, Invoice, Payment, CreditMemo, SalesReceipt, RefundReceipt). Every row is validated against the live company. Writes go through the batch endpoint (≤30 operations per request, ≤40 requests per minute per company, 429 backoff with the same requestid). Rows are idempotent by `source_id`. |
+| `import_status` | Read-only view of the mapping store: counts and sums by type and status, per run. |
+| `rebuild_import_index` | Recovers or verifies the store from the `[src:<source_id>]` PrivateNote stamps. |
+| `delete_imported_transactions` | Rolls back a run, payments first. A transaction whose stamp was edited is refused unless `force`. |
+
+```
+import_transactions(client_name="Acme", run_id="netsuite-2024-07", dry_run=true, transactions=[…])
+```
+
+Row statuses are `created`, `updated`, `unchanged`, `skipped`, `blocked` and
+`failed`. `blocked` means a payment whose Bill or Invoice is not imported yet.
+Each call also writes a JSON and CSV log.
+
+The mapping store is `qbo-import-index.db` and the logs are under
+`import-runs/`. Both sit in the server data directory next to `QBO_DB_PATH`
+(`/data` on Railway). The store is its own SQLite file, so the connections DB
+is never migrated.
+
+Sandbox acceptance run (sandbox companies only; it cleans up after itself):
+
+```
+npm run sandbox:import -- --url https://<sandbox-host>/mcp --key <api key> --client "Sandbox Company_US_1" --accounts accounts.json --confirm
+```
+
 ## MCP Tools — Bulk Corrections
 
 The MCP server exposes two tool patterns for bulk editing that eliminate

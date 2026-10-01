@@ -131,7 +131,7 @@ export class FakeQboLedger {
     return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
   }
 
-  private preferences(): any {
+  preferences(): any {
     return {
       AccountingInfoPrefs: {
         UseAccountNumbers: this.prefs.useAccountNumbers,
@@ -145,7 +145,8 @@ export class FakeQboLedger {
 
   // ── query ────────────────────────────────────────────────────────────────
 
-  private query(q: string): any {
+  /** Answer a QBO query string (also used directly by unit tests). */
+  query(q: string): any {
     const m = q.match(/^\s*SELECT\s+\*\s+FROM\s+(\w+)(?:\s+WHERE\s+(.+?))?(?:\s+ORDERBY\s+\w+(?:\s+(?:ASC|DESC))?)?(?:\s+MAXRESULTS\s+(\d+))?(?:\s+STARTPOSITION\s+(\d+))?\s*$/i);
     if (!m) throw new FaultError({ code: '4000', message: 'Error parsing query', detail: `QueryParserError: ${q}` });
     const entity = m[1];

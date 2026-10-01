@@ -74,6 +74,23 @@ export const IMPORT_TRANSACTIONS_DESCRIPTION = [
   'Bills/Invoices load before the payments in the same call. On or before the books closing date fails unless allow_closed_period. Classes are dropped with a warning when class tracking is off.',
 ].join('\n');
 
+// One writing import/delete/rebuild at a time per company, process-wide (each
+// MCP request builds its own server, so this lives at module level). Two
+// overlapping calls with the same file would otherwise both see a source_id
+// as new before either recorded it.
+const realmLocks = new Map<string, Promise<unknown>>();
+async function withRealmLock<T>(realmId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = realmLocks.get(realmId) ?? Promise.resolve();
+  const run = prev.catch(() => {}).then(fn);
+  const tail = run.catch(() => {});
+  realmLocks.set(realmId, tail);
+  try {
+    return await run;
+  } finally {
+    if (realmLocks.get(realmId) === tail) realmLocks.delete(realmId);
+  }
+}
+
 function defaultRunId(now: Date): string {
   return `run-${now.toISOString().slice(0, 19).replace(/[:]/g, '-')}Z`;
 }
@@ -127,7 +144,7 @@ export function registerImportTools(
       if (!realmId) return notFound(client_name);
       try {
         const d = deps(realmId, client_name);
-        const outcome = await batchCreateNames(d, names, { dryRun: dry_run, onExisting: on_existing });
+        const outcome = await withRealmLock(realmId, () => batchCreateNames(d, names, { dryRun: dry_run, onExisting: on_existing }));
         const c = outcome.counts;
         const summary = dry_run
           ? `would create ${c.would_create} | would update ${c.would_update} | unchanged ${c.unchanged} | failed ${c.failed}`
@@ -167,7 +184,7 @@ export function registerImportTools(
       const realmId = await findRealmId(client_name);
       if (!realmId) return notFound(client_name);
       try {
-        const outcome = await ensureItems(deps(realmId, client_name), items, { dryRun: dry_run, onExisting: on_existing, namePattern: name_pattern ?? DEFAULT_ITEM_NAME_PATTERN });
+        const outcome = await withRealmLock(realmId, () => ensureItems(deps(realmId, client_name), items, { dryRun: dry_run, onExisting: on_existing, namePattern: name_pattern ?? DEFAULT_ITEM_NAME_PATTERN }));
         const c = outcome.counts;
         const summary = dry_run
           ? `would create ${c.would_create} | would update ${c.would_update} | unchanged ${c.unchanged} | skipped ${c.skipped} | failed ${c.failed}`
@@ -217,7 +234,7 @@ export function registerImportTools(
       const dryRun = args.dry_run === true;
       try {
         const d = deps(realmId, client_name);
-        const outcome = await importTransactions(d, transactions, {
+        const outcome = await withRealmLock(realmId, () => importTransactions(d, transactions, {
           dryRun,
           onExisting: args.on_existing ?? 'skip',
           runId,
@@ -226,7 +243,7 @@ export function registerImportTools(
           allowDocNumberSuffix: args.allow_doc_number_suffix === true,
           truncateDocNumbers: args.truncate_doc_numbers === true,
           itemNamePattern: args.item_name_pattern ?? DEFAULT_ITEM_NAME_PATTERN,
-        });
+        }));
         const c = outcome.counts;
         const summary = dryRun
           ? `would create ${c.would_create} | would update ${c.would_update} | unchanged ${c.unchanged} | skipped ${c.skipped} | blocked ${c.blocked} | failed ${c.failed}`
@@ -346,7 +363,7 @@ export function registerImportTools(
       try {
         const runId = args.run_id?.trim() || `rebuilt-${now().toISOString().slice(0, 10)}`;
         const label = await clientLabel(realmId, args.client_name);
-        const out = await rebuildImportIndex(deps(realmId, label), { startDate: args.start_date, endDate: args.end_date, txnTypes: args.txn_types as TxnType[] | undefined, runId, dryRun: args.dry_run === true });
+        const out = await withRealmLock(realmId, () => rebuildImportIndex(deps(realmId, label), { startDate: args.start_date, endDate: args.end_date, txnTypes: args.txn_types as TxnType[] | undefined, runId, dryRun: args.dry_run === true }));
         const lines = [
           `REBUILD IMPORT INDEX — ${args.client_name} ${args.start_date}..${args.end_date}${args.dry_run ? ' (DRY RUN — store not written)' : ''}`,
           `Scanned ${out.scanned} transactions | stamped ${out.stamped} | new to store ${out.newToStore.length}${args.dry_run ? ' (would add)' : ''} | already in store ${out.alreadyInStore} | conflicts ${out.conflicts.length} | duplicates ${out.duplicates.length} | in store but not in QBO ${out.missingFromQbo.length}`,
@@ -391,7 +408,7 @@ export function registerImportTools(
       try {
         const started = now();
         const label = await clientLabel(realmId, args.client_name);
-        const out = await deleteImportedTransactions(deps(realmId, label), { runId: args.run_id, sourceIds: args.source_ids, dryRun: args.dry_run === true, force: args.force === true });
+        const out = await withRealmLock(realmId, () => deleteImportedTransactions(deps(realmId, label), { runId: args.run_id, sourceIds: args.source_ids, dryRun: args.dry_run === true, force: args.force === true }));
         const c = out.counts;
         const log = writeRunLog(config.dataDir, 'delete_imported_transactions', label, args.run_id ?? 'source-ids', { tool: 'delete_imported_transactions', client: label, realm_id: realmId, run_id: args.run_id ?? null, source_ids: args.source_ids ?? null, dry_run: !!args.dry_run, force: !!args.force, started_at: started.toISOString(), finished_at: now().toISOString(), counts: c, results: out.results },
           ['order', 'source_id', 'txn_type', 'qbo_type', 'qbo_id', 'txn_date', 'amount', 'status', 'message'], out.results as any, started);

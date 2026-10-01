@@ -55,6 +55,8 @@ export interface BatchOpResult {
   fault?: QboFault;
   /** How many times this op was sent (1 = first try). */
   attempts: number;
+  /** The whole request kept failing with a retryable error and retries ran out (not re-queued again). */
+  exhausted?: boolean;
 }
 
 /** POST one batch body; resolves the parsed JSON or throws (QBOError-like: statusCode, response). */
@@ -134,7 +136,7 @@ export class BatchRunner {
       let sawFault = false;
       for (const op of chunk) {
         const r = outcome.get(op.bId)!;
-        if (r.fault && isThrottleFault(r.fault)) {
+        if (r.fault && isThrottleFault(r.fault) && !r.exhausted) {
           const n = (opThrottles.get(op.bId) ?? 0) + 1;
           opThrottles.set(op.bId, n);
           if (n <= this.maxRetries) {
@@ -216,7 +218,7 @@ export class BatchRunner {
         const failure: QboFault = fault ?? { code: status ? `http_${status}` : 'request_failed', message: String(err?.message ?? err) };
         if (retryable) failure.message = `${failure.message ?? ''} — gave up after ${attempt} attempts (throttled / unavailable). Nothing in this chunk was confirmed; re-run the same call (already-written rows will report unchanged).`.trim();
         const out = new Map<string, BatchOpResult>();
-        for (const op of chunk) out.set(op.bId, { bId: op.bId, ok: false, fault: failure, attempts: attempt });
+        for (const op of chunk) out.set(op.bId, { bId: op.bId, ok: false, fault: failure, attempts: attempt, exhausted: retryable });
         return out;
       }
     }
