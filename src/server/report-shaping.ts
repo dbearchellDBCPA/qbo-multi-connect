@@ -486,30 +486,129 @@ export function precheckBudgetVsActuals(
 export const BVA_COMPUTED_RECOMMENDATION =
   'call get_budget_vs_actuals again WITHOUT source (the default computed mode): budget from the Budget entity you name, actuals from a ProfitAndLoss for exactly start_date..end_date on your accounting_method, reconciled to QBO\'s Net Income.';
 
+/** Flattened BudgetVsActuals money columns: [{ group, title }] in ColData order (index 0 = label). */
+function bvaFlatColumns(reportData: any): Array<{ group: string | null; title: string }> {
+  const flat: Array<{ group: string | null; title: string }> = [];
+  for (const col of reportData?.Columns?.Column ?? []) {
+    const subs = col?.Columns?.Column;
+    if (Array.isArray(subs) && subs.length) {
+      for (const sub of subs) flat.push({ group: String(col?.ColTitle ?? ''), title: String(sub?.ColTitle ?? '') });
+    } else {
+      flat.push({ group: null, title: String(col?.ColTitle ?? '') });
+    }
+  }
+  return flat;
+}
+
+/**
+ * The period-total ACTUAL for one summary group (default NetIncome) of an
+ * Intuit BudgetVsActuals report: the "Actual" sub-column of the "Total"
+ * column group (or the only/last Actual column). Null when absent.
+ */
+export function bvaTotalActual(reportData: any, group = 'NetIncome'): number | null {
+  const cols = bvaFlatColumns(reportData);
+  const actuals = cols.map((c, i) => ({ ...c, i })).filter((c) => /^actual$/i.test(c.title.trim()));
+  if (!actuals.length) return null;
+  const idx = (actuals.find((c) => /^total$/i.test((c.group ?? '').trim())) ?? actuals[actuals.length - 1]).i;
+  let found: number | null = null;
+  const walk = (rows: any[]): void => {
+    for (const row of rows ?? []) {
+      if (found !== null) return;
+      if (String(row?.group ?? '') === group) {
+        const cd = row?.Summary?.ColData ?? row?.ColData;
+        const raw = cd?.[idx]?.value;
+        if (raw !== undefined && raw !== '') {
+          const n = Number(String(raw).replace(/,/g, ''));
+          if (Number.isFinite(n)) found = n;
+        }
+        return;
+      }
+      if (row?.Rows?.Row) walk(row.Rows.Row);
+    }
+  };
+  walk(reportData?.Rows?.Row ?? []);
+  return found;
+}
+
+/** Result of cross-checking a BudgetVsActuals Actual column against ProfitAndLoss. */
+export interface BvaActualsCheck {
+  /** Net income from the BvA report's Actual (Total) column. */
+  report_net_income: number | null;
+  /** Net income from a ProfitAndLoss for the same period and basis. */
+  pnl_net_income: number | null;
+  /** The period the ProfitAndLoss covered (its Header). */
+  pnl_period: { start: string | null; end: string | null };
+  accounting_method: string;
+  matches: boolean;
+}
+
+export function checkBvaActuals(bvaReport: any, pnlReport: any, accountingMethod: string, pnlNetIncome: number | null): BvaActualsCheck {
+  const reportNet = bvaTotalActual(bvaReport);
+  const period = headerPeriod(pnlReport);
+  return {
+    report_net_income: reportNet,
+    pnl_net_income: pnlNetIncome,
+    pnl_period: { start: period.start ?? null, end: period.end ?? null },
+    accounting_method: accountingMethod,
+    matches: reportNet !== null && pnlNetIncome !== null && Math.abs(reportNet - pnlNetIncome) < 0.01,
+  };
+}
+
+const fmtMoney = (n: number | null) => (n === null ? 'n/a' : n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+
+export const BVA_PARTIAL_MONTH_NOTE =
+  'Budget column: QBO counts a budget month that is only partly inside the range IN FULL (the computed mode pro-rates it by days unless partial_periods="full").';
+
 /**
  * Banner for source="qbo_report" when Intuit's Header does not carry
- * StartPeriod/EndPeriod — the signature of an ALL-TIME Actual column.
- * Probed live on 2026-09-30 (Northway Church, FY25/FY26 budgets): start/end
- * dates (Total), date_macro ("Last Fiscal Year"), and Cash/Accrual/default
- * basis all returned the same all-time income (23,296,435.83) with no
- * period in the Header, and the Budget column was the budget's FULL year
- * even for a one-quarter range; summarize_by Month and Year faulted.
- * Returns null when the Header confirms a period.
+ * StartPeriod/EndPeriod. Intuit never echoes the period for this report, so
+ * the Header alone cannot tell an honored period from an ALL-TIME Actual
+ * column. Probed live 2026-09-30 (Northway Church): WITHOUT rowaxis, start/
+ * end dates, date_macro and Cash/Accrual/default basis all returned all-time
+ * income (23,296,435.83) and the full-year budget, and summarize_by Month/
+ * Year faulted; WITH rowaxis=primary the dates, date_macro, the budget
+ * period and summarize_by=Month were all honored (matched ProfitAndLoss to
+ * the cent). So the tool cross-checks the Actual column's net income against
+ * a ProfitAndLoss for the same period and basis (`check`).
+ * Returns null when the Header confirms a period or the check matched.
  */
-export function bvaReportBanner(reportData: any, requested: { start?: string; end?: string; dateMacro?: string }): string | null {
+export function bvaReportBanner(
+  reportData: any,
+  requested: { start?: string; end?: string; dateMacro?: string; rowaxis?: string },
+  check?: BvaActualsCheck | null
+): string | null {
   const actual = headerPeriod(reportData);
   if (actual.start || actual.end) return null;
+  if (check?.matches) return null;
   const asked = requested.start || requested.end
     ? `${requested.start ?? '…'} to ${requested.end ?? '…'}`
     : requested.dateMacro
       ? `date_macro "${requested.dateMacro}"`
       : 'the requested period';
-  return [
-    '⚠⚠⚠ WARNING — DO NOT USE THESE ACTUALS ⚠⚠⚠',
-    `QBO's BudgetVsActuals report ignored ${asked}: its Header has no StartPeriod/EndPeriod, so the Actual column is ALL-TIME (every transaction the company has ever posted), and the Budget column may be the budget's full year rather than your period.`,
-    'This is Intuit\'s report engine, not a bad request: on 2026-09-30 start/end dates, date_macro and every accounting_method returned the same all-time actuals, and summarize_by Month/Year failed.',
-    `RECOMMENDED: ${BVA_COMPUTED_RECOMMENDATION}`,
-  ].join('\n');
+  const sentRowaxis = requested.rowaxis ? `rowaxis=${requested.rowaxis}` : 'no rowaxis';
+  const mismatch = check && check.report_net_income !== null && check.pnl_net_income !== null;
+  const lines = mismatch
+    ? [
+        '⚠⚠⚠ WARNING — DO NOT USE THESE ACTUALS ⚠⚠⚠',
+        `QBO's BudgetVsActuals Actual column does NOT match a ProfitAndLoss for ${asked} (${check!.accounting_method}): report net income ${fmtMoney(check!.report_net_income)} vs ProfitAndLoss ${fmtMoney(check!.pnl_net_income)}. QBO ignored the period — the Actual column is most likely ALL-TIME, and the Budget column may be the budget's full year.`,
+      ]
+    : [
+        '⚠⚠⚠ WARNING — DO NOT USE THESE ACTUALS (UNVERIFIED) ⚠⚠⚠',
+        `QBO's BudgetVsActuals Header has no StartPeriod/EndPeriod for ${asked}, and its Actual column could not be checked against a ProfitAndLoss${check ? ` (report net income ${fmtMoney(check.report_net_income)}, ProfitAndLoss ${fmtMoney(check.pnl_net_income)})` : ''}. The Actual column may be ALL-TIME (every transaction the company has ever posted).`,
+      ];
+  lines.push(
+    `Sent ${sentRowaxis}. On 2026-09-30 QBO ignored dates and date_macro (all-time actuals) whenever rowaxis was not "primary"; rowaxis=primary is this tool's default.`,
+    `RECOMMENDED: ${BVA_COMPUTED_RECOMMENDATION}`
+  );
+  return lines.join('\n');
+}
+
+/** One-line confirmation shown when the Actual column matched ProfitAndLoss. */
+export function bvaVerifiedNote(check: BvaActualsCheck, requested: { start?: string; end?: string; dateMacro?: string }): string {
+  const period = check.pnl_period.start || check.pnl_period.end
+    ? `${check.pnl_period.start ?? '…'} to ${check.pnl_period.end ?? '…'}`
+    : requested.start || requested.end ? `${requested.start} to ${requested.end}` : `date_macro "${requested.dateMacro}"`;
+  return `✓ Verified: the Actual column's net income (${fmtMoney(check.report_net_income)}) matches a ProfitAndLoss for ${period} (${check.accounting_method}) to the cent, so QBO honored the period (Intuit never puts StartPeriod/EndPeriod in this report's Header). ${BVA_PARTIAL_MONTH_NOTE}`;
 }
 
 /** True when an error is Intuit's opaque report-engine failure (code 10000 / NullPointerException). */
@@ -543,7 +642,7 @@ export function explainBudgetVsActualsFailure(err: any, req: BvaRequest, budget:
       lines.push(`Budget: ${m.budget_id} "${m.name}" — ${m.budget_type}, ${m.budget_entry_type}, ${m.start_date} → ${m.end_date}.`);
     }
     lines.push(
-      'This failure is on Intuit\'s side, not a bad budget_id: it was reproduced on 2026-09-05 and again on 2026-09-30 for every summarize_by other than Total (Month, Quarter, Year; four separate budgets, dates fully inside each budget\'s year).',
+      'This failure is on Intuit\'s side, not a bad budget_id: on 2026-09-05 and 2026-09-30 every summarize_by other than Total (Month, Quarter, Year) faulted when rowaxis was not sent. With rowaxis=primary (this tool\'s default since 2026-09-30) summarize_by=Month worked; if you overrode rowaxis, retry without it.',
       `RECOMMENDED: ${BVA_COMPUTED_RECOMMENDATION}`,
       'For a month-by-month view: get_budget(budget_id=…) gives the monthly budget lines and get_profit_and_loss(summarize_by="Month") gives the actuals for the same accounts.'
     );

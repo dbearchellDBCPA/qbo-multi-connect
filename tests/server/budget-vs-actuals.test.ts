@@ -132,3 +132,20 @@ describe('reportPeriodWarning', () => {
     expect(reportPeriodWarning(report, {})).toBeNull();
   });
 });
+
+describe('bvaTotalActual (qbo_report cross-check, 2026-09-30)', () => {
+  it('reads the Actual sub-column of the Total group in a Month layout', async () => {
+    const { bvaTotalActual } = await import('../../src/server/report-shaping.js');
+    const sub = { Columns: { Column: [{ ColTitle: 'Actual' }, { ColTitle: 'Budget' }, { ColTitle: 'over Budget' }, { ColTitle: '% of Budget' }] } };
+    const report = {
+      Columns: { Column: [{ ColTitle: '' }, { ColTitle: 'Jul 2025', ...sub }, { ColTitle: 'Aug 2025', ...sub }, { ColTitle: 'Total', ...sub }] },
+      Rows: { Row: [
+        { group: 'Income', Rows: { Row: [] }, Summary: { ColData: [{ value: 'Total Revenue' }, ...Array(12).fill({ value: '1' })] } },
+        { group: 'NetIncome', Summary: { ColData: [{ value: 'Net Revenue' }, { value: '-108644.74' }, { value: '' }, { value: '' }, { value: '' }, { value: '48041.31' }, { value: '' }, { value: '' }, { value: '' }, { value: '-60,603.43' }, { value: '9' }, { value: '' }, { value: '' }] } },
+      ] },
+    };
+    expect(bvaTotalActual(report)).toBe(-60603.43);
+    expect(bvaTotalActual(report, 'Income')).toBe(1);
+    expect(bvaTotalActual({ Columns: { Column: [] }, Rows: { Row: [] } })).toBeNull();
+  });
+});

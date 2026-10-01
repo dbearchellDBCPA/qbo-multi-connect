@@ -211,7 +211,7 @@ describe('MCP get_budget_vs_actuals + attachment URL redaction (2026-09-30)', ()
     getSpy.mockResolvedValueOnce({ Header: { ReportName: 'BudgetVsActuals', StartPeriod: '2026-07-01', EndPeriod: '2026-09-28' }, Rows: { Row: [] } });
     await callTool('get_budget_vs_actuals', { ...REPRO, budget_name: 'FY27 Budget by Class', source: 'qbo_report' });
     expect(getSpy).toHaveBeenCalledWith(REALM, 'reports/BudgetVsActuals', {
-      start_date: '2026-07-01', end_date: '2026-09-28', accounting_method: 'Cash', budget: '1000000141',
+      start_date: '2026-07-01', end_date: '2026-09-28', accounting_method: 'Cash', budget: '1000000141', rowaxis: 'primary',
     });
   });
 
