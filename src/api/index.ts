@@ -16,6 +16,7 @@ export {
   MAX_FILES_PER_UPLOAD,
 } from './attachments.js';
 export type { AttachmentUploadItem, AttachmentUploadResult } from './attachments.js';
-export type { ReportOptions, BudgetVsActualsOptions, SummarizeColumnBy } from './reports.js';
+export type { ReportOptions, BudgetVsActualsOptions, ComputedBudgetVsActualsOptions, SummarizeColumnBy } from './reports.js';
+export { BudgetRequestError } from './reports.js';
 export type { JournalEntryCreate, JournalEntryLine } from './journal-entries.js';
 export type { QueryOptions } from './transactions.js';

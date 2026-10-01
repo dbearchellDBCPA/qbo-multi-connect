@@ -58,6 +58,14 @@ import {
   formatAgingReport,
   fiscalYearStart,
 } from './report-shaping.js';
+import { resolveBudget } from '../api/budget-vs-actuals.js';
+import {
+  redactUrl,
+  redactToolResult,
+  allowSensitiveUrls,
+  isSensitiveUrlAllowed,
+} from './redaction.js';
+import { BudgetRequestError } from '../api/reports.js';
 import {
   postedLineStats,
   verifyLinesAndMaybeRollback,
@@ -401,7 +409,15 @@ export async function registerMcpRoutes(
       // else (create/update/delete/apply/convert/close/match/swap/bulk) writes.
       if (!scope.canWrite && !isReadOnlyTool(name)) return undefined;
       if (rest.length > 0 && typeof rest[rest.length - 1] === 'function') {
-        const cb = rest[rest.length - 1];
+        const rawCb = rest[rest.length - 1];
+        // Blanket credential redaction: no tool may echo a URL whose query
+        // string carries a key/token/signature (Attachable TempDownloadUri
+        // carries intuit_apikey + user-auth-info). Only a result the tool
+        // explicitly marked via allowSensitiveUrls() passes through as-is.
+        const cb = async (...cbArgs: any[]) => {
+          const result = await rawCb(...cbArgs);
+          return isSensitiveUrlAllowed(result) ? result : redactToolResult(result);
+        };
         const head = rest.slice(0, -1); // [description?, shape?]
         const description = typeof head[0] === 'string' ? head[0] : undefined;
         const shape = head.find((h) => h && typeof h === 'object') ?? {};
@@ -1255,42 +1271,81 @@ export async function registerMcpRoutes(
     );
 
     // ── get_budget_vs_actuals ─────────────────────────────────────────────────
+    // Default source is COMPUTED (Budget entity + ProfitAndLoss). Intuit's own
+    // BudgetVsActuals report proved unreliable on 2026-09-30 (Northway
+    // Church): the budget param this server sent was ignored (always FY27),
+    // and its Actual column ignored the dates (all-time). See
+    // src/api/budget-vs-actuals.ts.
     server.tool(
       'get_budget_vs_actuals',
-      'Get the Budget vs Actuals report for a QBO client (raw QBO JSON: Actual / Budget / over Budget / % of Budget per account). Period is start_date+end_date (must sit inside the budget\'s own fiscal year — checked against the budget before calling Intuit) or date_macro. Always pass budget_id (find it with get_budget). KNOWN INTUIT LIMITS (verified 2026-09-05): summarize_by Month/Quarter can fail inside Intuit\'s report engine (NullPointerException) — the error explains the workarounds; and a response whose Header lacks StartPeriod/EndPeriod is flagged, because such a report was not limited to the requested dates. For a month-by-month variance, combine get_budget(budget_id) with get_profit_and_loss(summarize_by="Month"). Defaults to Accrual basis.',
+      'Budget vs Actuals for a QBO client: per account, the actual for start_date..end_date (from QBO\'s ProfitAndLoss, on the requested accounting_method) against the budget for the same period (from the Budget entity you name), with over_budget (actual − budget) and pct_of_budget, section subtotals (Income, COGS, Expenses, Other Income, Other Expenses) and net income. Pick the budget with budget_id or budget_name (exact name, or a unique part of it — get_budget lists them). Budget periods only partly inside the range are pro-rated by days (partial_periods="full" counts them whole). split_by_class=true adds a by_class breakdown under every account (P&L by Classes + the budget\'s ClassRef lines); class_id limits both sides to one class. Every response states the budget used, the period QBO applied to the actuals, and any warnings (e.g. the budget does not cover the dates, or the account rows do not reconcile to QBO\'s Net Income). source="qbo_report" instead returns Intuit\'s raw BudgetVsActuals report JSON (supports date_macro / summarize_by) — NOT recommended: that report has returned all-time actuals and Month/Quarter faults. Defaults to Accrual basis.',
       {
         client_name: z.string().describe('The name of the client company'),
-        start_date: z.string().optional().describe('Start date in YYYY-MM-DD format. Required with end_date unless date_macro is given.'),
-        end_date: z.string().optional().describe('End date in YYYY-MM-DD format. Required with start_date unless date_macro is given.'),
-        date_macro: z.string().optional().describe('Optional alternative to start/end dates: an Intuit predefined period such as "This Fiscal Year-to-date", "This Fiscal Year", "Last Fiscal Year", "This Month", "Last Month", "This Fiscal Quarter".'),
-        budget_id: z.string().optional().describe('Budget ID (from get_budget). Strongly recommended — if omitted, QBO picks a default budget and the period cannot be validated.'),
-        summarize_by: z.enum(['Total', 'Month', 'Quarter', 'Year']).optional().describe('Optional: how to summarize columns. Total is the reliable choice; see the tool description for Month/Quarter.'),
-        accounting_method: z.enum(['Cash', 'Accrual']).optional().describe('Cash or Accrual basis. Defaults to Accrual.'),
+        budget_id: z.string().optional().describe('Budget Id (from get_budget). Pass this or budget_name.'),
+        budget_name: z.string().optional().describe('Budget name, e.g. "FY26 Budget by Class" — exact (case-insensitive) or a unique substring. Pass this or budget_id; if both are given they must agree.'),
+        start_date: z.string().optional().describe('Start date YYYY-MM-DD. Required (except source="qbo_report" with date_macro).'),
+        end_date: z.string().optional().describe('End date YYYY-MM-DD. Required (except source="qbo_report" with date_macro).'),
+        accounting_method: z.enum(['Cash', 'Accrual']).optional().describe('Basis for the actuals. Defaults to Accrual.'),
+        split_by_class: z.boolean().optional().describe('Add a per-class breakdown (actual / budget / variance) under every account. Default false.'),
+        class_id: z.string().optional().describe('Optional: limit actuals and budget to one QBO Class Id.'),
+        partial_periods: z.enum(['prorate', 'full']).optional().describe('Budget periods only partly inside start..end: "prorate" by days (default) or count "full".'),
+        include_zero_rows: z.boolean().optional().describe('Keep accounts whose actual and budget are both 0. Default false.'),
+        source: z.enum(['computed', 'qbo_report']).optional().describe('"computed" (default): Budget entity + ProfitAndLoss. "qbo_report": Intuit\'s raw BudgetVsActuals report (unreliable dates; see description).'),
+        date_macro: z.string().optional().describe('source="qbo_report" only: an Intuit predefined period (e.g. "This Fiscal Year-to-date") instead of start/end dates.'),
+        summarize_by: z.enum(['Total', 'Month', 'Quarter', 'Year']).optional().describe('source="qbo_report" only: column summarization. Month/Quarter often fault inside Intuit\'s report engine.'),
       },
-      async ({ client_name, start_date, end_date, date_macro, budget_id, summarize_by, accounting_method }) => {
+      async ({ client_name, budget_id, budget_name, start_date, end_date, accounting_method, split_by_class, class_id, partial_periods, include_zero_rows, source = 'computed', date_macro, summarize_by }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) {
           return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
         }
-        const request = {
-          budgetId: budget_id,
+
+        if (source === 'computed') {
+          if (date_macro || summarize_by) {
+            return { content: [{ type: 'text', text: 'date_macro and summarize_by only apply to source="qbo_report". The computed report needs start_date and end_date (YYYY-MM-DD) and returns the period total.' }] };
+          }
+          try {
+            const result = await qboManager.reports.computedBudgetVsActuals(realmId, {
+              clientName: client_name,
+              budgetId: budget_id,
+              budgetName: budget_name,
+              startDate: start_date as string,
+              endDate: end_date as string,
+              accountingMethod: accounting_method,
+              splitByClass: split_by_class,
+              classId: class_id,
+              partialPeriods: partial_periods,
+              includeZeroRows: include_zero_rows,
+            });
+            return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+          } catch (err: any) {
+            if (err instanceof BudgetRequestError) return { content: [{ type: 'text', text: err.message }] };
+            return { content: [{ type: 'text', text: `Error computing Budget vs Actuals: ${err?.message ?? err}` }] };
+          }
+        }
+
+        // source === 'qbo_report': Intuit's raw report, with the guard rails.
+        if (split_by_class || class_id || partial_periods || include_zero_rows) {
+          return { content: [{ type: 'text', text: 'split_by_class, class_id, partial_periods and include_zero_rows only apply to the computed report (omit source).' }] };
+        }
+        let budget: any | null = null;
+        let resolvedId = budget_id;
+        const request = () => ({
+          budgetId: resolvedId,
           startDate: start_date,
           endDate: end_date,
           dateMacro: date_macro,
           summarizeBy: summarize_by,
           accountingMethod: accounting_method,
-        };
-        let budget: any | null = null;
+        });
         try {
-          // Budget metadata only (no BudgetDetail) — a few hundred bytes per
-          // budget — so the request can be checked against the budget's own
-          // fiscal year before Intuit is asked for anything.
-          const result: any = await qboManager.transactions.rawQuery(
-            realmId,
-            'SELECT Id, Name, StartDate, EndDate, BudgetType, BudgetEntryType, Active FROM Budget MAXRESULTS 1000'
-          );
-          const budgets: any[] = result?.QueryResponse?.Budget ?? [];
-          const check = precheckBudgetVsActuals(request, budgets);
+          const budgets = await qboManager.reports.listBudgets(realmId);
+          if (budget_name) {
+            const picked = resolveBudget(budgets, { budgetId: budget_id, budgetName: budget_name });
+            if (picked.error) return { content: [{ type: 'text', text: picked.error }] };
+            resolvedId = String(picked.budget.Id);
+          }
+          const check = precheckBudgetVsActuals(request(), budgets);
           if (check.error) {
             return { content: [{ type: 'text', text: check.error }] };
           }
@@ -1303,7 +1358,7 @@ export async function registerMcpRoutes(
             startDate: start_date,
             endDate: end_date,
             dateMacro: date_macro,
-            budgetId: budget_id,
+            budgetId: resolvedId,
             summarizeColumnBy: summarize_by,
             accountingMethod: accounting_method,
           });
@@ -1313,7 +1368,7 @@ export async function registerMcpRoutes(
           content.push({ type: 'text', text: JSON.stringify(report, null, 2) });
           return { content };
         } catch (err: any) {
-          return { content: [{ type: 'text', text: explainBudgetVsActualsFailure(err, request, budget) }] };
+          return { content: [{ type: 'text', text: explainBudgetVsActualsFailure(err, request(), budget) }] };
         }
       }
     );
@@ -5049,15 +5104,16 @@ export async function registerMcpRoutes(
     // ── get_attachments ───────────────────────────────────────────────────────
     server.tool(
       'get_attachments',
-      'List QBO attachments (Attachables) linked to a transaction/entity, or fetch one by attachable_id. Returns Id, file name, size, content type, note, every entity it is linked to, and a TEMPORARY download URL (valid ~15 minutes; fetch it promptly). Set include_content=true on a single attachable_id to also get the file bytes as base64 (files up to 5 MB).',
+      'List QBO attachments (Attachables) linked to a transaction/entity, or fetch one by attachable_id. Returns Id, file name, size, content type, note, and every entity it is linked to. Set include_content=true on a single attachable_id to get the file bytes as base64 (files up to 5 MB) — the server downloads the file itself, no URL needed. QBO\'s temporary download URL is a bearer credential (its query string carries Intuit\'s API key and a user auth token), so by default only a REDACTED form is returned (temp_download_url_redacted: host/path kept, secret values replaced). Pass include_download_url=true to get the live URL (valid ~15 minutes) when you genuinely need to hand it to a browser or another tool — treat it like a password.',
       {
         client_name: z.string().describe('The name of the client company'),
         attachable_id: z.string().optional().describe('Fetch one attachment by Id'),
         entity_type: z.string().optional().describe('List attachments linked to this entity type (with entity_id)'),
         entity_id: z.string().optional().describe('List attachments linked to this entity Id (with entity_type)'),
         include_content: z.boolean().optional().describe('With attachable_id only: include the file bytes as base64 (max 5 MB)'),
+        include_download_url: z.boolean().optional().describe('Return the LIVE temporary download URL (contains Intuit credentials; valid ~15 min). Default false: only a redacted URL is returned.'),
       },
-      async ({ client_name, attachable_id, entity_type, entity_id, include_content }) => {
+      async ({ client_name, attachable_id, entity_type, entity_id, include_content, include_download_url = false }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) {
           return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
@@ -5077,6 +5133,7 @@ export async function registerMcpRoutes(
           } else {
             list = await qboManager.attachments.listForEntity(realmId, entity_type!, entity_id!);
           }
+          const tooBig = 'over the 5 MB inline limit. Re-run with include_download_url=true to get a live download URL.';
           const out: any[] = [];
           for (const a of list) {
             const item: any = {
@@ -5086,17 +5143,21 @@ export async function registerMcpRoutes(
               size: a.Size ?? null,
               note: a.Note ?? null,
               linked_to: (a.AttachableRef ?? []).map((r: any) => ({ type: r?.EntityRef?.type, id: r?.EntityRef?.value, include_on_send: r?.IncludeOnSend ?? false })),
-              temp_download_url: a.TempDownloadUri ?? null,
+              download_url_available: Boolean(a.TempDownloadUri),
             };
+            if (include_download_url) item.temp_download_url = a.TempDownloadUri ?? null;
+            else item.temp_download_url_redacted = a.TempDownloadUri ? redactUrl(String(a.TempDownloadUri)).trim() : null;
             if (include_content) {
               if (!a.TempDownloadUri) {
                 item.content_error = 'QBO returned no download URL (note-only attachment?).';
               } else if (a.Size != null && Number(a.Size) > 5 * 1024 * 1024) {
-                item.content_error = `File is ${a.Size} bytes; over the 5 MB inline limit. Use temp_download_url.`;
+                item.content_error = `File is ${a.Size} bytes; ${tooBig}`;
               } else {
-                const bytes = await qboManager.attachments.download(a.TempDownloadUri);
+                // The server downloads with the raw URL QBO gave it; the
+                // credentials never leave the server.
+                const bytes = await qboManager.attachments.download(realmId, String(a.TempDownloadUri).trim());
                 if (bytes.length > 5 * 1024 * 1024) {
-                  item.content_error = `File is ${bytes.length} bytes; over the 5 MB inline limit. Use temp_download_url.`;
+                  item.content_error = `File is ${bytes.length} bytes; ${tooBig}`;
                 } else {
                   item.content_base64 = bytes.toString('base64');
                 }
@@ -5104,7 +5165,9 @@ export async function registerMcpRoutes(
             }
             out.push(item);
           }
-          return { content: [{ type: 'text', text: JSON.stringify({ count: out.length, attachments: out }, null, 2) }] };
+          const result = { content: [{ type: 'text' as const, text: JSON.stringify({ count: out.length, attachments: out }, null, 2) }] };
+          // Only an explicit include_download_url=true skips the shim's redaction.
+          return include_download_url ? allowSensitiveUrls(result) : result;
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error fetching attachments: ${err?.message ?? err}` }] };
         }

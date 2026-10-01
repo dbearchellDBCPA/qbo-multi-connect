@@ -212,9 +212,15 @@ export class AttachmentsAPI {
     return res?.QueryResponse?.Attachable ?? [];
   }
 
-  /** Fetch file bytes from an Attachable's TempDownloadUri (Intuit-signed, short-lived). */
-  async download(tempDownloadUri: string): Promise<Buffer> {
-    const url = assertSafeUrl(tempDownloadUri);
+  /**
+   * Fetch file bytes from an Attachable's TempDownloadUri (Intuit-signed,
+   * short-lived). realmId comes first like every other API method: the
+   * scoped-manager guard checks args[0] against the caller's companies, and
+   * with the URL in that slot a realm-scoped API key could never download
+   * (include_content failed for everyone but the all-realms master key).
+   */
+  async download(_realmId: string, tempDownloadUri: string): Promise<Buffer> {
+    const url = assertSafeUrl(String(tempDownloadUri).trim());
     const res = await fetch(url, { redirect: 'follow' });
     if (!res.ok) throw new Error(`Download failed: HTTP ${res.status}`);
     const buf = Buffer.from(await res.arrayBuffer());

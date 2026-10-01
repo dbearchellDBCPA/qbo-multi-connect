@@ -269,6 +269,7 @@ describe('MCP report tools — requested dates reach Intuit (2026-09-05)', () =>
       end_date: '2025-12-31',
       budget_id: '1000000021',
       summarize_by: 'Month',
+      source: 'qbo_report',
     });
     expect(texts[0]).toMatch(/outside budget 1000000021 "Budget_FY26_P&L"/);
     expect(texts[0]).toMatch(/1000000011 "Budget_FY25_P&L"/);
@@ -283,12 +284,13 @@ describe('MCP report tools — requested dates reach Intuit (2026-09-05)', () =>
       end_date: '2026-12-31',
       budget_id: '1000000021',
       summarize_by: 'Month',
+      source: 'qbo_report',
     });
     expect(getSpy).toHaveBeenCalledWith(REALM, 'reports/BudgetVsActuals', {
       start_date: '2026-01-01',
       end_date: '2026-12-31',
       summarize_column_by: 'Month',
-      budget_id: '1000000021',
+      budget: '1000000021',
     });
     expect(texts[0]).toMatch(/Intuit's report engine rejected/);
     expect(texts[0]).toMatch(/NullPointerException/);
@@ -300,23 +302,23 @@ describe('MCP report tools — requested dates reach Intuit (2026-09-05)', () =>
   it('get_budget_vs_actuals: flags a response with no report period, passes a confirmed one through clean', async () => {
     // The live Total-mode symptom: no StartPeriod/EndPeriod, all-time actuals.
     getSpy.mockResolvedValueOnce({ Header: { ReportName: 'BudgetVsActuals', SummarizeColumnsBy: 'Total' }, Rows: { Row: [] } });
-    const flagged = await callTool('get_budget_vs_actuals', { client_name: CLIENT, start_date: '2026-01-01', end_date: '2026-12-31', budget_id: '1000000021' });
+    const flagged = await callTool('get_budget_vs_actuals', { client_name: CLIENT, start_date: '2026-01-01', end_date: '2026-12-31', budget_id: '1000000021', source: 'qbo_report' });
     expect(flagged.texts).toHaveLength(2);
     expect(flagged.texts[0]).toMatch(/did not confirm the requested period \(2026-01-01 to 2026-12-31\)/);
     expect(lastJson(flagged.texts).Header.ReportName).toBe('BudgetVsActuals');
 
-    const clean = await callTool('get_budget_vs_actuals', { client_name: CLIENT, start_date: '2026-01-01', end_date: '2026-12-31', budget_id: '1000000021' });
+    const clean = await callTool('get_budget_vs_actuals', { client_name: CLIENT, start_date: '2026-01-01', end_date: '2026-12-31', budget_id: '1000000021', source: 'qbo_report' });
     expect(clean.texts).toHaveLength(1);
     expect(lastJson(clean.texts).Header.EndPeriod).toBe('2026-12-31');
   });
 
   it('get_budget_vs_actuals: date_macro replaces start/end dates', async () => {
-    await callTool('get_budget_vs_actuals', { client_name: CLIENT, date_macro: 'This Fiscal Year-to-date', budget_id: '1000000021' });
+    await callTool('get_budget_vs_actuals', { client_name: CLIENT, date_macro: 'This Fiscal Year-to-date', budget_id: '1000000021', source: 'qbo_report' });
     expect(getSpy).toHaveBeenCalledWith(REALM, 'reports/BudgetVsActuals', {
       date_macro: 'This Fiscal Year-to-date',
-      budget_id: '1000000021',
+      budget: '1000000021',
     });
-    const { texts } = await callTool('get_budget_vs_actuals', { client_name: CLIENT, budget_id: '1000000021' });
+    const { texts } = await callTool('get_budget_vs_actuals', { client_name: CLIENT, budget_id: '1000000021', source: 'qbo_report' });
     expect(texts[0]).toMatch(/start_date \+ end_date or date_macro/);
   });
 
