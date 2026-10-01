@@ -123,6 +123,7 @@ export type ScopedQBOManager = Pick<
   | 'banking'
   | 'lists'
   | 'attachments'
+  | 'batch'
   | 'uploadTokens'
 > & {
   listConnections(): Promise<Connection[]>;
@@ -178,6 +179,7 @@ export function createScopedManager(qboManager: QBOManager, scope: AuthScope): S
     banking: guardNamespace(qboManager.banking, scope),
     lists: guardNamespace(qboManager.lists, scope),
     attachments: guardNamespace(qboManager.attachments, scope),
+    batch: guardNamespace(qboManager.batch, scope),
     uploadTokens: guardNamespace(qboManager.uploadTokens, scope),
   };
 }
