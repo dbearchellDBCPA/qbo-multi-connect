@@ -57,6 +57,58 @@ export interface BuiltTxn {
   amount: number;
   docNumber?: string;
   warnings: string[];
+  /** BillPayment only: credits (VendorCredit / JournalEntry) applied to bills, in linked[] order. */
+  credits?: AppliedCredit[];
+  /** Human summary of applied credits, e.g. "applies 594.00 of credit 274856 to bill 275459". */
+  summary?: string;
+}
+
+export interface AppliedCredit {
+  creditSourceId: string;
+  creditType: string;
+  /** QBO Id, or undefined when the credit is pending (created earlier in the same dry run). */
+  creditQboId?: string;
+  billSourceId: string;
+  amount: number;
+}
+
+export const BILL_CREDIT_TYPES: ReadonlySet<string> = new Set(['VendorCredit', 'JournalEntry']);
+
+/** Short label for a source_id in messages: "netsuite:275459" → "275459", "qbo:Bill:10303" → "10303". */
+export function shortSid(sid: string): string {
+  const i = sid.lastIndexOf(':');
+  return i >= 0 ? sid.slice(i + 1) : sid;
+}
+
+/**
+ * Net BillPayment math. Each credit applies to the nearest preceding Bill in linked[] order.
+ * Returns per-bill groups, the bill total, the credit total and the net (TotalAmt) — all in cents —
+ * plus any structural errors (credit before any bill, credits over a bill / over the bills).
+ */
+export function planBillPayment(entries: Array<{ sourceId: string; kind: 'bill' | 'credit'; cents: number }>): {
+  groups: Array<{ billIndex: number; sourceId: string; cents: number; credits: Array<{ index: number; sourceId: string; cents: number }> }>;
+  billCents: number; creditCents: number; netCents: number; errors: string[];
+} {
+  const groups: Array<{ billIndex: number; sourceId: string; cents: number; credits: Array<{ index: number; sourceId: string; cents: number }> }> = [];
+  const errors: string[] = [];
+  let billCents = 0, creditCents = 0;
+  entries.forEach((e, i) => {
+    if (e.kind === 'bill') {
+      groups.push({ billIndex: i, sourceId: e.sourceId, cents: e.cents, credits: [] });
+      billCents += e.cents;
+    } else {
+      creditCents += e.cents;
+      const g = groups[groups.length - 1];
+      if (!g) { errors.push(`linked ${i + 1}: credit ${e.sourceId} comes before any Bill — list the Bill first, then the credits applied to it.`); return; }
+      g.credits.push({ index: i, sourceId: e.sourceId, cents: e.cents });
+    }
+  });
+  for (const g of groups) {
+    const applied = g.credits.reduce((s, c) => s + c.cents, 0);
+    if (applied > g.cents) errors.push(`credits applied to bill ${g.sourceId} (${(applied / 100).toFixed(2)}) exceed the ${(g.cents / 100).toFixed(2)} applied to that bill.`);
+  }
+  if (creditCents > billCents) errors.push(`credits (${(creditCents / 100).toFixed(2)}) exceed bills (${(billCents / 100).toFixed(2)}) in linked[].`);
+  return { groups, billCents, creditCents, netCents: billCents - creditCents, errors };
 }
 
 export type BuildResult =
@@ -353,6 +405,8 @@ export function buildTransaction(txn: NormalizedTransaction, ctx: CompanyContext
   const payload: Record<string, any> = { TxnDate: txn.txn_date, PrivateNote: note.note };
   let amount = 0;
   let docNumber: string | undefined;
+  let bpCredits: AppliedCredit[] | undefined;
+  let bpSummary: string | undefined;
 
   const headerEntity = (required: NameType | null, mustExist: boolean): NameEntry | null => {
     if (!txn.entity) {
@@ -530,8 +584,74 @@ export function buildTransaction(txn: NormalizedTransaction, ctx: CompanyContext
       break;
     }
 
-    case 'Payment': case 'BillPayment': {
-      const isBill = type === 'BillPayment';
+    case 'BillPayment': {
+      const party = headerEntity('Vendor', true);
+      if (party) payload.VendorRef = { value: party.id };
+      const linked = txn.linked ?? [];
+      if (linked.length === 0) lc.errors.push('BillPayment needs linked: [{source_id of the Bill, amount}].');
+      if ((txn.lines ?? []).length > 0) lc.warnings.push('BillPayment lines ignored — the applied amounts come from linked[]');
+      const allowedTargets = ['Bill', 'VendorCredit', 'JournalEntry'];
+      const blockers: string[] = [];
+      const entries: Array<{ sourceId: string; kind: 'bill' | 'credit'; cents: number; txnId: string; qboType: string; ready: boolean }> = [];
+      linked.forEach((lk, i) => {
+        const p = amountProblem(lk.amount, `linked ${i + 1}`);
+        if (p) lc.errors.push(p);
+        const r = links(lk.source_id);
+        if (r.status === 'blocked') { blockers.push(r.reason); return; }
+        if (!allowedTargets.includes(r.qboType)) {
+          lc.errors.push(`linked ${i + 1}: source_id ${lk.source_id} was imported as a ${r.qboType}; a BillPayment can only be applied to ${allowedTargets.join(' / ')}.`);
+          return;
+        }
+        entries.push({
+          sourceId: lk.source_id, kind: BILL_CREDIT_TYPES.has(r.qboType) ? 'credit' : 'bill', cents: cents(lk.amount ?? 0),
+          txnId: r.status === 'ready' ? r.qboId : `pending:${lk.source_id}`, qboType: r.qboType, ready: r.status === 'ready',
+        });
+      });
+      const plan = planBillPayment(entries);
+      if (blockers.length === 0) lc.errors.push(...plan.errors);
+      if (blockers.length === 0 && plan.groups.length === 0 && linked.length > 0) lc.errors.push('BillPayment linked[] has no Bill — at least one Bill is required (credits apply to bills).');
+      // QBO represents an applied credit as its own Line (positive Amount, LinkedTxn VendorCredit/JournalEntry)
+      // next to the Bill line; TotalAmt = bills − credits (Intuit linked-transactions docs / community).
+      const qboLines: any[] = [];
+      const credits: AppliedCredit[] = [];
+      for (const g of plan.groups) {
+        const b = entries[g.billIndex];
+        qboLines.push({ Amount: g.cents / 100, LinkedTxn: [{ TxnId: b.txnId, TxnType: b.qboType }] });
+        for (const c of g.credits) {
+          const e = entries[c.index];
+          qboLines.push({ Amount: c.cents / 100, LinkedTxn: [{ TxnId: e.txnId, TxnType: e.qboType }] });
+          credits.push({ creditSourceId: e.sourceId, creditType: e.qboType, creditQboId: e.ready ? e.txnId : undefined, billSourceId: g.sourceId, amount: c.cents / 100 });
+        }
+      }
+      const netCents = plan.netCents;
+      if (txn.amount !== undefined) {
+        if (!Number.isFinite(txn.amount) || txn.amount < 0) lc.errors.push(`amount: must be 0 or more (got ${txn.amount}).`);
+        else if (Math.abs(cents(txn.amount) / 100 - txn.amount) > 1e-9) lc.errors.push(`amount: ${txn.amount} has more than 2 decimal places.`);
+        else if (blockers.length === 0 && cents(txn.amount) < netCents) {
+          lc.errors.push(`amount ${money(txn.amount)} is less than the net ${money(netCents / 100)} applied through linked[] (bills ${money(plan.billCents / 100)} − credits ${money(plan.creditCents / 100)}).`);
+        }
+      }
+      const total = txn.amount ?? netCents / 100;
+      payload.TotalAmt = total;
+      payload.Line = qboLines;
+      amount = total;
+      const method = txn.payment_method === 'CreditCard' ? 'CreditCard' : 'Check';
+      if (txn.payment_method === 'Cash') lc.warnings.push('BillPayment payment_method Cash recorded as PayType Check (QBO bill payments are Check or CreditCard)');
+      const acct = headerAccount(lc, method === 'CreditCard' ? CARD : BANK, method === 'CreditCard' ? 'paid-from credit card account' : 'paid-from bank account', true);
+      payload.PayType = method;
+      if (method === 'Check') payload.CheckPayment = { PrintStatus: 'NotSet', ...(acct ? { BankAccountRef: { value: String(acct.Id) } } : {}) };
+      else payload.CreditCardPayment = acct ? { CCAccountRef: { value: String(acct.Id) } } : {};
+      docNumber = applyDocNumber(lc, txn.check_number ?? txn.doc_number, txn.check_number ? 'check_number' : 'DocNumber');
+      if (lc.errors.length === 0 && blockers.length > 0) return { kind: 'blocked', reason: blockers.join(' '), warnings: lc.warnings };
+      if (credits.length > 0) {
+        bpCredits = credits;
+        bpSummary = credits.map((c) => `applies ${c.amount.toFixed(2)} of credit ${shortSid(c.creditSourceId)} to bill ${shortSid(c.billSourceId)}`).join('; ');
+      }
+      break;
+    }
+
+    case 'Payment': {
+      const isBill = false as boolean; // BillPayment has its own branch above
       const party = headerEntity(isBill ? 'Vendor' : 'Customer', true);
       if (party) payload[isBill ? 'VendorRef' : 'CustomerRef'] = { value: party.id };
       const linked = txn.linked ?? [];
@@ -594,5 +714,5 @@ export function buildTransaction(txn: NormalizedTransaction, ctx: CompanyContext
   }
 
   if (lc.errors.length > 0) return { kind: 'failed', errors: lc.errors, warnings: lc.warnings };
-  return { kind: 'ok', built: { qboType, payload, amount, docNumber, warnings: lc.warnings } };
+  return { kind: 'ok', built: { qboType, payload, amount, docNumber, warnings: lc.warnings, ...(bpCredits ? { credits: bpCredits, summary: bpSummary } : {}) } };
 }
