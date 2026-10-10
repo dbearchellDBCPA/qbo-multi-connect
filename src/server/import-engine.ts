@@ -34,6 +34,8 @@ import {
   txnTypeForQbo,
   type BuildOptions,
   type LinkLookup,
+  type AppliedCredit,
+  BILL_CREDIT_TYPES,
 } from './import-build.js';
 import { stampLineIds, stampDepositLineIds, journalLineKind, expenseLineKind, salesLineKind } from './line-converters.js';
 import { DOC_NUMBER_MAX_LENGTH } from './doc-number.js';
@@ -80,10 +82,14 @@ export function payloadHash(value: unknown): string {
 }
 
 /** Total of a normalized transaction, computed the way the builder does. */
-export function normalizedAmount(t: NormalizedTransaction): number {
+export function normalizedAmount(t: NormalizedTransaction, linkedType?: (sourceId: string) => string | undefined): number {
   const lines = t.lines ?? [];
   if (t.txn_type === 'JournalEntry') return lines.filter((l) => l.posting_type === 'Debit').reduce((s, l) => s + cents(l.amount), 0) / 100;
   if (t.txn_type === 'Transfer') return t.amount ?? (lines.length === 1 ? lines[0].amount : 0);
+  if (t.txn_type === 'BillPayment' && linkedType) {
+    if (t.amount !== undefined) return t.amount;
+    return (t.linked ?? []).reduce((s, l) => s + (BILL_CREDIT_TYPES.has(linkedType(l.source_id) ?? '') ? -1 : 1) * cents(l.amount), 0) / 100;
+  }
   if (t.txn_type === 'Payment' || t.txn_type === 'BillPayment') return t.amount ?? (t.linked ?? []).reduce((s, l) => s + cents(l.amount), 0) / 100;
   return lines.reduce((s, l) => s + cents(l.amount), 0) / 100;
 }
@@ -208,12 +214,19 @@ export async function importTransactions(deps: EngineDeps, txns: NormalizedTrans
     itemNamePattern: options.itemNamePattern || DEFAULT_ITEM_NAME_PATTERN,
   };
 
+  const linkedTypeOf = (sid: string): string | undefined => {
+    const direct = /^qbo:([A-Za-z]+):\d+$/.exec(sid);
+    if (direct) return direct[1];
+    const inCall = txns.find((x) => x.source_id === sid);
+    if (inCall) return inCall.txn_type;
+    return deps.store.getLive(deps.realmId, [sid]).get(sid)?.qbo_type;
+  };
   const results: ImportRowResult[] = txns.map((t, i) => ({
     row: i + 1,
     source_id: t.source_id,
     txn_type: t.txn_type,
     txn_date: t.txn_date,
-    amount: normalizedAmount(t),
+    amount: normalizedAmount(t, linkedTypeOf),
     status: 'failed',
     warnings: [],
   }));
@@ -294,7 +307,7 @@ export async function importTransactions(deps: EngineDeps, txns: NormalizedTrans
     if (ex.hash == null) {
       // Recovered from a stamp: no hash to compare, so compare what QBO shows.
       const dateSame = !ex.txnDate || ex.txnDate === t.txn_date;
-      const amtSame = ex.amount == null || cents(ex.amount) === cents(normalizedAmount(t));
+      const amtSame = ex.amount == null || cents(ex.amount) === cents(normalizedAmount(t, linkedTypeOf));
       same = dateSame && amtSame;
       if (same && ex.record && !options.dryRun) deps.store.setPayloadHash(ex.record.id, hash);
     }
@@ -315,6 +328,9 @@ export async function importTransactions(deps: EngineDeps, txns: NormalizedTrans
 
   // ── Link resolution for Payment / BillPayment ──
   const linkFor = (sid: string): LinkLookup => {
+    // Direct QBO reference for transactions not imported through the store: qbo:<Type>:<Id>.
+    const direct = /^qbo:(Bill|VendorCredit|JournalEntry|Invoice|CreditMemo):(\d+)$/.exec(sid);
+    if (direct) return { status: 'ready', qboType: direct[1], qboId: direct[2] };
     const inCall = firstRow.get(sid);
     if (inCall != null) {
       const r = results[inCall];
@@ -330,6 +346,32 @@ export async function importTransactions(deps: EngineDeps, txns: NormalizedTrans
     })();
     if (rec) return { status: 'ready', qboId: rec.qboId, qboType: rec.qboType };
     return { status: 'blocked', reason: `Linked transaction ${sid} is not imported yet (not in the import store). This row is blocked, not failed: load ${sid} first and re-run — it will then link.` };
+  };
+
+  // Live remaining-balance check for credits applied through BillPayment rows (VendorCredit.Balance;
+  // JournalEntry has no Balance field, so it is left to QBO). Usage accumulates across rows in this call.
+  const creditBalance = new Map<string, number | null>();
+  const creditUsed = new Map<string, number>();
+  const checkCreditBalances = async (credits: AppliedCredit[], updatingBpId?: string): Promise<string | null> => {
+    const ids = [...new Set(credits.filter((c) => c.creditType === 'VendorCredit' && c.creditQboId && !creditBalance.has(c.creditQboId)).map((c) => c.creditQboId!))];
+    if (ids.length > 0) {
+      const got = await queryByIds(deps.query, 'VendorCredit', ids);
+      for (const id of ids) {
+        const e = got.get(id);
+        creditBalance.set(id, e ? Number(e.Balance ?? 0) : null);
+      }
+    }
+    const want = new Map<string, number>();
+    for (const c of credits) if (c.creditType === 'VendorCredit' && c.creditQboId) want.set(c.creditQboId, (want.get(c.creditQboId) ?? 0) + cents(c.amount));
+    for (const [id, w] of want) {
+      const bal = creditBalance.get(id);
+      if (bal === null) return `VendorCredit ${id} was not found in QBO.`;
+      if (bal === undefined || updatingBpId) continue; // updates re-apply credits already on the payment; QBO validates
+      const remaining = cents(bal) - (creditUsed.get(id) ?? 0);
+      if (w > remaining) return `credit applied from VendorCredit ${id} (${(w / 100).toFixed(2)}) exceeds its remaining balance in QBO (${(remaining / 100).toFixed(2)}).`;
+    }
+    for (const [id, w] of want) creditUsed.set(id, (creditUsed.get(id) ?? 0) + w);
+    return null;
   };
 
   const stats = { batchRequests: 0, retries: 0, throttled: 0, waitedMs: 0 };
@@ -372,6 +414,14 @@ export async function importTransactions(deps: EngineDeps, txns: NormalizedTrans
         continue;
       }
       const built = r.built;
+      if (built.credits && built.credits.length > 0) {
+        const problem = await checkCreditBalances(built.credits, p.mode === 'update' ? p.existing!.qboId : undefined);
+        if (problem) {
+          decide(p.idx, { status: 'failed', warnings, message: problem, qbo_type: p.existing?.qboType, qbo_id: p.existing?.qboId });
+          continue;
+        }
+      }
+      const tail = built.summary ? ` ${built.amount.toFixed(2)} — ${built.summary}` : '';
       if (p.mode === 'update') {
         const cur = current.get(`${p.existing!.qboType}:${p.existing!.qboId}`);
         if (!cur) {
@@ -379,13 +429,13 @@ export async function importTransactions(deps: EngineDeps, txns: NormalizedTrans
           continue;
         }
         if (options.dryRun) {
-          decide(p.idx, { status: 'would_update', warnings, qbo_type: built.qboType, qbo_id: p.existing!.qboId, doc_number: built.docNumber, amount: built.amount, message: `would update ${built.qboType} ${p.existing!.qboId}` });
+          decide(p.idx, { status: 'would_update', warnings, qbo_type: built.qboType, qbo_id: p.existing!.qboId, doc_number: built.docNumber, amount: built.amount, message: `would update ${built.qboType} ${p.existing!.qboId}${tail}` });
           continue;
         }
         ops.push({ p, built: r, docNumber: built.docNumber, op: { bId: `r${p.idx + 1}`, operation: 'update', entity: built.qboType, payload: stampForUpdate(built.qboType, cur, built.payload), label: p.txn.source_id } });
       } else {
         if (options.dryRun) {
-          decide(p.idx, { status: 'would_create', warnings, qbo_type: built.qboType, doc_number: built.docNumber, amount: built.amount, message: `would create ${built.qboType}` });
+          decide(p.idx, { status: 'would_create', warnings, qbo_type: built.qboType, doc_number: built.docNumber, amount: built.amount, message: `would create ${built.qboType}${tail}` });
           continue;
         }
         ops.push({ p, built: r, docNumber: built.docNumber, op: { bId: `r${p.idx + 1}`, operation: 'create', entity: built.qboType, payload: built.payload, label: p.txn.source_id } });
@@ -423,10 +473,10 @@ export async function importTransactions(deps: EngineDeps, txns: NormalizedTrans
             txn_type: o.p.txn.txn_type, qbo_type: o.op.entity, qbo_id: qboId, sync_token: e.SyncToken ?? null,
             doc_number: docNumber ?? null, txn_date: o.p.txn.txn_date, amount: o.built.built.amount, status,
             payload_hash: o.p.hash,
-            message: o.p.mode === 'update' ? `updated by run ${options.runId}` : null,
+            message: [o.p.mode === 'update' ? `updated by run ${options.runId}` : null, o.built.built.summary ?? null].filter(Boolean).join(' — ') || null,
           });
           const suffixed = o.docNumber && o.docNumber !== o.built.built.docNumber ? [`DocNumber changed to "${o.docNumber}" (the original was a duplicate, QBO code 6140)`] : [];
-          decide(o.p.idx, { status, warnings: [...warnings, ...suffixed], qbo_type: o.op.entity, qbo_id: qboId, doc_number: docNumber ?? undefined, amount: o.built.built.amount, message: o.p.mode === 'update' ? `updated ${o.op.entity} ${qboId}` : undefined });
+          decide(o.p.idx, { status, warnings: [...warnings, ...suffixed], qbo_type: o.op.entity, qbo_id: qboId, doc_number: docNumber ?? undefined, amount: o.built.built.amount, message: o.p.mode === 'update' ? `updated ${o.op.entity} ${qboId}${o.built.built.summary ? ` — ${o.built.built.summary}` : ''}` : (o.built.built.summary ? `created ${o.op.entity} ${qboId} ${o.built.built.amount.toFixed(2)} — ${o.built.built.summary}` : undefined) });
           continue;
         }
         const isDup = String(r.fault?.code ?? '') === '6140' || /duplicate document number/i.test(`${r.fault?.message ?? ''} ${r.fault?.detail ?? ''}`);

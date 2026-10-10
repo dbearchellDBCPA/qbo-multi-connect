@@ -83,7 +83,7 @@ Idempotency has three layers:
   "payment_method": "Check",              // Expense: Cash | Check | CreditCard; BillPayment: Check | CreditCard
   "check_number": "5001",                 // Check / BillPayment → DocNumber; Payment → PaymentRefNum
   "transfer_to_account_number": "1010",   // Transfer (or transfer_to_account_name)
-  "amount": 1000.00,                      // Transfer amount; Payment/BillPayment total if > sum of linked
+  "amount": 1000.00,                      // Transfer amount; Payment total if > sum of linked; BillPayment total if > net (bills − credits), 0 allowed
   "due_date": "2024-08-14",               // Bill / Invoice
   "terms": "Net 30"                       // Bill / Invoice, by name
 }
@@ -279,3 +279,22 @@ npm run sandbox:import -- --url https://<sandbox-host>/mcp --key <api key> \
 
 The names and items the plan creates are prefixed (`ZZI …`). QBO cannot
 delete names or items, so deactivate them in the sandbox if you want them gone.
+
+## BillPayment: applying vendor credits
+
+A BillPayment row can apply VendorCredits (and A/P JournalEntry credits) to Bills, including a **$0 payment** when the credits fully cover the bills.
+
+- Each `linked[]` target's type comes from the import store (or from a `qbo:<Type>:<Id>` reference): `Bill` is a bill; `VendorCredit` and `JournalEntry` are credits.
+- **TotalAmt = Σ linked Bill amounts − Σ linked credit amounts.** `amount`, if given, is validated against that net figure (it may be more, for an unapplied overpayment, never less). `amount: 0` is valid.
+- Order matters: a credit applies to the **nearest preceding Bill** in `linked[]`. The normal contract is one row per bill: the Bill first, then its credits.
+- Rejected when: a credit comes before any Bill; credits on a bill exceed that bill's linked amount; total credits exceed total bills; or a VendorCredit's applied amount exceeds its remaining `Balance` in QBO (read live; usage accumulates across rows in the same call).
+- PayType Check still needs the bank `account_number` (CheckPayment.BankAccountRef); CreditCard needs the card account (CreditCardPayment.CCAccountRef).
+- QBO payload: one Line per Bill (`Amount` = the bill's linked amount, `LinkedTxn` = the Bill) followed by one Line per credit (`Amount` = credit applied, `LinkedTxn` = the VendorCredit/JournalEntry). This is how QBO itself represents credits applied in a bill payment (Intuit "Manage linked transactions"; a single Line carrying both a Bill and a VendorCredit LinkedTxn is not how QBO returns them).
+- `linked[]` also accepts `"qbo:Bill:10303"`, `"qbo:VendorCredit:10448"`, `"qbo:JournalEntry:<Id>"` for transactions that were not imported through the store.
+- Dry run reports e.g. `would create BillPayment 0.00 — applies 594.00 of credit 274856 to bill 275459`; the import store row keeps txn_type BillPayment, amount 0.00, and the applied credits in its message.
+
+```jsonc
+{ "source_id": "cleanup:apply-vc-274856-to-275459", "txn_type": "BillPayment", "txn_date": "2026-10-07",
+  "entity": { "name": "Boston Scientific Corporation", "type": "Vendor" }, "account_number": "10100", "payment_method": "Check",
+  "linked": [{ "source_id": "netsuite:275459", "amount": 594 }, { "source_id": "netsuite:274856", "amount": 594 }] }
+```
