@@ -35,12 +35,23 @@ export interface SqlExecutor {
   exec(sql: string): Promise<void>;
 }
 
+/** Outcome of withLock: the work ran, or another holder had the lock and it was skipped. */
+export type LockOutcome<T> = { acquired: true; result: T } | { acquired: false };
+
 export interface SqlDriver extends SqlExecutor {
   /**
    * Run `fn` inside a transaction. Committed when it resolves, rolled back
    * when it rejects. A transaction started inside another joins the outer one.
    */
   transaction<T>(fn: (tx: SqlExecutor) => Promise<T>): Promise<T>;
+  /**
+   * Run `fn` only if a named, database-wide lock can be taken right now;
+   * otherwise skip it and say so. This is how a job that must not run on two
+   * app replicas at once (the token refresh sweep) coordinates: Postgres
+   * uses an advisory lock, so whichever replica gets there first does the
+   * work. SQLite is single-process, so the lock is always free.
+   */
+  withLock<T>(name: string, fn: () => Promise<T>): Promise<LockOutcome<T>>;
   /** Release the connection(s). Safe to call more than once. */
   close(): Promise<void>;
 }

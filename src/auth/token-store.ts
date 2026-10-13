@@ -1,6 +1,7 @@
 import { ConnectionDatabase } from '../db/index.js';
 import { encrypt, decrypt } from '../crypto/encrypt.js';
 import { parseDbTimestamp } from '../db/time.js';
+import type { LockOutcome } from '../db/driver.js';
 import type {
   Connection,
   ConnectionRecord,
@@ -116,6 +117,13 @@ export class TokenStore {
   async getRevivableConnections(): Promise<Connection[]> {
     const records = await this.db.getRevivableConnections();
     return records.map(record => this.decryptConnection(record));
+  }
+
+  /**
+   * Run `fn` only if the named database-wide lock is free (see SqlDriver.withLock).
+   */
+  async withLock<T>(name: string, fn: () => Promise<T>): Promise<LockOutcome<T>> {
+    return this.db.driver.withLock(name, fn);
   }
 
   /**

@@ -8,9 +8,12 @@ import type { BrokenConnection, BrokenConnectionNotifier } from '../alerts/conne
 // for the same realm race: the loser persists a token Intuit has already
 // revoked, knocking the connection offline until the next daemon tick. This map
 // collapses concurrent callers onto a single refresh per realm.
-// NOTE: this guards races within one process; if you scale to multiple
-// instances, refreshes can still race across instances.
+// Across processes, the daemon's sweep takes a database-wide lock (see
+// RefreshDaemon.checkAndRefresh), so only one replica sweeps at a time.
 const inFlightRefreshes = new Map<string, Promise<void>>();
+
+/** The lock every replica's refresh daemon competes for. */
+export const REFRESH_SWEEP_LOCK = 'qbo-multi-connect:refresh-sweep';
 
 /**
  * Refresh tokens for a specific connection
@@ -153,6 +156,22 @@ export class RefreshDaemon {
    * finally report whatever is definitively broken to the notifier.
    */
   private async checkAndRefresh(): Promise<void> {
+    // One sweep at a time across every replica: Intuit rotates refresh
+    // tokens and rejects a reused one, so two replicas refreshing the same
+    // company would knock it offline. Whoever holds the lock sweeps; the
+    // others skip this tick.
+    let outcome;
+    try {
+      outcome = await this.tokenStore.withLock(REFRESH_SWEEP_LOCK, () => this.sweep());
+    } catch (error) {
+      console.error('Error taking the refresh sweep lock:', error);
+      return;
+    }
+    if (!outcome.acquired) console.log('Refresh sweep skipped: another replica is sweeping');
+  }
+
+  /** The actual sweep: refresh, revive, alert. */
+  private async sweep(): Promise<void> {
     try {
       const expiringConnections = await this.tokenStore.getConnectionsExpiringSoon(
         this.refreshThresholdMinutes

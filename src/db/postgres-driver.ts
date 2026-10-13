@@ -3,6 +3,7 @@ import {
   normalizeParams,
   toPostgresPlaceholders,
   type DriverInit,
+  type LockOutcome,
   type SqlDriver,
   type SqlExecutor,
   type SqlParams,
@@ -156,6 +157,29 @@ export class PostgresDriver implements SqlDriver {
         /* the connection is already gone; the error below is the real one */
       }
       throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Session-level advisory lock on a dedicated connection: pg_try_advisory_lock
+   * never blocks, and the lock is released on the same connection (or by
+   * the server if the process dies) — exactly the "one replica sweeps at a
+   * time" guarantee the refresh daemon needs. Locks are database-wide, not
+   * schema-scoped, so the name should be unique to the job.
+   */
+  async withLock<T>(name: string, fn: () => Promise<T>): Promise<LockOutcome<T>> {
+    await this.ready;
+    const client = await this.pool.connect();
+    try {
+      const { rows } = await client.query('SELECT pg_try_advisory_lock(hashtext($1)) AS acquired', [name]);
+      if (!rows[0]?.acquired) return { acquired: false };
+      try {
+        return { acquired: true, result: await fn() };
+      } finally {
+        await client.query('SELECT pg_advisory_unlock(hashtext($1))', [name]).catch(() => undefined);
+      }
     } finally {
       client.release();
     }

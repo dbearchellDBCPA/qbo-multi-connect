@@ -191,3 +191,37 @@ describe.skipIf(TEST_DIALECT !== 'sqlite')('adopting a SQLite database written b
     }
   });
 });
+
+describe(`withLock (${TEST_DIALECT})`, () => {
+  const drivers: SqlDriver[] = [];
+  const open = () => { const d = openTestDriver(); drivers.push(d); return d; };
+  afterEach(async () => { for (const d of drivers.splice(0)) await d.close(); });
+
+  it('runs the work and reports the outcome', async () => {
+    const d = open();
+    const outcome = await d.withLock(`t-${Math.random()}`, async () => 42);
+    expect(outcome).toEqual({ acquired: true, result: 42 });
+  });
+
+  it('releases the lock even when the work throws', async () => {
+    const d = open();
+    const name = `t-${Math.random()}`;
+    await expect(d.withLock(name, async () => { throw new Error('boom'); })).rejects.toThrow('boom');
+    expect((await d.withLock(name, async () => 'again')).acquired).toBe(true);
+  });
+
+  it.skipIf(TEST_DIALECT !== 'postgres')('lets only one holder in across connections, then frees it', async () => {
+    const a = open();
+    const b = open();
+    const name = `t-${Math.random()}`;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const first = a.withLock(name, async () => { await held; return 'a'; });
+    // While a holds it, b is told to skip rather than wait.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(await b.withLock(name, async () => 'b')).toEqual({ acquired: false });
+    release();
+    expect(await first).toEqual({ acquired: true, result: 'a' });
+    expect(await b.withLock(name, async () => 'b')).toEqual({ acquired: true, result: 'b' });
+  });
+});

@@ -1,7 +1,15 @@
 import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { normalizeParams, type DriverInit, type SqlDriver, type SqlExecutor, type SqlParams, type SqlRow } from './driver.js';
+import {
+  normalizeParams,
+  type DriverInit,
+  type LockOutcome,
+  type SqlDriver,
+  type SqlExecutor,
+  type SqlParams,
+  type SqlRow,
+} from './driver.js';
 
 /**
  * better-sqlite3 behind the async SqlDriver contract. The engine itself is
@@ -79,6 +87,12 @@ export class SqliteDriver implements SqlDriver {
     } finally {
       this.inTransaction = false;
     }
+  }
+
+  /** One process owns a SQLite file, so a named lock is always available. */
+  async withLock<T>(_name: string, fn: () => Promise<T>): Promise<LockOutcome<T>> {
+    await this.ready;
+    return { acquired: true, result: await fn() };
   }
 
   async close(): Promise<void> {
