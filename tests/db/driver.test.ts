@@ -25,10 +25,12 @@ describe(`SqlDriver (${TEST_DIALECT})`, () => {
 
   it('runs the baseline migration exactly once and records it', async () => {
     const d = open();
-    const rows = await d.all<{ name: string }>('SELECT name FROM schema_migrations ORDER BY name');
-    expect(rows.map((r) => r.name)).toEqual(['001_baseline']);
-    // Re-running the migrations against the same database is a no-op.
     const { runMigrations, loadMigrations } = await import('../../src/db/migrate.js');
+    const expected = loadMigrations(TEST_DIALECT, 'main').map((m) => m.name);
+    expect(expected[0]).toBe('001_baseline');
+    const rows = await d.all<{ name: string }>('SELECT name FROM schema_migrations ORDER BY name');
+    expect(rows.map((r) => r.name)).toEqual(expected);
+    // Re-running the migrations against the same database is a no-op.
     const applied = await runMigrations(d, loadMigrations(TEST_DIALECT, 'main'));
     expect(applied).toEqual([]);
   });
@@ -83,6 +85,7 @@ describe(`SqlDriver (${TEST_DIALECT})`, () => {
     const touched = (await db.getUserById(id))!;
     expect(touched.last_used_at).toMatch(/Z$/);
     expect(touched.updated_at).toBe(user.updated_at); // a touch is not an administrative change
+    await new Promise((resolve) => setTimeout(resolve, 5)); // past the millisecond the row was created in
     await db.updateUser(id, { name: 'Janet' });
     const renamed = (await db.getUserById(id))!;
     expect(new Date(renamed.updated_at).getTime()).toBeGreaterThanOrEqual(new Date(user.updated_at).getTime());
@@ -154,9 +157,15 @@ describe.skipIf(TEST_DIALECT !== 'sqlite')('adopting a SQLite database written b
       raw.close();
 
       const db = new ConnectionDatabase(path);
-      // The migration ran once and is recorded.
-      const applied = await db.driver.all<{ name: string }>('SELECT name FROM schema_migrations');
-      expect(applied.map((r) => r.name)).toEqual(['001_baseline']);
+      // Every migration ran once and is recorded.
+      const { loadMigrations } = await import('../../src/db/migrate.js');
+      const expected = loadMigrations('sqlite', 'main').map((m) => m.name);
+      const applied = await db.driver.all<{ name: string }>('SELECT name FROM schema_migrations ORDER BY name');
+      expect(applied.map((r) => r.name)).toEqual(expected);
+      // The legacy rows now belong to the default firm.
+      expect((await db.getConnectionByRealmId('R1'))?.firm_id).toBe(1);
+      expect((await db.getAllUsers())[0].firm_id).toBe(1);
+      expect((await db.getFirmById(1))?.slug).toBe('default');
       // Triggers are gone; the app sets updated_at itself now.
       const triggers = await db.driver.all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'trigger'");
       expect(triggers).toEqual([]);
@@ -175,7 +184,7 @@ describe.skipIf(TEST_DIALECT !== 'sqlite')('adopting a SQLite database written b
       // Reopening applies nothing new.
       await db.close();
       const again = new ConnectionDatabase(path);
-      expect((await again.driver.all('SELECT name FROM schema_migrations')).length).toBe(1);
+      expect((await again.driver.all('SELECT name FROM schema_migrations')).length).toBe(expected.length);
       await again.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });

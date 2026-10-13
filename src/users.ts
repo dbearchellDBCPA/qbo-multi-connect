@@ -70,6 +70,7 @@ const DUMMY_PASSWORD_HASH = hashPassword('dummy-timing-equalizer');
 function toUser(record: UserRecord, realmIds: string[]): User {
   return {
     id: record.id,
+    firmId: record.firm_id,
     name: record.name,
     email: record.email,
     role: record.role,
@@ -123,6 +124,7 @@ export class UserService {
 
     const apiKey = generateApiKey();
     const id = await this.db.insertUser({
+      firmId: input.firmId,
       name,
       email: input.email?.trim() || null,
       role: input.role ?? 'member',
@@ -145,8 +147,9 @@ export class UserService {
     return toUser(record, await this.db.getUserRealms(id));
   }
 
-  async list(): Promise<User[]> {
-    const records = await this.db.getAllUsers();
+  /** All users, or only one firm's. */
+  async list(firmId?: number): Promise<User[]> {
+    const records = await this.db.getAllUsers(firmId);
     return Promise.all(records.map(async (r) => toUser(r, await this.db.getUserRealms(r.id))));
   }
 

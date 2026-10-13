@@ -102,12 +102,22 @@ export async function connectionsRoutes(
         return;
       }
 
+      // Plan limits and suspension are checked up front so the admin hears
+      // about them here, not after signing in to QuickBooks.
+      const allowed = await qboManager.firms.canConnect(scope.firmId);
+      if (!allowed.ok) {
+        await reply.code(403).send({ error: 'Forbidden', message: allowed.reason });
+        return;
+      }
+
       // Send Intuit back to the hostname the admin is actually using, so a
       // connection started on a custom domain finishes there too. Intuit
       // matches redirect_uri exactly, so this value must be registered on the
       // Intuit app — surfaced here so the UI can say which one to add.
+      // The signed state carries the firm, so the public callback files the
+      // company under the right account.
       const redirectUri = intuitRedirectUri(request);
-      const authUrl = qboManager.getAuthUrl(clientName, { redirectUri });
+      const authUrl = qboManager.getAuthUrl(clientName, { redirectUri }, scope.firmId, scope.userName);
 
       await reply.send({
         authUrl,
@@ -140,7 +150,7 @@ export async function connectionsRoutes(
         return;
       }
 
-      const connection = await qboManager.getConnection(realmId);
+      const connection = isRealmAllowed(scope, realmId) ? await qboManager.getConnection(realmId) : null;
       if (!connection) {
         await reply.code(404).send({
           error: 'Not Found',
@@ -171,7 +181,7 @@ export async function connectionsRoutes(
     try {
       const { realmId } = request.params;
 
-      const connection = await qboManager.getConnection(realmId);
+      const connection = isRealmAllowed(scope, realmId) ? await qboManager.getConnection(realmId) : null;
       if (!connection) {
         await reply.code(404).send({ error: 'Not Found', message: `Connection with realmId ${realmId} not found` });
         return;
@@ -183,7 +193,8 @@ export async function connectionsRoutes(
         return;
       }
 
-      const known = new Set((await qboManager.users.list()).map((u) => u.id));
+      // Only the company's own firm's members can be given access to it.
+      const known = new Set((await qboManager.users.list(connection.firmId)).map((u) => u.id));
       const unknown = userIds.filter((u) => !known.has(u as number));
       if (unknown.length > 0) {
         await reply.code(400).send({ error: 'Bad Request', message: `Unknown user IDs: ${unknown.join(', ')}` });
@@ -211,7 +222,7 @@ export async function connectionsRoutes(
     try {
       const { realmId } = request.params;
 
-      const connection = await qboManager.getConnection(realmId);
+      const connection = isRealmAllowed(scope, realmId) ? await qboManager.getConnection(realmId) : null;
       if (!connection) {
         await reply.code(404).send({
           error: 'Not Found',

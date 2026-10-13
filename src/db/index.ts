@@ -7,6 +7,8 @@ import type {
   ConnectionAlertRecord,
   ConnectionRecord,
   ConnectionStatus,
+  FirmRecord,
+  FirmStatus,
   NewConnection,
   TokenUpdate,
   UserAccessLevel,
@@ -39,6 +41,19 @@ async function legacySqliteBackfill(x: SqlExecutor): Promise<void> {
   if (!has('username')) await x.exec('ALTER TABLE users ADD COLUMN username TEXT');
   if (!has('password_hash')) await x.exec('ALTER TABLE users ADD COLUMN password_hash TEXT');
   if (!has('api_key_encrypted')) await x.exec('ALTER TABLE users ADD COLUMN api_key_encrypted TEXT');
+}
+
+/** The single-firm default every row belongs to until firms are introduced. */
+const DEFAULT_FIRM_ID = 1;
+
+/** Thrown when a QuickBooks company is already connected under a different firm. */
+export class ConnectionOwnedByAnotherFirmError extends Error {
+  constructor(public readonly realmId: string) {
+    super(
+      'This QuickBooks company is already connected to a different account on this server. Disconnect it there first, then connect it here.'
+    );
+    this.name = 'ConnectionOwnedByAnotherFirmError';
+  }
 }
 
 /** Open the driver for a DatabaseOptions value, with the main schema's migrations as its init step. */
@@ -86,11 +101,15 @@ export class ConnectionDatabase {
    * realm_id is unchanged, so member assignments (keyed on realm_id) are kept.
    */
   async upsertConnection(conn: NewConnection, encryptedAccessToken: string, encryptedRefreshToken: string): Promise<number> {
+    const firmId = conn.firmId ?? DEFAULT_FIRM_ID;
+    // A realm belongs to one firm. The upsert only refreshes a row owned by
+    // the same firm; a conflict with another firm's row updates nothing and
+    // is reported, never silently re-homed.
     const row = await this.sql.get<{ id: number }>(
       `INSERT INTO connections (
-         client_name, realm_id, access_token, refresh_token,
+         firm_id, client_name, realm_id, access_token, refresh_token,
          token_expiry, refresh_expiry, scopes, status, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
        ON CONFLICT (realm_id) DO UPDATE SET
          access_token = excluded.access_token,
          refresh_token = excluded.refresh_token,
@@ -99,8 +118,10 @@ export class ConnectionDatabase {
          scopes = excluded.scopes,
          status = 'active',
          updated_at = excluded.updated_at
+       WHERE connections.firm_id = excluded.firm_id
        RETURNING id`,
       [
+        firmId,
         conn.clientName,
         conn.realmId,
         encryptedAccessToken,
@@ -111,7 +132,8 @@ export class ConnectionDatabase {
         nowIso(),
       ]
     );
-    return row!.id;
+    if (!row) throw new ConnectionOwnedByAnotherFirmError(conn.realmId);
+    return row.id;
   }
 
   /**
@@ -132,11 +154,12 @@ export class ConnectionDatabase {
   async insertConnection(conn: NewConnection, encryptedAccessToken: string, encryptedRefreshToken: string): Promise<number> {
     const row = await this.sql.get<{ id: number }>(
       `INSERT INTO connections (
-         client_name, realm_id, access_token, refresh_token,
+         firm_id, client_name, realm_id, access_token, refresh_token,
          token_expiry, refresh_expiry, scopes
-       ) VALUES (?, ?, ?, ?, ?, ?, ?)
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        RETURNING id`,
       [
+        conn.firmId ?? DEFAULT_FIRM_ID,
         conn.clientName,
         conn.realmId,
         encryptedAccessToken,
@@ -153,12 +176,31 @@ export class ConnectionDatabase {
     return (await this.sql.get<ConnectionRecord>('SELECT * FROM connections WHERE realm_id = ?', [realmId])) ?? null;
   }
 
-  async getConnectionByClientName(clientName: string): Promise<ConnectionRecord | null> {
-    return (await this.sql.get<ConnectionRecord>('SELECT * FROM connections WHERE client_name = ?', [clientName])) ?? null;
+  /** Client names are unique only within a firm, so the lookup is firm-scoped. */
+  async getConnectionByClientName(clientName: string, firmId: number = DEFAULT_FIRM_ID): Promise<ConnectionRecord | null> {
+    return (
+      (await this.sql.get<ConnectionRecord>('SELECT * FROM connections WHERE firm_id = ? AND client_name = ?', [
+        firmId,
+        clientName,
+      ])) ?? null
+    );
   }
 
   async getAllConnections(): Promise<ConnectionRecord[]> {
     return this.sql.all<ConnectionRecord>('SELECT * FROM connections ORDER BY client_name');
+  }
+
+  async getConnectionsForFirm(firmId: number): Promise<ConnectionRecord[]> {
+    return this.sql.all<ConnectionRecord>('SELECT * FROM connections WHERE firm_id = ? ORDER BY client_name', [firmId]);
+  }
+
+  /** Every realm a firm has connected — the firm boundary for authorization. */
+  async getFirmRealmIds(firmId: number): Promise<string[]> {
+    const rows = await this.sql.all<{ realm_id: string }>(
+      'SELECT realm_id FROM connections WHERE firm_id = ? ORDER BY realm_id',
+      [firmId]
+    );
+    return rows.map((r) => r.realm_id);
   }
 
   async getConnectionsByStatus(status: ConnectionStatus): Promise<ConnectionRecord[]> {
@@ -218,6 +260,7 @@ export class ConnectionDatabase {
   // ── Users ────────────────────────────────────────────────────────────────
 
   async insertUser(fields: {
+    firmId?: number;
     name: string;
     email: string | null;
     role: UserRole;
@@ -229,10 +272,11 @@ export class ConnectionDatabase {
     keyPrefix: string;
   }): Promise<number> {
     const row = await this.sql.get<{ id: number }>(
-      `INSERT INTO users (name, email, role, access_level, username, password_hash, api_key_hash, api_key_encrypted, key_prefix)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO users (firm_id, name, email, role, access_level, username, password_hash, api_key_hash, api_key_encrypted, key_prefix)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        RETURNING id`,
       [
+        fields.firmId ?? DEFAULT_FIRM_ID,
         fields.name,
         fields.email,
         fields.role,
@@ -260,7 +304,11 @@ export class ConnectionDatabase {
     return (await this.sql.get<UserRecord>('SELECT * FROM users WHERE username = ?', [username])) ?? null;
   }
 
-  async getAllUsers(): Promise<UserRecord[]> {
+  /** All users, or only one firm's. */
+  async getAllUsers(firmId?: number): Promise<UserRecord[]> {
+    if (firmId !== undefined) {
+      return this.sql.all<UserRecord>('SELECT * FROM users WHERE firm_id = ? ORDER BY name', [firmId]);
+    }
     return this.sql.all<UserRecord>('SELECT * FROM users ORDER BY name');
   }
 
@@ -360,6 +408,45 @@ export class ConnectionDatabase {
   /** Remove a realm from every user's assignments (when a company is disconnected) */
   async removeRealmAssignments(realmId: string): Promise<void> {
     await this.sql.run('DELETE FROM user_clients WHERE realm_id = ?', [realmId]);
+  }
+
+  // ── Firms ────────────────────────────────────────────────────────────────
+
+  async insertFirm(fields: { name: string; slug: string; plan: string | null; companyLimit: number | null }): Promise<number> {
+    const row = await this.sql.get<{ id: number }>(
+      'INSERT INTO firms (name, slug, plan, company_limit) VALUES (?, ?, ?, ?) RETURNING id',
+      [fields.name, fields.slug, fields.plan, fields.companyLimit]
+    );
+    return row!.id;
+  }
+
+  async getFirmById(id: number): Promise<FirmRecord | null> {
+    return (await this.sql.get<FirmRecord>('SELECT * FROM firms WHERE id = ?', [id])) ?? null;
+  }
+
+  async getFirmBySlug(slug: string): Promise<FirmRecord | null> {
+    return (await this.sql.get<FirmRecord>('SELECT * FROM firms WHERE slug = ?', [slug])) ?? null;
+  }
+
+  async getAllFirms(): Promise<FirmRecord[]> {
+    return this.sql.all<FirmRecord>('SELECT * FROM firms ORDER BY id');
+  }
+
+  async updateFirm(
+    id: number,
+    fields: { name?: string; slug?: string; status?: FirmStatus; plan?: string | null; companyLimit?: number | null }
+  ): Promise<void> {
+    const sets: string[] = [];
+    const values: unknown[] = [];
+    if (fields.name !== undefined) { sets.push('name = ?'); values.push(fields.name); }
+    if (fields.slug !== undefined) { sets.push('slug = ?'); values.push(fields.slug); }
+    if (fields.status !== undefined) { sets.push('status = ?'); values.push(fields.status); }
+    if (fields.plan !== undefined) { sets.push('plan = ?'); values.push(fields.plan); }
+    if (fields.companyLimit !== undefined) { sets.push('company_limit = ?'); values.push(fields.companyLimit); }
+    if (sets.length === 0) return;
+    sets.push('updated_at = ?');
+    values.push(nowIso(), id);
+    await this.sql.run(`UPDATE firms SET ${sets.join(', ')} WHERE id = ?`, values);
   }
 
   // ── Sessions (dashboard sign-in) ─────────────────────────────────────────

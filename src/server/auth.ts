@@ -1,6 +1,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import type { QBOManager } from '../index.js';
 import type { Connection } from '../db/models.js';
+import { DEFAULT_FIRM_ID } from '../firms.js';
 
 /**
  * Resolved identity for a request. The master QBO_API_KEY and admin-role
@@ -12,7 +13,20 @@ export interface AuthScope {
   userId: number | null;
   userName: string;
   role: 'admin' | 'member';
+  /**
+   * The firm this request acts within: the user's firm, or for the master
+   * key the default firm unless an X-QBO-Firm header names another.
+   */
+  firmId: number;
+  /**
+   * True only for the master key with no firm selected: the platform
+   * operator sees every firm's companies and users.
+   */
+  allFirms: boolean;
+  /** Admins reach every company of their firm; members only their assignments. */
   allRealms: boolean;
+  /** The firm's connected realms — the outer boundary — or null when unrestricted (operator). */
+  firmRealmIds: Set<string> | null;
   realmIds: Set<string>;
   /**
    * Whether the key may reach QuickBooks write tools. Read-only members get
@@ -24,7 +38,8 @@ export interface AuthScope {
 }
 
 export function isRealmAllowed(scope: AuthScope, realmId: string): boolean {
-  return scope.allRealms || scope.realmIds.has(realmId);
+  if (scope.allRealms) return scope.firmRealmIds ? scope.firmRealmIds.has(realmId) : true;
+  return scope.realmIds.has(realmId);
 }
 
 function safeEqual(a: string, b: string): boolean {
@@ -61,16 +76,52 @@ export async function resolveAuth(
   qboManager: QBOManager,
   masterApiKey: string,
   authHeader: string | undefined,
-  queryKey?: unknown
+  queryKey?: unknown,
+  options: {
+    /** Master key only: act within this firm (X-QBO-Firm). Omit to see every firm. */
+    masterFirmId?: number | null;
+  } = {}
 ): Promise<AuthScope | null> {
+  const userScope = async (user: {
+    id: number;
+    name: string;
+    role: 'admin' | 'member';
+    accessLevel: 'read' | 'read_write';
+    firmId: number;
+    realmIds: string[];
+  }): Promise<AuthScope> => {
+    const firmRealmIds = new Set(await qboManager.listConnections(user.firmId).then((cs) => cs.map((c) => c.realmId)));
+    return {
+      kind: 'user',
+      userId: user.id,
+      userName: user.name,
+      role: user.role,
+      firmId: user.firmId,
+      allFirms: false,
+      allRealms: user.role === 'admin',
+      firmRealmIds,
+      // Assignments are made within the firm; the intersection guards a stale row.
+      realmIds: new Set(user.realmIds.filter((r) => firmRealmIds.has(r))),
+      canWrite: user.role === 'admin' || user.accessLevel !== 'read',
+    };
+  };
+
   for (const presented of extractApiKeyCandidates(authHeader, queryKey)) {
     if (masterApiKey && safeEqual(presented, masterApiKey)) {
+      const selected = options.masterFirmId ?? null;
+      const firmRealmIds =
+        selected == null
+          ? null
+          : new Set((await qboManager.listConnections(selected)).map((c) => c.realmId));
       return {
         kind: 'master',
         userId: null,
         userName: 'Master key',
         role: 'admin',
+        firmId: selected ?? DEFAULT_FIRM_ID,
+        allFirms: selected == null,
         allRealms: true,
+        firmRealmIds,
         realmIds: new Set(),
         canWrite: true,
       };
@@ -80,32 +131,12 @@ export async function resolveAuth(
     // workspace connector authenticates each member individually this way.
     const oauthUserId = (await qboManager.oauth.verifyAccessToken(presented))?.userId;
     const oauthUser = oauthUserId != null ? await qboManager.users.get(oauthUserId) : null;
-    if (oauthUser && oauthUser.status === 'active') {
-      return {
-        kind: 'user',
-        userId: oauthUser.id,
-        userName: oauthUser.name,
-        role: oauthUser.role,
-        allRealms: oauthUser.role === 'admin',
-        realmIds: new Set(oauthUser.realmIds),
-        canWrite: oauthUser.role === 'admin' || oauthUser.accessLevel !== 'read',
-      };
-    }
+    if (oauthUser && oauthUser.status === 'active') return userScope(oauthUser);
 
     // API key, then dashboard session token (issued by username/password
     // login) — both resolve to the same scope shape.
     const user = (await qboManager.users.findByApiKey(presented)) ?? (await qboManager.users.findBySessionToken(presented));
-    if (user) {
-      return {
-        kind: 'user',
-        userId: user.id,
-        userName: user.name,
-        role: user.role,
-        allRealms: user.role === 'admin',
-        realmIds: new Set(user.realmIds),
-        canWrite: user.role === 'admin' || user.accessLevel !== 'read',
-      };
-    }
+    if (user) return userScope(user);
   }
   return null;
 }

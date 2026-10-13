@@ -14,7 +14,9 @@ export async function authenticateRequest(
   masterApiKey: string
 ): Promise<AuthScope | null> {
   const queryKey = (request.query as Record<string, string> | undefined)?.key;
-  const scope = await resolveAuth(qboManager, masterApiKey, request.headers.authorization, queryKey);
+  const scope = await resolveAuth(qboManager, masterApiKey, request.headers.authorization, queryKey, {
+    masterFirmId: selectedFirm(request),
+  });
 
   if (!scope) {
     await reply.code(401).send({
@@ -25,6 +27,32 @@ export async function authenticateRequest(
   }
 
   return scope;
+}
+
+/**
+ * The firm a master-key request wants to act within (X-QBO-Firm: <id>).
+ * Ignored for user credentials, which always act within their own firm.
+ */
+function selectedFirm(request: FastifyRequest): number | null {
+  const raw = request.headers['x-qbo-firm'];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  if (!value) return null;
+  const id = Number.parseInt(value, 10);
+  return Number.isInteger(id) && id > 0 ? id : null;
+}
+
+/**
+ * Gate an endpoint to the master key (platform operator).
+ */
+export async function requireMaster(scope: AuthScope, reply: FastifyReply): Promise<boolean> {
+  if (scope.kind !== 'master') {
+    await reply.code(403).send({
+      error: 'Forbidden',
+      message: 'This action requires the master API key',
+    });
+    return false;
+  }
+  return true;
 }
 
 /**

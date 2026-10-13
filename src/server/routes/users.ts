@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { QBOManager } from '../../index.js';
 import type { UserAccessLevel, UserRole, UserStatus } from '../../db/models.js';
 import { authenticateRequest, requireAdmin } from '../middleware.js';
-import { isRealmAllowed } from '../auth.js';
+import { isRealmAllowed, type AuthScope } from '../auth.js';
 import { MIN_PASSWORD_LENGTH, isValidUsername, normalizeUsername } from '../../users.js';
 
 const VALID_ROLES: UserRole[] = ['admin', 'member'];
@@ -25,10 +25,23 @@ export async function usersRoutes(
   qboManager: QBOManager,
   masterApiKey: string
 ): Promise<void> {
-  // Resolve friendly client names for a user's assignments
-  async function realmNameMap(): Promise<Map<string, string>> {
-    const connections = await qboManager.listConnections();
+  // Resolve friendly client names for a user's assignments (the caller's firm only)
+  async function realmNameMap(scope: AuthScope): Promise<Map<string, string>> {
+    const connections = (await qboManager.listConnections()).filter((c) => isRealmAllowed(scope, c.realmId));
     return new Map(connections.map((c) => [c.realmId, c.clientName]));
+  }
+
+  // The users the caller may manage: their firm's, or everyone's for the operator.
+  async function manageableUsers(scope: AuthScope) {
+    return qboManager.users.list(scope.allFirms ? undefined : scope.firmId);
+  }
+
+  // A user the caller may manage, or null (other firms' users are invisible).
+  async function manageableUser(scope: AuthScope, id: number) {
+    if (!Number.isInteger(id)) return null;
+    const user = await qboManager.users.get(id);
+    if (!user) return null;
+    return scope.allFirms || user.firmId === scope.firmId ? user : null;
   }
 
   function withClientNames(user: Awaited<ReturnType<QBOManager['users']['list']>>[number], names: Map<string, string>) {
@@ -41,7 +54,7 @@ export async function usersRoutes(
     };
   }
 
-  async function validateBody(body: UserBody, reply: FastifyReply): Promise<boolean> {
+  async function validateBody(scope: AuthScope, body: UserBody, reply: FastifyReply): Promise<boolean> {
     if (body.role !== undefined && !VALID_ROLES.includes(body.role)) {
       await reply.code(400).send({ error: 'Bad Request', message: `role must be one of: ${VALID_ROLES.join(', ')}` });
       return false;
@@ -67,7 +80,9 @@ export async function usersRoutes(
         await reply.code(400).send({ error: 'Bad Request', message: 'realmIds must be an array of realm ID strings' });
         return false;
       }
-      const known = new Set((await qboManager.listConnections()).map((c) => c.realmId));
+      const known = new Set(
+        (await qboManager.listConnections()).filter((c) => isRealmAllowed(scope, c.realmId)).map((c) => c.realmId)
+      );
       const unknown = body.realmIds.filter((r) => !known.has(r));
       if (unknown.length > 0) {
         await reply.code(400).send({ error: 'Bad Request', message: `Unknown realm IDs: ${unknown.join(', ')}` });
@@ -87,12 +102,15 @@ export async function usersRoutes(
       .map((c) => ({ realmId: c.realmId, clientName: c.clientName }));
 
     const self = scope.userId != null ? await qboManager.users.get(scope.userId) : null;
+    const firm = await qboManager.firms.get(scope.firmId);
 
     await reply.send({
       kind: scope.kind,
       userId: scope.userId,
       name: scope.userName,
       role: scope.role,
+      firm: firm ? { id: firm.id, name: firm.name, slug: firm.slug } : null,
+      allFirms: scope.allFirms,
       allClients: scope.allRealms,
       canWrite: scope.canWrite,
       username: self?.username ?? null,
@@ -107,8 +125,8 @@ export async function usersRoutes(
     if (!scope) return;
     if (!(await requireAdmin(scope, reply))) return;
 
-    const names = await realmNameMap();
-    await reply.send((await qboManager.users.list()).map((u) => withClientNames(u, names)));
+    const names = await realmNameMap(scope);
+    await reply.send((await manageableUsers(scope)).map((u) => withClientNames(u, names)));
   });
 
   // Create a user (admin only). Returns the plaintext key exactly once.
@@ -122,10 +140,11 @@ export async function usersRoutes(
       await reply.code(400).send({ error: 'Bad Request', message: 'name is required' });
       return;
     }
-    if (!(await validateBody(body, reply))) return;
+    if (!(await validateBody(scope, body, reply))) return;
 
     try {
       const { user, apiKey } = await qboManager.users.create({
+        firmId: scope.firmId,
         name: body.name,
         email: body.email ?? null,
         role: body.role ?? 'member',
@@ -134,7 +153,7 @@ export async function usersRoutes(
         password: body.password ?? null,
         realmIds: body.realmIds ?? [],
       });
-      await reply.code(201).send({ user: withClientNames(user, await realmNameMap()), apiKey });
+      await reply.code(201).send({ user: withClientNames(user, await realmNameMap(scope)), apiKey });
     } catch (error) {
       // "already taken" and validation messages from the service are client
       // errors, not server faults.
@@ -164,7 +183,11 @@ export async function usersRoutes(
       await reply.code(400).send({ error: 'Bad Request', message: 'name cannot be empty' });
       return;
     }
-    if (!(await validateBody(body, reply))) return;
+    if (!(await manageableUser(scope, id))) {
+      await reply.code(404).send({ error: 'Not Found', message: `User ${id} not found` });
+      return;
+    }
+    if (!(await validateBody(scope, body, reply))) return;
 
     let updated;
     try {
@@ -192,7 +215,7 @@ export async function usersRoutes(
       ? (await qboManager.users.setClients(id, body.realmIds))!
       : updated;
 
-    await reply.send({ user: withClientNames(finalUser, await realmNameMap()) });
+    await reply.send({ user: withClientNames(finalUser, await realmNameMap(scope)) });
   });
 
   // Set or reset a member's dashboard password (admin only). Ends the
@@ -213,7 +236,7 @@ export async function usersRoutes(
         });
         return;
       }
-      if (!Number.isInteger(id) || !(await qboManager.users.setPassword(id, password))) {
+      if (!(await manageableUser(scope, id)) || !(await qboManager.users.setPassword(id, password))) {
         await reply.code(404).send({ error: 'Not Found', message: `User ${request.params.id} not found` });
         return;
       }
@@ -229,13 +252,13 @@ export async function usersRoutes(
     if (!(await requireAdmin(scope, reply))) return;
 
     const id = Number.parseInt(request.params.id, 10);
-    const result = Number.isInteger(id) ? await qboManager.users.rotateKey(id) : null;
+    const result = (await manageableUser(scope, id)) ? await qboManager.users.rotateKey(id) : null;
     if (!result) {
       await reply.code(404).send({ error: 'Not Found', message: `User ${request.params.id} not found` });
       return;
     }
 
-    await reply.send({ user: withClientNames(result.user, await realmNameMap()), apiKey: result.apiKey });
+    await reply.send({ user: withClientNames(result.user, await realmNameMap(scope)), apiKey: result.apiKey });
   });
 
   // Delete a user (admin only)
@@ -245,7 +268,7 @@ export async function usersRoutes(
     if (!(await requireAdmin(scope, reply))) return;
 
     const id = Number.parseInt(request.params.id, 10);
-    if (!Number.isInteger(id) || !(await qboManager.users.remove(id))) {
+    if (!(await manageableUser(scope, id)) || !(await qboManager.users.remove(id))) {
       await reply.code(404).send({ error: 'Not Found', message: `User ${request.params.id} not found` });
       return;
     }

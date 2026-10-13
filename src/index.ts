@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { TokenStore, CallbackServer, generateAuthUrl, RefreshDaemon } from './auth/index.js';
 import { QBOClient, ReportsAPI, JournalEntriesAPI, TransactionsAPI, AccountsAPI, CompanyAPI, BankingAPI, ListsAPI, AttachmentsAPI, BatchAPI } from './api/index.js';
 import { UserService } from './users.js';
+import { FirmService, DEFAULT_FIRM_ID } from './firms.js';
+import { signConnectState, verifyConnectState, type ConnectState } from './auth/connect-state.js';
 import { UploadTokenService } from './upload-tokens.js';
 import { OAuthServerService } from './oauth-server.js';
 import { ConnectionAlerts } from './alerts/connection-alerts.js';
@@ -78,13 +80,17 @@ export class QBOManager {
   public readonly uploadTokens: UploadTokenService;
   public readonly oauth: OAuthServerService;
   public readonly users: UserService;
+  public readonly firms: FirmService;
   public readonly alerts: ConnectionAlerts;
+  private readonly encryptionKey: string;
 
   constructor(config: QBOManagerConfig) {
     // Validate config
     if (!config.encryptionKey || config.encryptionKey.length !== 64) {
       throw new Error('encryptionKey must be 64 hex characters (32 bytes)');
     }
+
+    this.encryptionKey = config.encryptionKey;
 
     // Initialize database: Postgres when configured, else the SQLite file.
     this.db = new ConnectionDatabase(databaseOptions(config));
@@ -114,6 +120,7 @@ export class QBOManager {
     this.uploadTokens = new UploadTokenService(this.db);
     this.oauth = new OAuthServerService(this.db);
     this.users = new UserService(this.db, config.encryptionKey);
+    this.firms = new FirmService(this.db);
 
     // Email alerts for broken connections: off unless configured. The
     // transport is injectable so tests never reach the network.
@@ -140,11 +147,18 @@ export class QBOManager {
   }
 
   /**
-   * Generate OAuth authorization URL
+   * Generate the Intuit authorization URL for connecting a company. The
+   * state carries the firm (signed), so the public callback can tell which
+   * account the company belongs to and nobody can forge that.
    */
-  getAuthUrl(clientName: string, oauthOverride?: Partial<OAuthConfig>): string {
+  getAuthUrl(clientName: string, oauthOverride?: Partial<OAuthConfig>, firmId: number = DEFAULT_FIRM_ID, issuedBy?: string | null): string {
     const config = { ...this.oauthConfig, ...oauthOverride };
-    return generateAuthUrl(config, clientName);
+    return generateAuthUrl(config, signConnectState({ firmId, clientName, issuedBy }, this.encryptionKey));
+  }
+
+  /** Decode the state Intuit echoed back to the callback, or null when invalid/expired. */
+  verifyConnectState(state: string | undefined | null): ConnectState | null {
+    return verifyConnectState(state, this.encryptionKey);
   }
 
   /**
@@ -189,10 +203,10 @@ export class QBOManager {
   }
 
   /**
-   * List all connections
+   * List connections — every firm's, or one firm's.
    */
-  async listConnections(): Promise<Connection[]> {
-    return this.tokenStore.getAllConnections();
+  async listConnections(firmId?: number): Promise<Connection[]> {
+    return firmId === undefined ? this.tokenStore.getAllConnections() : this.tokenStore.getConnectionsForFirm(firmId);
   }
 
   /**
@@ -203,10 +217,10 @@ export class QBOManager {
   }
 
   /**
-   * Get connection by client name
+   * Get connection by client name (names are unique within a firm)
    */
-  async getConnectionByName(clientName: string): Promise<Connection | null> {
-    return this.tokenStore.getConnectionByName(clientName);
+  async getConnectionByName(clientName: string, firmId: number = DEFAULT_FIRM_ID): Promise<Connection | null> {
+    return this.tokenStore.getConnectionByName(clientName, firmId);
   }
 
   /**
@@ -261,6 +275,9 @@ export class QBOManager {
 export type { Connection, OAuthConfig, User, NewUser, UserUpdate, UserRole, UserStatus } from './db/models.js';
 export { QBOError } from './api/index.js';
 export { UserService, generateApiKey, hashApiKey } from './users.js';
+export { FirmService, DEFAULT_FIRM_ID } from './firms.js';
+export { ConnectionOwnedByAnotherFirmError } from './db/index.js';
+export type { Firm, NewFirm, FirmUpdate, FirmStatus } from './db/models.js';
 export { parseAlertsConfig } from './alerts/config.js';
 export type { AlertsConfig } from './alerts/config.js';
 export type { EmailSender, OutboundEmail } from './alerts/email.js';

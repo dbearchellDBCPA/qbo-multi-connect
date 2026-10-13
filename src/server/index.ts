@@ -11,11 +11,11 @@ import { usersRoutes } from './routes/users.js';
 import { authRoutes } from './routes/auth.js';
 import { oauthRoutes } from './routes/oauth.js';
 import { alertsRoutes } from './routes/alerts.js';
+import { firmsRoutes } from './routes/firms.js';
+import { connectCallbackRoutes } from './routes/connect-callback.js';
 import { registerMcpRoutes } from './mcp.js';
-import { renderCallbackPage } from './callback-page.js';
-import { exchangeCodeForTokens } from '../auth/oauth.js';
 import { resolveSecrets, logFreshSecrets } from '../bootstrap.js';
-import { intuitRedirectUri, resolvePublicUrl } from './public-url.js';
+import { resolvePublicUrl } from './public-url.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -104,119 +104,8 @@ async function startServer() {
     await reply.send({ status: 'ok', timestamp: new Date().toISOString() });
   });
 
-  // OAuth callback route
-  fastify.get('/callback', async (request, reply) => {
-    try {
-      const query = request.query as Record<string, string>;
-      const code = query.code;
-      const realmId = query.realmId;
-      const state = query.state;
-      const error = query.error;
-
-      if (error) {
-        await reply.code(400).type('text/html').send(
-          renderCallbackPage({
-            variant: 'error',
-            heading: 'Authorization failed',
-            message: `QuickBooks reported an error: ${error}`,
-          })
-        );
-        return;
-      }
-
-      if (!code || !realmId) {
-        await reply.code(400).type('text/html').send(
-          renderCallbackPage({
-            variant: 'error',
-            heading: 'Authorization incomplete',
-            message:
-              'This authorization link is missing required information. Please start the connection again from the dashboard.',
-          })
-        );
-        return;
-      }
-
-      // Extract client name from state parameter
-      const clientName = state || `Company-${realmId}`;
-
-      console.log('[CALLBACK] Got code:', code, 'realmId:', realmId, 'state:', state);
-
-      // Exchange code for tokens
-      let tokenResponse;
-      try {
-        console.log('[CALLBACK] Starting token exchange...');
-        // Intuit requires the token exchange to repeat the exact redirect_uri
-        // from the authorize call. It matches by construction: Intuit sent the
-        // browser to that URI, so this request arrived on that same host.
-        tokenResponse = await exchangeCodeForTokens(code as string, {
-          clientId: appConfig.intuit.clientId,
-          clientSecret: appConfig.intuit.clientSecret,
-          redirectUri: intuitRedirectUri(request),
-          environment: appConfig.intuit.environment,
-        });
-      } catch (tokenError: any) {
-        console.error('Token exchange error:', tokenError?.message || tokenError);
-        await reply.code(500).type('text/html').send(
-          renderCallbackPage({
-            variant: 'error',
-            heading: 'Connection failed',
-            message: `We couldn't complete the connection with QuickBooks: ${
-              tokenError?.message || 'an unknown error occurred during authorization.'
-            }`,
-          })
-        );
-        return;
-      }
-
-      const now = Date.now();
-      const newConnection = {
-        clientName,
-        realmId,
-        accessToken: tokenResponse.access_token,
-        refreshToken: tokenResponse.refresh_token,
-        tokenExpiry: new Date(now + tokenResponse.expires_in * 1000),
-        refreshExpiry: new Date(now + tokenResponse.x_refresh_token_expires_in * 1000),
-        scopes: ['com.intuit.quickbooks.accounting'],
-      };
-
-      // Store connection using QBOManager's token store
-      const tokenStore = (qboManager as any).tokenStore;
-      await tokenStore.storeConnection(newConnection);
-
-      // Return success page
-      await reply.type('text/html').send(
-        renderCallbackPage({
-          variant: 'success',
-          heading: 'Connection successful',
-          message: 'You’ve authorized',
-          company: clientName,
-          details: [
-            { label: 'Company ID', value: realmId, mono: true },
-            {
-              label: 'Authorization valid until',
-              value: newConnection.refreshExpiry.toLocaleDateString('en-US', {
-                year: 'numeric',
-                month: 'long',
-                day: 'numeric',
-              }),
-            },
-          ],
-          autoRedirect: true,
-        })
-      );
-    } catch (error) {
-      fastify.log.error(error);
-      await reply.code(500).type('text/html').send(
-        renderCallbackPage({
-          variant: 'error',
-          heading: 'Something went wrong',
-          message: `The connection couldn’t be completed: ${
-            error instanceof Error ? error.message : 'an unexpected error occurred.'
-          }`,
-        })
-      );
-    }
-  });
+  // Intuit OAuth callback (src/server/routes/connect-callback.ts)
+  await connectCallbackRoutes(fastify, qboManager, appConfig.intuit);
 
   // Register API routes
   await connectionsRoutes(fastify, qboManager, apiKey);
@@ -224,6 +113,7 @@ async function startServer() {
   await usersRoutes(fastify, qboManager, apiKey);
   await authRoutes(fastify, qboManager, apiKey);
   await alertsRoutes(fastify, qboManager, apiKey);
+  await firmsRoutes(fastify, qboManager, apiKey);
   // OAuth 2.1 authorization server: lets one shared workspace connector
   // authenticate each team member individually.
   await oauthRoutes(fastify, qboManager);

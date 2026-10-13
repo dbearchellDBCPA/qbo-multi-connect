@@ -14,10 +14,61 @@ export interface TokenPair {
 }
 
 /**
+ * Firm status enumeration
+ */
+export type FirmStatus = 'active' | 'suspended';
+
+/**
+ * Firm (tenant) raw row
+ */
+export interface FirmRecord {
+  id: number;
+  name: string;
+  slug: string;
+  status: FirmStatus;
+  plan: string | null;
+  company_limit: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Firm with camelCase fields
+ */
+export interface Firm {
+  id: number;
+  name: string;
+  slug: string;
+  status: FirmStatus;
+  plan: string | null;
+  /** Maximum connected companies, or null for unlimited. */
+  companyLimit: number | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface NewFirm {
+  name: string;
+  /** Derived from the name when omitted. */
+  slug?: string;
+  plan?: string | null;
+  companyLimit?: number | null;
+}
+
+export interface FirmUpdate {
+  name?: string;
+  slug?: string;
+  status?: FirmStatus;
+  plan?: string | null;
+  companyLimit?: number | null;
+}
+
+/**
  * Database connection record (encrypted tokens)
  */
 export interface ConnectionRecord {
   id: number;
+  firm_id: number;
   client_name: string;
   realm_id: string;
   access_token: string;  // encrypted
@@ -35,6 +86,7 @@ export interface ConnectionRecord {
  */
 export interface Connection {
   id: number;
+  firmId: number;
   clientName: string;
   realmId: string;
   accessToken: string;
@@ -51,6 +103,8 @@ export interface Connection {
  * New connection data (for insertion)
  */
 export interface NewConnection {
+  /** The firm the company belongs to. Defaults to the single-firm default (1). */
+  firmId?: number;
   clientName: string;
   realmId: string;
   accessToken: string;
@@ -92,6 +146,7 @@ export type UserAccessLevel = 'read' | 'read_write';
  */
 export interface UserRecord {
   id: number;
+  firm_id: number;
   name: string;
   email: string | null;
   role: UserRole;
@@ -112,6 +167,7 @@ export interface UserRecord {
  */
 export interface User {
   id: number;
+  firmId: number;
   name: string;
   email: string | null;
   role: UserRole;
@@ -131,6 +187,8 @@ export interface User {
  * New user data (for insertion)
  */
 export interface NewUser {
+  /** The firm the member belongs to. Defaults to the single-firm default (1). */
+  firmId?: number;
   name: string;
   email?: string | null;
   role?: UserRole;

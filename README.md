@@ -339,6 +339,42 @@ Existing databases are migrated automatically on startup (the new `users` and
 `user_clients` tables are created if missing). Nothing changes for
 single-user setups: the master key behaves exactly as before.
 
+## Firms (multi-tenant mode)
+
+Every connection and team member belongs to a **firm**. A fresh or upgraded
+installation has one firm, `Default` (id 1), and behaves exactly as before:
+the master key and every user act within it. The platform edition runs many
+firms on one deployment, and nothing in one firm is visible to another:
+
+- A firm admin reaches every company **of their firm**; a member only their
+  assignments (which can never include another firm's company).
+- Team management, client assignment, rename and disconnect are all checked
+  against the caller's firm — another firm's users and companies simply don't
+  exist (404).
+- A QuickBooks company belongs to one firm at a time. Connecting a company
+  that another firm already holds is refused (never silently re-homed);
+  reconnecting your own company refreshes it in place.
+- The **Connect a client** link carries the firm in a signed, one-hour
+  `state` ticket, so the public Intuit callback files the company under the
+  right account and a forged or expired ticket is rejected.
+- Firms can carry a plan and a company limit; the limit is enforced when the
+  link is minted and again at the callback, and a suspended firm cannot
+  connect anything.
+
+The **master key** is the platform operator: with no firm selected it sees
+every firm's companies and users. Send `X-QBO-Firm: <id>` to act within one
+firm (creating users or connect links for it, listing only its data).
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/firms` | List firms with connection and user counts (master key) |
+| `POST` | `/api/firms` | Create a firm (`{name, slug?, plan?, companyLimit?, admin?: {name, username, password, email?}}`); with `admin`, its first admin user is created and the key returned once (master key) |
+| `GET` | `/api/firms/:id` | One firm (master key) |
+| `PATCH` | `/api/firms/:id` | Update name, slug, status (`active`/`suspended`), plan or company limit (master key) |
+
+`/api/me` reports the caller's `firm` (`{id, name, slug}`) and `allFirms`
+(true only for the operator with no firm selected).
+
 ## REST API Endpoints
 
 All API endpoints require authentication via the `Authorization` header with your API key:

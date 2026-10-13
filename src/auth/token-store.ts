@@ -50,10 +50,16 @@ export class TokenStore {
   /**
    * Get connection by client name with decrypted tokens
    */
-  async getConnectionByName(clientName: string): Promise<Connection | null> {
-    const record = await this.db.getConnectionByClientName(clientName);
+  async getConnectionByName(clientName: string, firmId?: number): Promise<Connection | null> {
+    const record = await this.db.getConnectionByClientName(clientName, firmId);
     if (!record) return null;
     return this.decryptConnection(record);
+  }
+
+  /** One firm's connections with decrypted tokens */
+  async getConnectionsForFirm(firmId: number): Promise<Connection[]> {
+    const records = await this.db.getConnectionsForFirm(firmId);
+    return records.map((record) => this.decryptConnection(record));
   }
 
   /**
@@ -118,6 +124,7 @@ export class TokenStore {
   private decryptConnection(record: ConnectionRecord): Connection {
     return {
       id: record.id,
+      firmId: record.firm_id,
       clientName: record.client_name,
       realmId: record.realm_id,
       accessToken: decrypt(record.access_token, this.encryptionKey),
