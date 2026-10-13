@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { ConnectionDatabase } from '../db/index.js';
+import { dbTimestampToIso } from '../db/time.js';
 import type { AlertsConfig } from './config.js';
 import type { EmailSender } from './email.js';
 import { renderBrokenConnectionsEmail, renderTestEmail } from './templates.js';
@@ -81,7 +82,7 @@ export class ConnectionAlerts implements BrokenConnectionNotifier {
         ? {
             clientName: last.client_name,
             realmId: last.realm_id,
-            sentAt: sqliteTimestampToIso(last.sent_at),
+            sentAt: dbTimestampToIso(last.sent_at),
             recipients: last.recipients,
           }
         : null,
@@ -184,10 +185,4 @@ export class AlertsNotConfiguredError extends Error {
 
 function dedupeKey(item: BrokenConnection): string {
   return item.refreshExpiry.toISOString();
-}
-
-/** SQLite's CURRENT_TIMESTAMP is "YYYY-MM-DD HH:MM:SS" in UTC with no zone marker. */
-function sqliteTimestampToIso(value: string): string {
-  const parsed = new Date(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value) ? `${value.replace(' ', 'T')}Z` : value);
-  return Number.isNaN(parsed.getTime()) ? value : parsed.toISOString();
 }

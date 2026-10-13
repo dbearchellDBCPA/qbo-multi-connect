@@ -1,5 +1,6 @@
 import { randomBytes, createHash, scryptSync, timingSafeEqual } from 'node:crypto';
 import { encrypt, decrypt } from './crypto/encrypt.js';
+import { parseDbTimestamp } from './db/time.js';
 import type { ConnectionDatabase } from './db/index.js';
 import type { NewUser, User, UserRecord, UserUpdate } from './db/models.js';
 
@@ -66,14 +67,6 @@ export function verifyPassword(password: string, stored: string): boolean {
 // and "wrong password" take comparable time.
 const DUMMY_PASSWORD_HASH = hashPassword('dummy-timing-equalizer');
 
-/**
- * SQLite's CURRENT_TIMESTAMP / datetime('now') store "YYYY-MM-DD HH:MM:SS"
- * in UTC without a zone marker; new Date() would parse that as LOCAL time.
- */
-function parseUtcDate(value: string): Date {
-  return new Date(value.includes('T') ? value : `${value.replace(' ', 'T')}Z`);
-}
-
 function toUser(record: UserRecord, realmIds: string[]): User {
   return {
     id: record.id,
@@ -85,9 +78,9 @@ function toUser(record: UserRecord, realmIds: string[]): User {
     hasPassword: record.password_hash != null,
     keyPrefix: record.key_prefix,
     status: record.status,
-    createdAt: parseUtcDate(record.created_at),
-    updatedAt: parseUtcDate(record.updated_at),
-    lastUsedAt: record.last_used_at ? parseUtcDate(record.last_used_at) : null,
+    createdAt: parseDbTimestamp(record.created_at),
+    updatedAt: parseDbTimestamp(record.updated_at),
+    lastUsedAt: record.last_used_at ? parseDbTimestamp(record.last_used_at) : null,
     realmIds,
   };
 }
@@ -312,7 +305,7 @@ export class UserService {
     if (!record.api_key_encrypted) {
       await this.db.setUserKeyEncrypted(record.id, encrypt(apiKey, this.encryptionKey));
     }
-    const lastUsed = record.last_used_at ? parseUtcDate(record.last_used_at).getTime() : 0;
+    const lastUsed = record.last_used_at ? parseDbTimestamp(record.last_used_at).getTime() : 0;
     if (Date.now() - lastUsed > LAST_USED_THROTTLE_MS) {
       await this.db.touchUserLastUsed(record.id);
     }

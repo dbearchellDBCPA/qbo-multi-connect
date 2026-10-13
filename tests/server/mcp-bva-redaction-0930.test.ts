@@ -3,6 +3,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { QBOManager } from '../../src/index.js';
 import { registerMcpRoutes } from '../../src/server/mcp.js';
 import { redactUrl, redactUrlsInText, redactToolResult } from '../../src/server/redaction.js';
+import { testDatabaseConfig } from '../support/db.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 2026-09-30 (Northway Church, realm 9130353483179106):
@@ -80,7 +81,7 @@ describe('MCP get_budget_vs_actuals + attachment URL redaction (2026-09-30)', ()
   let querySpy: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
-    qbo = new QBOManager({ dbPath: ':memory:', encryptionKey: ENCRYPTION_KEY });
+    qbo = new QBOManager({ ...testDatabaseConfig(), encryptionKey: ENCRYPTION_KEY });
     await (qbo as any).tokenStore.storeConnection({
       clientName: CLIENT,
       realmId: REALM,

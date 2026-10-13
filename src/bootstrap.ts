@@ -30,9 +30,24 @@ function generateKey(): string {
  * tokens would become undecryptable. The persisted file lives on the same
  * volume as the database, so it survives redeploys exactly as the data does.
  */
-export function resolveSecrets(dbPath: string): ResolvedSecrets {
+export function resolveSecrets(dbPath: string, options: { requireEnv?: boolean } = {}): ResolvedSecrets {
   const dataDir = dirname(dbPath) || '.';
   const secretsPath = join(dataDir, '.qbo-secrets.json');
+
+  // A Postgres deployment has no data volume to persist generated secrets
+  // on, and a key that changed between restarts would orphan every stored
+  // QuickBooks token. So it must bring both secrets through the environment.
+  if (options.requireEnv) {
+    const missing = ['QBO_ENCRYPTION_KEY', 'QBO_API_KEY'].filter((name) => !process.env[name]?.trim());
+    if (missing.length > 0) {
+      throw new Error(
+        `${missing.join(' and ')} must be set when DATABASE_URL is used (secrets are not auto-generated on Postgres). ` +
+          `Generate values with: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))" — ` +
+          `for example QBO_ENCRYPTION_KEY=${generateKey()} QBO_API_KEY=${generateKey()}. ` +
+          'Never change QBO_ENCRYPTION_KEY once companies are connected.'
+      );
+    }
+  }
 
   let stored: { apiKey?: string; encryptionKey?: string } = {};
   if (existsSync(secretsPath)) {

@@ -26,11 +26,12 @@ try {
 // Resolve the encryption key the same way the server does (env → persisted
 // secrets file on the data volume), so the CLI reads the same database with a
 // matching key rather than a mismatched or empty one.
-const secrets = resolveSecrets(appConfig.db.path);
+const secrets = resolveSecrets(appConfig.db.path, { requireEnv: appConfig.db.url !== null });
 
 // Initialize QBOManager
 const qbo = new QBOManager({
   dbPath: appConfig.db.path,
+  database: appConfig.db.url ? { url: appConfig.db.url, ssl: appConfig.db.ssl } : undefined,
   encryptionKey: secrets.encryptionKey,
   clientId: appConfig.intuit.clientId,
   clientSecret: appConfig.intuit.clientSecret,

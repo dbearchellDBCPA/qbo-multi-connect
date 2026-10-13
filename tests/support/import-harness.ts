@@ -12,7 +12,9 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { QBOManager } from '../../src/index.js';
 import { registerMcpRoutes } from '../../src/server/mcp.js';
+import { IMPORT_STORE_FILENAME } from '../../src/db/import-store.js';
 import { FakeQboLedger, LEDGER_REALM, seedImportCompany, type FakeLedgerOptions } from './fake-qbo-ledger.js';
+import { testDatabaseConfig } from './db.js';
 
 export const IMPORT_CLIENT = 'Import Test Co';
 const MASTER_KEY = 'master-key-for-import-tests';
@@ -23,6 +25,10 @@ export interface ImportHarness {
   mcp: Client;
   ledger: FakeQboLedger;
   dataDir: string;
+  /** Which engine this harness runs on (QBO_TEST_DATABASE_URL selects Postgres). */
+  dialect: 'sqlite' | 'postgres';
+  /** Lose the import store: delete the SQLite file, or empty the Postgres table. */
+  wipeStore: () => Promise<void>;
   clock: { now: number; slept: number[] };
   batchLog: string[];
   call: (name: string, args: Record<string, unknown>) => Promise<string>;
@@ -38,7 +44,7 @@ export async function startImportHarness(opts: FakeLedgerOptions = {}): Promise<
     return url.hostname.endsWith('intuit.com') ? ledger.fetch(input, init) : realFetch(input, init);
   });
   const dataDir = mkdtempSync(join(tmpdir(), 'qbo-import-test-'));
-  const qbo = new QBOManager({ dbPath: ':memory:', encryptionKey: 'b'.repeat(64) });
+  const qbo = new QBOManager({ ...testDatabaseConfig(), encryptionKey: 'b'.repeat(64) });
   await (qbo as any).tokenStore.storeConnection({
     clientName: IMPORT_CLIENT,
     realmId: LEDGER_REALM,
@@ -75,12 +81,16 @@ export async function startImportHarness(opts: FakeLedgerOptions = {}): Promise<
     clock.now += 1000;
     return t;
   };
+  const wipeStore = async () => {
+    if (qbo.dialect === 'sqlite') rmSync(join(dataDir, IMPORT_STORE_FILENAME), { force: true });
+    else await qbo.importStoreHandle(dataDir).get().wipe();
+  };
   return {
-    app, qbo, mcp, ledger, dataDir, clock, batchLog, call,
+    app, qbo, mcp, ledger, dataDir, dialect: qbo.dialect, wipeStore, clock, batchLog, call,
     close: async () => {
       await mcp.close().catch(() => {});
       await app.close();
-      qbo.close();
+      await qbo.close();
       vi.unstubAllGlobals();
       rmSync(dataDir, { recursive: true, force: true });
     },

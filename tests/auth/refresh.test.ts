@@ -4,6 +4,7 @@ import { refreshConnectionTokens, RefreshDaemon } from '../../src/auth/refresh.j
 import { OAuthTokenError } from '../../src/auth/oauth.js';
 import { parseAlertsConfig } from '../../src/alerts/config.js';
 import type { EmailSender, OutboundEmail } from '../../src/alerts/email.js';
+import { testDatabaseConfig } from '../support/db.js';
 
 const ENCRYPTION_KEY = 'a'.repeat(64);
 const OAUTH = { clientId: 'cid', clientSecret: 'secret', redirectUri: 'http://x/callback' };
@@ -31,7 +32,7 @@ describe('refresh failure handling', () => {
   let qbo: QBOManager;
 
   beforeEach(async () => {
-    qbo = new QBOManager({ dbPath: ':memory:', encryptionKey: ENCRYPTION_KEY });
+    qbo = new QBOManager({ ...testDatabaseConfig(), encryptionKey: ENCRYPTION_KEY });
     const now = Date.now();
     await (qbo as any).tokenStore.storeConnection({
       clientName: 'Acme Corp',
@@ -113,7 +114,7 @@ describe('self-heal revival', () => {
   }
 
   beforeEach(() => {
-    qbo = new QBOManager({ dbPath: ':memory:', encryptionKey: ENCRYPTION_KEY });
+    qbo = new QBOManager({ ...testDatabaseConfig(), encryptionKey: ENCRYPTION_KEY });
   });
 
   afterEach(async () => {
@@ -263,7 +264,7 @@ describe('broken-connection email alerts', () => {
   beforeEach(() => {
     sender = new FakeSender();
     qbo = new QBOManager({
-      dbPath: ':memory:',
+      ...testDatabaseConfig(),
       encryptionKey: ENCRYPTION_KEY,
       alerts: ALERTS,
       emailSender: sender,
@@ -362,7 +363,7 @@ describe('broken-connection email alerts', () => {
   });
 
   it('is inert when the manager has no alert configuration', async () => {
-    const plain = new QBOManager({ dbPath: ':memory:', encryptionKey: ENCRYPTION_KEY });
+    const plain = new QBOManager({ ...testDatabaseConfig(), encryptionKey: ENCRYPTION_KEY });
     expect(plain.alerts.enabled).toBe(false);
     await plain.close();
   });

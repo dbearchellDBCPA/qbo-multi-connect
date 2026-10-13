@@ -214,12 +214,19 @@ export async function importTransactions(deps: EngineDeps, txns: NormalizedTrans
     itemNamePattern: options.itemNamePattern || DEFAULT_ITEM_NAME_PATTERN,
   };
 
+  // One round-trip to the store for everything this call can refer to: its
+  // own source_ids and every linked one. Later lookups read this map; rows
+  // recovered from QBO stamps during the run are added to it as they appear.
+  const storeLive = await deps.store.getLive(deps.realmId, [
+    ...txns.map((t) => t.source_id),
+    ...txns.flatMap((t) => (t.linked ?? []).map((l) => l.source_id)),
+  ]);
   const linkedTypeOf = (sid: string): string | undefined => {
     const direct = /^qbo:([A-Za-z]+):\d+$/.exec(sid);
     if (direct) return direct[1];
     const inCall = txns.find((x) => x.source_id === sid);
     if (inCall) return inCall.txn_type;
-    return deps.store.getLive(deps.realmId, [sid]).get(sid)?.qbo_type;
+    return storeLive.get(sid)?.qbo_type;
   };
   const results: ImportRowResult[] = txns.map((t, i) => ({
     row: i + 1,
@@ -245,9 +252,10 @@ export async function importTransactions(deps: EngineDeps, txns: NormalizedTrans
   });
 
   // ── Existing mappings: the store first, then the stamps already in QBO ──
-  const live = deps.store.getLive(deps.realmId, [...firstRow.keys()]);
   const existingFor = new Map<string, Existing>();
-  for (const [sid, rec] of live) {
+  for (const sid of firstRow.keys()) {
+    const rec = storeLive.get(sid);
+    if (!rec) continue;
     existingFor.set(sid, { record: rec, qboType: rec.qbo_type, qboId: rec.qbo_id, syncToken: rec.sync_token, txnDate: rec.txn_date, amount: rec.amount, docNumber: rec.doc_number, hash: rec.payload_hash, recovered: rec.payload_hash == null });
   }
   const unknown = [...firstRow.entries()].filter(([sid, i]) => !existingFor.has(sid) && !decided.has(i) && isValidDate(txns[i].txn_date));
@@ -275,13 +283,14 @@ export async function importTransactions(deps: EngineDeps, txns: NormalizedTrans
         const ex: Existing = { qboType: ent, qboId: String(e.Id), syncToken: e.SyncToken, txnDate: e.TxnDate, amount: qboTxnAmount(ent, e), docNumber: qboDocNumber(ent, e), hash: null, recovered: true };
         existingFor.set(sid, ex);
         if (!options.dryRun) {
-          deps.store.upsertLive({
+          await deps.store.upsertLive({
             client: deps.clientName, realm_id: deps.realmId, source_id: sid, run_id: options.runId,
             txn_type: txnTypeForQbo(ent, e) ?? txns[idx].txn_type, qbo_type: ent, qbo_id: String(e.Id), sync_token: e.SyncToken ?? null,
             doc_number: ex.docNumber, txn_date: e.TxnDate ?? null, amount: ex.amount, status: 'indexed', payload_hash: null,
             message: 'found in QBO by its [src:] stamp during import_transactions (not in the store)',
           });
-          ex.record = deps.store.getLive(deps.realmId, [sid]).get(sid);
+          ex.record = (await deps.store.getLive(deps.realmId, [sid])).get(sid);
+          if (ex.record) storeLive.set(sid, ex.record);
         }
       }
     }
@@ -289,19 +298,19 @@ export async function importTransactions(deps: EngineDeps, txns: NormalizedTrans
 
   // ── Classify every row ──
   const pending: Pending[] = [];
-  txns.forEach((t, idx) => {
-    if (decided.has(idx)) return;
+  for (const [idx, t] of txns.entries()) {
+    if (decided.has(idx)) continue;
     const hash = payloadHash(t);
     const ex = existingFor.get(t.source_id);
     const wantEntity = QBO_ENTITY_FOR[t.txn_type];
     if (!ex) {
       pending.push({ idx, txn: t, mode: 'create', hash });
-      return;
+      continue;
     }
     const base = { qbo_type: ex.qboType, qbo_id: ex.qboId, doc_number: ex.docNumber ?? undefined };
     if (ex.qboType !== wantEntity) {
       decide(idx, { ...base, status: 'failed', message: `source_id "${t.source_id}" is already imported as a ${ex.qboType} (Id ${ex.qboId})${ex.record ? `, ${ex.record.txn_type}` : ''}; it cannot become a ${t.txn_type} (${wantEntity}). Delete it first with delete_imported_transactions, or use a different source_id.` });
-      return;
+      continue;
     }
     let same = ex.hash != null && ex.hash === hash;
     if (ex.hash == null) {
@@ -309,22 +318,22 @@ export async function importTransactions(deps: EngineDeps, txns: NormalizedTrans
       const dateSame = !ex.txnDate || ex.txnDate === t.txn_date;
       const amtSame = ex.amount == null || cents(ex.amount) === cents(normalizedAmount(t, linkedTypeOf));
       same = dateSame && amtSame;
-      if (same && ex.record && !options.dryRun) deps.store.setPayloadHash(ex.record.id, hash);
+      if (same && ex.record && !options.dryRun) await deps.store.setPayloadHash(ex.record.id, hash);
     }
     if (same) {
       decide(idx, { ...base, status: 'unchanged', message: `already imported as ${ex.qboType} ${ex.qboId}${ex.recovered ? ' (matched by date and amount to the stamped QBO transaction)' : ''}` });
-      return;
+      continue;
     }
     if (options.onExisting === 'skip') {
       decide(idx, { ...base, status: 'skipped', message: `already imported as ${ex.qboType} ${ex.qboId}, but this row differs from what was imported. Re-run with on_existing="update" to apply the changes.` });
-      return;
+      continue;
     }
     if (options.onExisting === 'fail') {
       decide(idx, { ...base, status: 'failed', message: `already imported as ${ex.qboType} ${ex.qboId} and this row differs (on_existing="fail").` });
-      return;
+      continue;
     }
     pending.push({ idx, txn: t, mode: 'update', existing: ex, hash, firstRunId: ex.record?.run_id });
-  });
+  }
 
   // ── Link resolution for Payment / BillPayment ──
   const linkFor = (sid: string): LinkLookup => {
@@ -341,7 +350,7 @@ export async function importTransactions(deps: EngineDeps, txns: NormalizedTrans
       }
     }
     const rec = existingFor.get(sid) ?? (() => {
-      const l = deps.store.getLive(deps.realmId, [sid]).get(sid);
+      const l = storeLive.get(sid);
       return l ? { qboType: l.qbo_type, qboId: l.qbo_id } as Existing : undefined;
     })();
     if (rec) return { status: 'ready', qboId: rec.qboId, qboType: rec.qboType };
@@ -467,7 +476,7 @@ export async function importTransactions(deps: EngineDeps, txns: NormalizedTrans
           const qboId = String(e.Id ?? '');
           const docNumber = qboDocNumber(o.op.entity, e) ?? o.docNumber;
           const status: RowStatus = o.p.mode === 'update' ? 'updated' : 'created';
-          deps.store.upsertLive({
+          await deps.store.upsertLive({
             client: deps.clientName, realm_id: deps.realmId, source_id: o.p.txn.source_id,
             run_id: o.p.mode === 'update' ? (o.p.firstRunId ?? options.runId) : options.runId,
             txn_type: o.p.txn.txn_type, qbo_type: o.op.entity, qbo_id: qboId, sync_token: e.SyncToken ?? null,
@@ -892,7 +901,7 @@ export async function rebuildImportIndex(deps: EngineDeps, options: { startDate:
     out.scanned += stats.scanned;
     out.stamped += stats.stamped;
   }
-  const live = deps.store.getLive(deps.realmId, [...hits.keys()]);
+  const live = await deps.store.getLive(deps.realmId, [...hits.keys()]);
   for (const [sid, list] of hits) {
     if (list.length > 1) {
       out.duplicates.push({ source_id: sid, transactions: list.map((h) => `${h.entity} ${h.e.Id} (${h.e.TxnDate ?? '?'})`) });
@@ -908,7 +917,7 @@ export async function rebuildImportIndex(deps: EngineDeps, options: { startDate:
     const amount = qboTxnAmount(entity, e);
     out.newToStore.push({ source_id: sid, qbo_type: entity, qbo_id: String(e.Id), txn_date: e.TxnDate, amount });
     if (!options.dryRun) {
-      deps.store.upsertLive({
+      await deps.store.upsertLive({
         client: deps.clientName, realm_id: deps.realmId, source_id: sid, run_id: options.runId,
         txn_type: txnTypeForQbo(entity, e) ?? entity, qbo_type: entity, qbo_id: String(e.Id), sync_token: e.SyncToken ?? null,
         doc_number: qboDocNumber(entity, e), txn_date: e.TxnDate ?? null, amount, status: 'indexed', payload_hash: null,
@@ -917,7 +926,7 @@ export async function rebuildImportIndex(deps: EngineDeps, options: { startDate:
     }
   }
   // Store rows in range that QBO no longer shows with their stamp.
-  const inRange = deps.store.query({ realm_id: deps.realmId, start_date: options.startDate, end_date: options.endDate, include_deleted: false });
+  const inRange = await deps.store.query({ realm_id: deps.realmId, start_date: options.startDate, end_date: options.endDate, include_deleted: false });
   for (const rec of inRange) {
     if (!entities.includes(rec.qbo_type)) continue;
     const h = hits.get(rec.source_id);
@@ -947,7 +956,7 @@ export interface DeleteRowResult {
 }
 
 export async function deleteImportedTransactions(deps: EngineDeps, options: { runId?: string; sourceIds?: string[]; dryRun: boolean; force: boolean }): Promise<{ results: DeleteRowResult[]; counts: Record<DeleteStatus, number> }> {
-  const rows = deps.store.query({ realm_id: deps.realmId, run_id: options.runId, source_ids: options.sourceIds, include_deleted: false });
+  const rows = await deps.store.query({ realm_id: deps.realmId, run_id: options.runId, source_ids: options.sourceIds, include_deleted: false });
   const results: DeleteRowResult[] = [];
   if (options.sourceIds) {
     const have = new Set(rows.map((r) => r.source_id));
@@ -966,31 +975,31 @@ export async function deleteImportedTransactions(deps: EngineDeps, options: { ru
   const phaseOf = (r: ImportRecord) => (r.qbo_type === 'Payment' || r.qbo_type === 'BillPayment' ? 1 : 2);
   const ordered = rows.slice().sort((a, b) => phaseOf(a) - phaseOf(b) || b.id - a.id);
   const toDelete: Array<{ rec: ImportRecord; res: DeleteRowResult; op: BatchOp; phase: number }> = [];
-  ordered.forEach((rec, i) => {
+  for (const [i, rec] of ordered.entries()) {
     const res: DeleteRowResult = { source_id: rec.source_id, txn_type: rec.txn_type, qbo_type: rec.qbo_type, qbo_id: rec.qbo_id, txn_date: rec.txn_date, amount: rec.amount, status: 'failed', order: i + 1 };
     results.push(res);
     const e = current.get(`${rec.qbo_type}:${rec.qbo_id}`);
     if (!e) {
       res.status = 'not_found';
       res.message = `${rec.qbo_type} ${rec.qbo_id} is no longer in QBO${options.dryRun ? '; would mark the store row deleted' : '; store row marked deleted'}`;
-      if (!options.dryRun) deps.store.markDeleted(rec.id, 'not found in QBO at delete time (already deleted)');
-      return;
+      if (!options.dryRun) await deps.store.markDeleted(rec.id, 'not found in QBO at delete time (already deleted)');
+      continue;
     }
     const stamped = hasStamp(e.PrivateNote, rec.source_id);
     if (!stamped && !options.force) {
       res.status = 'refused';
       res.message = `refused: ${rec.qbo_type} ${rec.qbo_id}'s PrivateNote no longer carries [src:${rec.source_id}] — someone edited it in QBO. Check it, then pass force=true to delete anyway.`;
-      return;
+      continue;
     }
     const note = stamped ? '' : 'stamp missing — deleted because force=true';
     if (options.dryRun) {
       res.status = 'would_delete';
       res.message = note || undefined;
-      return;
+      continue;
     }
     res.message = note || undefined;
     toDelete.push({ rec, res, phase: phaseOf(rec), op: { bId: `d${rec.id}`, operation: 'delete', entity: rec.qbo_type, payload: { Id: String(e.Id), SyncToken: String(e.SyncToken ?? '0') }, label: rec.source_id } });
-  });
+  }
 
   for (const phase of [1, 2]) {
     const batch = toDelete.filter((d) => d.phase === phase);
@@ -1000,7 +1009,7 @@ export async function deleteImportedTransactions(deps: EngineDeps, options: { ru
       const r = res.get(d.op.bId);
       if (r?.ok) {
         d.res.status = 'deleted';
-        deps.store.markDeleted(d.rec.id, `deleted by delete_imported_transactions${options.force ? ' (force)' : ''}`);
+        await deps.store.markDeleted(d.rec.id, `deleted by delete_imported_transactions${options.force ? ' (force)' : ''}`);
       } else {
         d.res.status = 'failed';
         d.res.message = `QBO refused the delete: ${formatFault(r?.fault)}`;

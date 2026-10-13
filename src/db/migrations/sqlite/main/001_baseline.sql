@@ -1,28 +1,32 @@
--- QBO Connections Schema
+-- ── QBO Multi-Connect: connections database (SQLite) ─────────────────────────
+-- Baseline for the migration runner. Every statement is idempotent so a
+-- database created before the runner existed is adopted in place; the
+-- additive column backfills for those older databases run in code first
+-- (ConnectionDatabase.legacySqliteBackfill), because CREATE TABLE IF NOT
+-- EXISTS never adds columns to a table that already exists.
+--
+-- Timestamps are ISO-8601 UTC strings. Earlier versions relied on
+-- CURRENT_TIMESTAMP ("YYYY-MM-DD HH:MM:SS") and on triggers to bump
+-- updated_at; both are gone — the app writes every timestamp explicitly so
+-- the same statements run unchanged on Postgres.
+
 CREATE TABLE IF NOT EXISTS connections (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   client_name TEXT NOT NULL,
   realm_id TEXT NOT NULL UNIQUE,
   access_token TEXT NOT NULL,  -- encrypted
   refresh_token TEXT NOT NULL, -- encrypted
-  token_expiry DATETIME NOT NULL,
-  refresh_expiry DATETIME NOT NULL,
+  token_expiry TEXT NOT NULL,
+  refresh_expiry TEXT NOT NULL,
   scopes TEXT NOT NULL,
   status TEXT DEFAULT 'active' CHECK(status IN ('active', 'expired', 'revoked')),
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_connections_realm_id ON connections(realm_id);
 CREATE INDEX IF NOT EXISTS idx_connections_status ON connections(status);
 CREATE INDEX IF NOT EXISTS idx_connections_token_expiry ON connections(token_expiry);
-
--- Trigger to update updated_at timestamp
-CREATE TRIGGER IF NOT EXISTS update_connections_timestamp
-AFTER UPDATE ON connections
-BEGIN
-  UPDATE connections SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
-END;
 
 -- Team members. api_key_hash (SHA-256) authenticates requests;
 -- api_key_encrypted (AES-256-GCM, same key as the OAuth tokens) lets a
@@ -45,9 +49,9 @@ CREATE TABLE IF NOT EXISTS users (
   api_key_encrypted TEXT,
   key_prefix TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'disabled')),
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  last_used_at DATETIME
+  created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  last_used_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_api_key_hash ON users(api_key_hash);
@@ -55,15 +59,9 @@ CREATE INDEX IF NOT EXISTS idx_users_api_key_hash ON users(api_key_hash);
 -- keeps NULLs (users without dashboard credentials) out of the constraint.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username) WHERE username IS NOT NULL;
 
--- Only administrative changes bump updated_at; last_used_at touches on every
--- authenticated request must not clobber it. DROP+CREATE keeps databases
--- initialized with an earlier trigger definition consistent.
+-- updated_at used to be maintained by triggers; the app sets it now.
+DROP TRIGGER IF EXISTS update_connections_timestamp;
 DROP TRIGGER IF EXISTS update_users_timestamp;
-CREATE TRIGGER update_users_timestamp
-AFTER UPDATE OF name, email, role, access_level, username, password_hash, status, api_key_hash ON users
-BEGIN
-  UPDATE users SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
-END;
 
 -- Dashboard sign-in sessions (username/password login). Tokens are stored
 -- hashed; rows expire and are purged lazily on login.
@@ -71,9 +69,9 @@ CREATE TABLE IF NOT EXISTS sessions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   token_hash TEXT NOT NULL UNIQUE,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  expires_at DATETIME NOT NULL,
-  last_used_at DATETIME
+  created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  expires_at TEXT NOT NULL,
+  last_used_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
@@ -82,7 +80,7 @@ CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
 CREATE TABLE IF NOT EXISTS user_clients (
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   realm_id TEXT NOT NULL,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   PRIMARY KEY (user_id, realm_id)
 );
 
@@ -97,8 +95,8 @@ CREATE TABLE IF NOT EXISTS upload_tokens (
   token_hash TEXT NOT NULL UNIQUE,
   realm_id TEXT NOT NULL,
   issued_by TEXT,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  expires_at DATETIME NOT NULL
+  created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  expires_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_upload_tokens_hash ON upload_tokens(token_hash);
@@ -117,7 +115,7 @@ CREATE TABLE IF NOT EXISTS oauth_clients (
   redirect_uris TEXT NOT NULL,       -- JSON array
   grant_types TEXT NOT NULL,         -- JSON array
   scope TEXT,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 -- Short-lived authorization codes (PKCE S256 required).
@@ -129,8 +127,8 @@ CREATE TABLE IF NOT EXISTS oauth_auth_codes (
   code_challenge TEXT NOT NULL,
   scope TEXT,
   resource TEXT,
-  expires_at DATETIME NOT NULL,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  expires_at TEXT NOT NULL,
+  created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 -- Access and refresh tokens, stored hashed and bound to a user.
@@ -140,13 +138,20 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
   client_id TEXT NOT NULL,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   scope TEXT,
-  expires_at DATETIME NOT NULL,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  last_used_at DATETIME
+  expires_at TEXT NOT NULL,
+  created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  last_used_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_oauth_tokens_user ON oauth_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_oauth_codes_user ON oauth_auth_codes(user_id);
+
+-- Earlier versions wrote these expiries as "YYYY-MM-DD HH:MM:SS" and compared
+-- them against datetime('now'). Comparisons are now against ISO strings, so
+-- bring the stored values into the same shape once.
+UPDATE oauth_tokens SET expires_at = replace(expires_at, ' ', 'T') || '.000Z' WHERE expires_at NOT LIKE '%T%';
+UPDATE oauth_auth_codes SET expires_at = replace(expires_at, ' ', 'T') || '.000Z' WHERE expires_at NOT LIKE '%T%';
+UPDATE upload_tokens SET expires_at = replace(expires_at, ' ', 'T') || '.000Z' WHERE expires_at NOT LIKE '%T%';
 
 -- ── Email alerts for broken connections ──────────────────────────────────────
 -- One row per alert email the provider accepted. dedupe_key is the
@@ -161,7 +166,7 @@ CREATE TABLE IF NOT EXISTS connection_alerts (
   dedupe_key TEXT NOT NULL,
   recipients TEXT NOT NULL,
   provider_id TEXT,
-  sent_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  sent_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_connection_alerts_dedupe

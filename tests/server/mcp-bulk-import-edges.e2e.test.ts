@@ -1,8 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { startImportHarness, IMPORT_CLIENT, rowStatus, runLog, type ImportHarness } from '../support/import-harness.js';
-import { IMPORT_STORE_FILENAME } from '../../src/db/import-store.js';
 
 // Edge cases of the import tools over MCP against FakeQboLedger, each test
 // with its own source_id namespace on one shared company.
@@ -94,7 +92,7 @@ describe('bulk import — edge cases over MCP', () => {
 
   it('store lost and NOT rebuilt: a re-run still finds the stamped rows in QBO and writes nothing', async () => {
     await call('import_transactions', { transactions: [expense('e8:a', 33), expense('e8:b', 44)], run_id: 'e8' });
-    rmSync(join(h.dataDir, IMPORT_STORE_FILENAME), { force: true });
+    await h.wipeStore();
     const before = h.ledger.writes;
     const t = await call('import_transactions', { transactions: [expense('e8:a', 33), expense('e8:b', 44)], run_id: 'e8' });
     expect(rowStatus(t, 'e8:a')).toBe('unchanged');

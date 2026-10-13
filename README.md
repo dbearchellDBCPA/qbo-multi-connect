@@ -667,7 +667,10 @@ curl -H "Authorization: Bearer YOUR_API_KEY" \
 |----------|----------|---------|-------------|
 | `INTUIT_CLIENT_ID` | Yes | — | Intuit Developer App client ID |
 | `INTUIT_CLIENT_SECRET` | Yes | — | Intuit Developer App client secret |
-| `QBO_DB_PATH` | No | `./qbo-connections.db` | SQLite database path |
+| `QBO_DB_PATH` | No | `./qbo-connections.db` | SQLite database path (ignored when `DATABASE_URL` is set) |
+| `DATABASE_URL` | No | — | Postgres connection string. When set, everything (connections, users, OAuth state, the import store) lives in Postgres instead of SQLite. Requires `QBO_ENCRYPTION_KEY` and `QBO_API_KEY` to be set explicitly |
+| `QBO_DATABASE_SSL` | No | `default` | Postgres TLS: `default` (follow the URL), `no-verify` (encrypt, skip certificate check), `disable` |
+| `QBO_DATA_DIR` | No | SQLite file's directory | Where attachment staging, bulk-import run logs and (SQLite mode) the generated secrets live |
 | `QBO_ENCRYPTION_KEY` | No | auto-generated | 64-char hex key for token encryption (generated + persisted on first boot if unset) |
 | `QBO_API_KEY` | No | auto-generated | Admin API key (generated + printed once in logs on first boot if unset) |
 | `QBO_ENVIRONMENT` | No | `sandbox` | `sandbox` or `production` |
@@ -762,10 +765,21 @@ QuickBooks tokens; changing it orphans every connection.
 Deployment itself is covered up top ([Railway](#set-it-up-on-railway-from-scratch-no-coding)
 and [Docker](#running-it-elsewhere-docker)). Details worth knowing:
 
-- **Secrets self-provision.** If `QBO_API_KEY` and `QBO_ENCRYPTION_KEY` are
+- **Secrets self-provision (SQLite).** If `QBO_API_KEY` and `QBO_ENCRYPTION_KEY` are
   unset, the server generates them on first boot, persists them next to the
   SQLite DB, and prints the admin key once in the logs. Set them explicitly
   only if you manage secrets yourself.
+- **SQLite or Postgres.** The default is one SQLite file on the data volume,
+  which is all a single firm needs. Set `DATABASE_URL` and the same code runs
+  on Postgres (Railway's Postgres service provides the variable): the
+  connections, team, OAuth state and the bulk-import mapping store all move
+  into that database, and the data volume is only needed for attachment
+  staging and import run logs. On Postgres there is nowhere safe to persist
+  generated secrets, so `QBO_ENCRYPTION_KEY` and `QBO_API_KEY` must be set
+  explicitly — the server refuses to start otherwise and prints values you
+  can use. Schema changes apply themselves on boot through numbered
+  migrations under `src/db/migrations/<engine>/`, recorded in a
+  `schema_migrations` table; the test suite runs on both engines.
 - **The Dockerfile lives at `deploy/Dockerfile`** — kept out of the repo root
   on purpose, so Railway's auto-detection uses its default Nixpacks build for
   repo deploys. To make Railway build the image instead, set

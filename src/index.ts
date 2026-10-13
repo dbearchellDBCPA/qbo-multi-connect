@@ -1,4 +1,6 @@
-import { ConnectionDatabase } from './db/index.js';
+import { ConnectionDatabase, type DatabaseOptions, type PostgresDriverOptions, type SqlDialect } from './db/index.js';
+import { ImportStoreHandle, IMPORT_STORE_FILENAME } from './db/import-store.js';
+import { join } from 'node:path';
 import { TokenStore, CallbackServer, generateAuthUrl, RefreshDaemon } from './auth/index.js';
 import { QBOClient, ReportsAPI, JournalEntriesAPI, TransactionsAPI, AccountsAPI, CompanyAPI, BankingAPI, ListsAPI, AttachmentsAPI, BatchAPI } from './api/index.js';
 import { UserService } from './users.js';
@@ -9,8 +11,23 @@ import { disabledAlertsConfig, type AlertsConfig } from './alerts/config.js';
 import { ResendEmailSender, type EmailSender } from './alerts/email.js';
 import type { OAuthConfig, Connection } from './db/models.js';
 
+/** Postgres connection for the hosted platform. When set, dbPath is ignored. */
+export interface PostgresDatabaseConfig {
+  /** postgres://… (Railway: DATABASE_URL). */
+  url: string;
+  /** Schema to use instead of public — the test suite gives each test its own. */
+  schema?: string;
+  /** Drop the schema on close (disposable test schemas only). */
+  dropSchemaOnClose?: boolean;
+  /** TLS handling; see PostgresDriverOptions.ssl. */
+  ssl?: PostgresDriverOptions['ssl'];
+}
+
 export interface QBOManagerConfig {
-  dbPath: string;
+  /** SQLite file (':memory:' for an ephemeral database). Required unless `database` is set. */
+  dbPath?: string;
+  /** Postgres. Takes precedence over dbPath. */
+  database?: PostgresDatabaseConfig;
   encryptionKey: string;
   clientId?: string;
   clientSecret?: string;
@@ -22,6 +39,21 @@ export interface QBOManagerConfig {
   emailSender?: EmailSender;
   /** The dashboard's public address, for links in alert emails. */
   dashboardUrl?: () => string | null;
+}
+
+function databaseOptions(config: QBOManagerConfig): DatabaseOptions {
+  if (config.database) {
+    return {
+      postgres: {
+        connectionString: config.database.url,
+        schema: config.database.schema,
+        dropSchemaOnClose: config.database.dropSchemaOnClose,
+        ssl: config.database.ssl,
+      },
+    };
+  }
+  if (!config.dbPath) throw new Error('QBOManager needs dbPath (SQLite) or database (Postgres)');
+  return { sqlitePath: config.dbPath };
 }
 
 /**
@@ -54,8 +86,8 @@ export class QBOManager {
       throw new Error('encryptionKey must be 64 hex characters (32 bytes)');
     }
 
-    // Initialize database
-    this.db = new ConnectionDatabase(config.dbPath);
+    // Initialize database: Postgres when configured, else the SQLite file.
+    this.db = new ConnectionDatabase(databaseOptions(config));
     this.tokenStore = new TokenStore(this.db, config.encryptionKey);
 
     // OAuth configuration
@@ -89,6 +121,22 @@ export class QBOManager {
     const emailSender =
       config.emailSender ?? (alertsConfig.enabled ? new ResendEmailSender(alertsConfig.resendApiKey) : null);
     this.alerts = new ConnectionAlerts(this.db, alertsConfig, emailSender, config.dashboardUrl);
+  }
+
+  /** Which engine the connections database runs on. */
+  get dialect(): SqlDialect {
+    return this.db.dialect;
+  }
+
+  /**
+   * The bulk-import mapping store. On Postgres it shares this manager's
+   * database; on SQLite it is its own file in `dataDir` (next to the
+   * connections DB), so it can be deleted and rebuilt without touching
+   * tokens or users.
+   */
+  importStoreHandle(dataDir: string): ImportStoreHandle {
+    if (this.db.dialect === 'postgres') return ImportStoreHandle.forDriver(this.db.driver);
+    return ImportStoreHandle.forSqliteFile(join(dataDir, IMPORT_STORE_FILENAME));
   }
 
   /**

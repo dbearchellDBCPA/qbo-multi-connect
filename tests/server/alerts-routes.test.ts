@@ -4,6 +4,7 @@ import { QBOManager } from '../../src/index.js';
 import { alertsRoutes } from '../../src/server/routes/alerts.js';
 import { parseAlertsConfig, disabledAlertsConfig, type AlertsConfig } from '../../src/alerts/config.js';
 import { EmailSendError, type EmailSender, type OutboundEmail } from '../../src/alerts/email.js';
+import { testDatabaseConfig } from '../support/db.js';
 
 const ENCRYPTION_KEY = 'a'.repeat(64);
 const MASTER_KEY = 'master-key-for-tests';
@@ -32,7 +33,7 @@ describe('alerts routes', () => {
   async function build(config: AlertsConfig): Promise<void> {
     sender = new FakeSender();
     qbo = new QBOManager({
-      dbPath: ':memory:',
+      ...testDatabaseConfig(),
       encryptionKey: ENCRYPTION_KEY,
       alerts: config,
       emailSender: sender,

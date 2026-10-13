@@ -20,19 +20,31 @@ import { intuitRedirectUri, resolvePublicUrl } from './public-url.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+/** host:port/database of a connection string, never the credentials. */
+function describeDatabaseUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.hostname}${parsed.port ? `:${parsed.port}` : ''}${parsed.pathname}`;
+  } catch {
+    return 'DATABASE_URL';
+  }
+}
+
 async function startServer() {
   // Validate Intuit credentials (the only secrets that can't be generated).
   validateConfig();
 
   // Resolve the admin key + encryption key: env → persisted file → generate.
-  // A fresh instance self-provisions and prints the admin key once.
-  const secrets = resolveSecrets(appConfig.db.path);
+  // A fresh SQLite instance self-provisions and prints the admin key once;
+  // a Postgres deployment must set both in its environment.
+  const secrets = resolveSecrets(appConfig.db.path, { requireEnv: appConfig.db.url !== null });
   const apiKey = secrets.apiKey;
   logFreshSecrets(secrets);
 
   // Initialize QBOManager
   const qboManager = new QBOManager({
     dbPath: appConfig.db.path,
+    database: appConfig.db.url ? { url: appConfig.db.url, ssl: appConfig.db.ssl } : undefined,
     encryptionKey: secrets.encryptionKey,
     clientId: appConfig.intuit.clientId,
     clientSecret: appConfig.intuit.clientSecret,
@@ -217,8 +229,8 @@ async function startServer() {
   await oauthRoutes(fastify, qboManager);
 
   // Register MCP server at /mcp
-  await registerMcpRoutes(fastify, qboManager, apiKey, join(dirname(appConfig.db.path), 'attachments'), {
-    importDataDir: dirname(appConfig.db.path),
+  await registerMcpRoutes(fastify, qboManager, apiKey, join(appConfig.db.dataDir, 'attachments'), {
+    importDataDir: appConfig.db.dataDir,
   });
 
   // Start server
@@ -235,7 +247,10 @@ async function startServer() {
     console.log(`🔌 API:        http://localhost:${port}/api`);
     console.log(`🤖 MCP:        http://localhost:${port}/mcp`);
     console.log(`🔑 Auth:       Bearer ${apiKey.substring(0, 8)}...`);
-    console.log(`💾 Database:   ${appConfig.db.path}`);
+    console.log(
+      `💾 Database:   ${appConfig.db.url ? `Postgres (${describeDatabaseUrl(appConfig.db.url)})` : `SQLite ${appConfig.db.path}`}`
+    );
+    console.log(`📁 Data dir:   ${appConfig.db.dataDir} (attachments staging, import run logs)`);
     console.log(`🌍 Environment: ${appConfig.intuit.environment}`);
     const alerts = appConfig.alerts;
     if (alerts.enabled) {
@@ -284,5 +299,11 @@ process.on('unhandledRejection', (err) => {
   console.error('Unhandled rejection:', err);
 });
 
-// Start the server
-startServer();
+// Start the server. A failure here (missing Intuit credentials, missing
+// secrets on Postgres, unreachable database) must end the process with a
+// non-zero code so the host marks the deploy failed instead of leaving a
+// half-started server running.
+startServer().catch((error) => {
+  console.error(`\n❌ Startup failed: ${error instanceof Error ? error.message : error}\n`);
+  process.exit(1);
+});

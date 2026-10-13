@@ -7,6 +7,7 @@ import {
 } from '../../src/alerts/connection-alerts.js';
 import { parseAlertsConfig, disabledAlertsConfig } from '../../src/alerts/config.js';
 import { EmailSendError, type EmailSender, type OutboundEmail } from '../../src/alerts/email.js';
+import { testDatabaseConfig } from '../support/db.js';
 
 const ENCRYPTION_KEY = 'a'.repeat(64);
 const CONFIG = parseAlertsConfig({
@@ -42,7 +43,7 @@ describe('ConnectionAlerts', () => {
   const now = new Date('2026-09-18T15:04:00.000Z');
 
   beforeEach(() => {
-    qbo = new QBOManager({ dbPath: ':memory:', encryptionKey: ENCRYPTION_KEY });
+    qbo = new QBOManager({ ...testDatabaseConfig(), encryptionKey: ENCRYPTION_KEY });
     sender = new FakeSender();
     alerts = new ConnectionAlerts((qbo as any).db, CONFIG, sender, () => 'https://qbo.example.com', () => now);
   });

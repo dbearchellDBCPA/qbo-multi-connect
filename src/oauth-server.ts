@@ -1,5 +1,6 @@
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import type { ConnectionDatabase } from './db/index.js';
+import { parseDbTimestamp } from './db/time.js';
 
 export const AUTH_CODE_TTL_MS = 5 * 60 * 1000; // 5 minutes (spec: short-lived)
 export const ACCESS_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
@@ -17,7 +18,7 @@ function randomToken(prefix: string): string {
 }
 
 function sqlTime(date: Date): string {
-  return date.toISOString().replace('T', ' ').slice(0, 19);
+  return date.toISOString();
 }
 
 function safeEqual(a: string, b: string): boolean {
@@ -171,7 +172,7 @@ export class OAuthServerService {
   }): Promise<IssuedTokens> {
     const row = await this.db.consumeOAuthCode(hash(input.code)); // single-use
     if (!row) throw new Error('invalid_grant: authorization code not found or already used');
-    if (new Date(`${row.expires_at.replace(' ', 'T')}Z`).getTime() < Date.now()) {
+    if (parseDbTimestamp(row.expires_at).getTime() < Date.now()) {
       throw new Error('invalid_grant: authorization code expired');
     }
     if (row.client_id !== input.clientId) throw new Error('invalid_grant: code was issued to a different client');

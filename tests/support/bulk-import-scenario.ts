@@ -62,7 +62,7 @@ export interface ImportScenarioOptions {
   bulkCount?: number;
   log: (line: string) => void;
   /** Delete the server's import store file (local runs only). Omitted → step 6 runs verify-only. */
-  deleteStore?: () => void;
+  deleteStore?: () => void | Promise<void>;
   /** Called before the 400-row load (tests inject throttling here). */
   beforeBulk?: () => void;
   /** Called after each tool call with its name, args and reply (tests collect extra assertions). */
@@ -243,7 +243,7 @@ export async function runBulkImportScenario(call: ToolCaller, o: ImportScenarioO
   const range = { start_date: d(1), end_date: d(15) };
   let cleanupRuns = [`${P}-blocked`, `${P}-bad`];
   if (o.deleteStore) {
-    o.deleteStore();
+    await o.deleteStore();
     t = await tool('import_status', { run_id: runMain }, 'status-after-loss');
     check('6a store file gone: import_status finds nothing', /Matched: 0/.test(t), t);
     t = await tool('rebuild_import_index', { ...range, run_id: runMain }, 'rebuild');

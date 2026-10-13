@@ -135,8 +135,12 @@ Snapshot it on a schedule (Railway volume backups, or a cron that copies
 `qbo-connections.db`). Losing the volume means re-authorizing every company and
 losing the admin/encryption keys.
 
-For higher durability or many instances, migrating from SQLite to Postgres is
-the natural next step (out of scope here).
+For higher durability, run on Postgres instead: add a Postgres service, set
+`DATABASE_URL` on the app (plus explicit `QBO_ENCRYPTION_KEY` and
+`QBO_API_KEY`, which are not auto-generated in that mode) and the app stores
+everything there — the volume then only holds attachment staging and import
+run logs. Moving an existing SQLite instance is a one-time copy: the tokens
+stay encrypted with the same `QBO_ENCRYPTION_KEY`, so keep it identical.
 
 ---
 

@@ -10,6 +10,7 @@ import {
 import { QBOClient } from '../../src/api/client.js';
 import { QBOManager } from '../../src/index.js';
 import { companyRoutes } from '../../src/server/routes/company.js';
+import { testDatabaseConfig } from '../support/db.js';
 
 // ─── Content-type inference ──────────────────────────────────────────────────
 
@@ -186,7 +187,7 @@ describe('POST /api/company/:realmId/attachments', () => {
   let app: FastifyInstance;
 
   beforeEach(async () => {
-    qbo = new QBOManager({ dbPath: ':memory:', encryptionKey: ENCRYPTION_KEY });
+    qbo = new QBOManager({ ...testDatabaseConfig(), encryptionKey: ENCRYPTION_KEY });
     const future = new Date(Date.now() + 60 * 60 * 1000);
     const far = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
     await (qbo as any).tokenStore.storeConnection({
@@ -356,7 +357,7 @@ describe('UploadTokenService', () => {
   let qbo: QBOManager;
 
   beforeEach(() => {
-    qbo = new QBOManager({ dbPath: ':memory:', encryptionKey: ENCRYPTION_KEY });
+    qbo = new QBOManager({ ...testDatabaseConfig(), encryptionKey: ENCRYPTION_KEY });
   });
 
   afterEach(async () => {
@@ -374,9 +375,7 @@ describe('UploadTokenService', () => {
   it('rejects expired tokens', async () => {
     const { token } = await qbo.uploadTokens.issue('realm-1', 'David');
     // Force-expire the row
-    (qbo as any).db['db']
-      .prepare("UPDATE upload_tokens SET expires_at = datetime('now', '-1 minute')")
-      .run();
+    await (qbo as any).db.driver.run('UPDATE upload_tokens SET expires_at = ?', [new Date(Date.now() - 60_000).toISOString()]);
     expect(await qbo.uploadTokens.validate('realm-1', token)).toBe(false);
   });
 

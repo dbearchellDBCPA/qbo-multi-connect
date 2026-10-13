@@ -1,9 +1,10 @@
--- ── Bulk transaction-import mapping store ────────────────────────────────────
--- Lives in its OWN SQLite file (<data dir>/qbo-import-index.db, next to
--- QBO_DB_PATH), never inside the connections database: the import index can
--- be deleted and rebuilt from QBO (rebuild_import_index reads the
+-- ── Bulk transaction-import mapping store (SQLite) ───────────────────────────
+-- In SQLite mode this lives in its OWN file (<data dir>/qbo-import-index.db,
+-- next to QBO_DB_PATH), never inside the connections database: the import
+-- index can be deleted and rebuilt from QBO (rebuild_import_index reads the
 -- [src:<source_id>] stamp every imported transaction carries in PrivateNote)
--- without ever touching OAuth tokens, users or sessions.
+-- without ever touching OAuth tokens, users or sessions. On Postgres the same
+-- table lives in the main database (see migrations/postgres/main).
 --
 -- One row per (company, source_id, QBO transaction). Rows are never dropped:
 -- a rollback marks them status='deleted' and a later re-import adds a new
@@ -24,8 +25,8 @@ CREATE TABLE IF NOT EXISTS imported_transactions (
   status TEXT NOT NULL CHECK(status IN ('created', 'updated', 'indexed', 'deleted')),
   payload_hash TEXT,                 -- hash of the normalized input row; NULL when recovered by rebuild_import_index
   message TEXT,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 -- At most one LIVE mapping per source_id per company; deleted rows are history.

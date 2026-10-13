@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { QBOManager } from '../../src/index.js';
 import { registerMcpRoutes } from '../../src/server/mcp.js';
+import { testDatabaseConfig } from '../support/db.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Regression (2026-09-05, Erick Erickson, LLC): get_balance_sheet returned the
@@ -65,7 +66,7 @@ describe('MCP report tools — requested dates reach Intuit (2026-09-05)', () =>
   let querySpy: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
-    qbo = new QBOManager({ dbPath: ':memory:', encryptionKey: ENCRYPTION_KEY });
+    qbo = new QBOManager({ ...testDatabaseConfig(), encryptionKey: ENCRYPTION_KEY });
     const future = new Date(Date.now() + 60 * 60 * 1000);
     const farFuture = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
     await (qbo as any).tokenStore.storeConnection({

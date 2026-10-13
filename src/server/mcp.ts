@@ -8,7 +8,6 @@ import { resolveAuth, createScopedManager, type AuthScope, type ScopedQBOManager
 import { publicBaseUrl, resolvePublicUrl } from './public-url.js';
 import { registerImportTools } from './import-tools.js';
 import type { BatchRunnerOptions } from './qbo-batch.js';
-import { ImportStoreHandle, IMPORT_STORE_FILENAME } from '../db/import-store.js';
 import {
   qboSalesLinesToUpdateShape,
   qboBillLinesToUpdateShape,
@@ -109,7 +108,7 @@ import {
   DOC_NUMBER_DESCRIPTION,
 } from './entity-fields.js';
 import { readFile, readdir, stat } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname } from 'node:path';
 import {
   contentTypeForFile,
   supportedExtensions,
@@ -393,13 +392,14 @@ export async function registerMcpRoutes(
   attachmentsDir?: string,
   options: { importDataDir?: string; importRunnerOptions?: BatchRunnerOptions } = {}
 ): Promise<void> {
-  // Bulk-import mapping store + run logs live in the server's data directory
-  // (next to QBO_DB_PATH — the persistent /data volume on Railway), in their
-  // own SQLite file so nothing touches the connections DB.
+  // Bulk-import run logs live in the server's data directory (next to
+  // QBO_DB_PATH — the persistent /data volume on Railway). The mapping store
+  // is the manager's call: its own SQLite file in that directory, or the
+  // shared Postgres database.
   const importDataDir =
     options.importDataDir ??
     (attachmentsDir ? dirname(attachmentsDir) : dirname(process.env.QBO_DB_PATH || './qbo-connections.db'));
-  const importStore = new ImportStoreHandle(join(importDataDir, IMPORT_STORE_FILENAME));
+  const importStore = qboRoot.importStoreHandle(importDataDir);
   fastify.addHook('onClose', async () => importStore.close());
 
   // Each request builds a server scoped to the caller's API key. The tools

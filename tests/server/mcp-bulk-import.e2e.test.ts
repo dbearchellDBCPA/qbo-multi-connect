@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { startImportHarness, IMPORT_CLIENT, type ImportHarness } from '../support/import-harness.js';
 import { runBulkImportScenario, FAKE_COMPANY_ACCOUNTS, type ImportScenarioResult } from '../support/bulk-import-scenario.js';
@@ -29,7 +29,7 @@ describe('bulk transaction import — acceptance scenario end to end over MCP', 
       month: '2026-07',
       closedDate: '2025-11-30',
       log: (l) => transcript.push(l),
-      deleteStore: () => rmSync(join(h.dataDir, IMPORT_STORE_FILENAME), { force: true }),
+      deleteStore: () => h.wipeStore(),
       beforeBulk: () => {
         // Two whole-request 429s before processing, one AFTER commit (the
         // retry must replay, not re-write), and a burst of item-level 3001s.
@@ -125,7 +125,8 @@ describe('bulk transaction import — acceptance scenario end to end over MCP', 
     expect(rows[0]).toMatch(/^row,source_id,txn_type,txn_date,amount,status,qbo_type,qbo_id/);
   });
 
-  it('the store lives next to the server data dir, not in the connections DB', () => {
-    expect(existsSync(join(h.dataDir, IMPORT_STORE_FILENAME))).toBe(true);
+  it('the store lives next to the server data dir (SQLite) or in the shared database (Postgres)', () => {
+    if (h.dialect === 'sqlite') expect(existsSync(join(h.dataDir, IMPORT_STORE_FILENAME))).toBe(true);
+    else expect(existsSync(join(h.dataDir, IMPORT_STORE_FILENAME))).toBe(false);
   });
 });

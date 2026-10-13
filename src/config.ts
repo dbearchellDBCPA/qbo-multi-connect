@@ -23,7 +23,18 @@ export interface AppConfig {
     scopes: string[];
   };
   db: {
+    /** SQLite file. Used when `url` is unset. */
     path: string;
+    /** Postgres connection string (DATABASE_URL). When set, SQLite is not used. */
+    url: string | null;
+    /** TLS handling for Postgres: 'default' | 'no-verify' | 'disable' (QBO_DATABASE_SSL). */
+    ssl: 'default' | 'no-verify' | 'disable';
+    /**
+     * Where files live: attachment staging, import run logs, and (in SQLite
+     * mode) the database and auto-generated secrets. QBO_DATA_DIR, else the
+     * SQLite file's directory.
+     */
+    dataDir: string;
   };
   encryption: {
     key: string;
@@ -37,6 +48,8 @@ export interface AppConfig {
 }
 
 const environment = (process.env.QBO_ENVIRONMENT || 'sandbox') as 'sandbox' | 'production';
+const dbPath = process.env.QBO_DB_PATH || './qbo-connections.db';
+const sslMode = process.env.QBO_DATABASE_SSL || 'default';
 
 export const appConfig: AppConfig = {
   intuit: {
@@ -55,7 +68,10 @@ export const appConfig: AppConfig = {
     scopes: ['com.intuit.quickbooks.accounting'],
   },
   db: {
-    path: process.env.QBO_DB_PATH || './qbo-connections.db',
+    path: dbPath,
+    url: process.env.DATABASE_URL?.trim() || null,
+    ssl: (['default', 'no-verify', 'disable'].includes(sslMode) ? sslMode : 'default') as 'default' | 'no-verify' | 'disable',
+    dataDir: process.env.QBO_DATA_DIR?.trim() || dirname(dbPath),
   },
   encryption: {
     key: process.env.QBO_ENCRYPTION_KEY || '',
@@ -85,5 +101,9 @@ export function validateConfig(): void {
 
   if (appConfig.encryption.key && appConfig.encryption.key.length !== 64) {
     throw new Error('QBO_ENCRYPTION_KEY must be 64 hex characters (32 bytes)');
+  }
+
+  if (!['default', 'no-verify', 'disable'].includes(sslMode)) {
+    throw new Error(`QBO_DATABASE_SSL must be one of default, no-verify, disable (got "${sslMode}")`);
   }
 }

@@ -308,7 +308,7 @@ export function registerImportTools(
       if (!realmId) return notFound(args.client_name);
       try {
         const ids = [...(args.source_ids ?? []), ...(args.source_id ? [args.source_id] : [])];
-        const rows = config.store.get().query({
+        const rows = await config.store.get().query({
           realm_id: realmId, run_id: args.run_id, source_ids: ids.length ? ids : undefined, txn_type: args.txn_type,
           start_date: args.start_date, end_date: args.end_date,
           status: args.status && args.status !== 'live' ? args.status : undefined,

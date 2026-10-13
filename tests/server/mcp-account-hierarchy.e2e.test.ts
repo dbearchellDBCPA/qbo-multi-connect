@@ -6,6 +6,7 @@ import { QBOManager } from '../../src/index.js';
 import { registerMcpRoutes } from '../../src/server/mcp.js';
 import { FakeIntuit, defaultSeedAccounts } from '../support/fake-intuit.js';
 import { runCoaHierarchyScenario, type ScenarioResult } from '../support/coa-hierarchy-scenario.js';
+import { testDatabaseConfig } from '../support/db.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // End-to-end: the real MCP server (registerMcpRoutes → tools → AccountsAPI →
@@ -38,7 +39,7 @@ describe('chart of accounts hierarchy — end to end over MCP', () => {
       return url.hostname.endsWith('intuit.com') ? fake.fetch(input, init) : realFetch(input, init);
     });
 
-    qbo = new QBOManager({ dbPath: ':memory:', encryptionKey: ENCRYPTION_KEY });
+    qbo = new QBOManager({ ...testDatabaseConfig(), encryptionKey: ENCRYPTION_KEY });
     await (qbo as any).tokenStore.storeConnection({
       clientName: CLIENT,
       realmId: REALM,

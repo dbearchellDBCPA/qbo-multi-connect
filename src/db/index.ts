@@ -1,7 +1,8 @@
-import Database from 'better-sqlite3';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import type { SqlDriver, SqlExecutor } from './driver.js';
+import { SqliteDriver } from './sqlite-driver.js';
+import { PostgresDriver, type PostgresDriverOptions } from './postgres-driver.js';
+import { loadMigrations, runMigrations } from './migrate.js';
+import { nowIso } from './time.js';
 import type {
   ConnectionAlertRecord,
   ConnectionRecord,
@@ -14,52 +15,68 @@ import type {
   UserStatus,
 } from './models.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+export type { SqlDialect, SqlDriver, SqlExecutor } from './driver.js';
+export type { PostgresDriverOptions, PostgresSslMode } from './postgres-driver.js';
 
+/** Where the connections database lives: a SQLite file, or a Postgres server. */
+export type DatabaseOptions = { sqlitePath: string } | { postgres: PostgresDriverOptions };
+
+/**
+ * Additive column backfills for SQLite databases created before the
+ * migration runner: CREATE TABLE IF NOT EXISTS in the baseline never adds a
+ * column to an existing table, so these run first.
+ */
+async function legacySqliteBackfill(x: SqlExecutor): Promise<void> {
+  const hasUsersTable = await x.get("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'users'");
+  if (!hasUsersTable) return; // fresh database — the baseline creates everything
+  const columns = await x.all<{ name: string }>('PRAGMA table_info(users)');
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('access_level')) {
+    await x.exec(
+      "ALTER TABLE users ADD COLUMN access_level TEXT NOT NULL DEFAULT 'read_write' CHECK(access_level IN ('read', 'read_write'))"
+    );
+  }
+  if (!has('username')) await x.exec('ALTER TABLE users ADD COLUMN username TEXT');
+  if (!has('password_hash')) await x.exec('ALTER TABLE users ADD COLUMN password_hash TEXT');
+  if (!has('api_key_encrypted')) await x.exec('ALTER TABLE users ADD COLUMN api_key_encrypted TEXT');
+}
+
+/** Open the driver for a DatabaseOptions value, with the main schema's migrations as its init step. */
+export function openDatabaseDriver(options: DatabaseOptions): SqlDriver {
+  if ('postgres' in options) {
+    return new PostgresDriver(options.postgres, (x) => runMigrations(x, loadMigrations('postgres', 'main')).then(() => undefined));
+  }
+  return new SqliteDriver(options.sqlitePath, async (x) => {
+    await legacySqliteBackfill(x);
+    await runMigrations(x, loadMigrations('sqlite', 'main'));
+  });
+}
+
+/**
+ * The connections database: QuickBooks authorizations, team members and
+ * their client assignments, dashboard sessions, the MCP OAuth server's
+ * state, upload tokens and alert history. Every method is written once,
+ * in the SQL subset both engines share (see driver.ts).
+ */
 export class ConnectionDatabase {
-  private db: Database.Database;
+  readonly driver: SqlDriver;
 
-  constructor(dbPath: string) {
-    this.db = new Database(dbPath);
-    this.db.pragma('journal_mode = WAL');
-    this.db.pragma('foreign_keys = ON');
-    this.init();
+  /** `new ConnectionDatabase('/path/to.db')` opens SQLite; pass DatabaseOptions for Postgres. */
+  constructor(source: string | DatabaseOptions | SqlDriver) {
+    if (typeof source === 'string') this.driver = openDatabaseDriver({ sqlitePath: source });
+    else if ('dialect' in source) this.driver = source;
+    else this.driver = openDatabaseDriver(source);
   }
 
-  /**
-   * Initialize database schema
-   */
-  private init(): void {
-    // Column migrations must run BEFORE schema.sql: its CREATE TABLE IF NOT
-    // EXISTS never adds columns to an existing table, and the users trigger
-    // it (re)creates references columns older databases don't have yet.
-    this.migrate();
-    const schemaPath = join(__dirname, 'schema.sql');
-    const schema = readFileSync(schemaPath, 'utf-8');
-    this.db.exec(schema);
+  get dialect() {
+    return this.driver.dialect;
   }
 
-  /**
-   * Additive column migrations for databases created by earlier versions.
-   */
-  private migrate(): void {
-    const hasUsersTable = this.db
-      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'users'")
-      .get();
-    if (!hasUsersTable) return; // fresh database — schema.sql creates everything
-
-    const columns = this.db.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
-    const has = (name: string) => columns.some((c) => c.name === name);
-    if (!has('access_level')) {
-      this.db.exec(
-        "ALTER TABLE users ADD COLUMN access_level TEXT NOT NULL DEFAULT 'read_write' CHECK(access_level IN ('read', 'read_write'))"
-      );
-    }
-    if (!has('username')) this.db.exec('ALTER TABLE users ADD COLUMN username TEXT');
-    if (!has('password_hash')) this.db.exec('ALTER TABLE users ADD COLUMN password_hash TEXT');
-    if (!has('api_key_encrypted')) this.db.exec('ALTER TABLE users ADD COLUMN api_key_encrypted TEXT');
+  private get sql(): SqlDriver {
+    return this.driver;
   }
+
+  // ── Connections ─────────────────────────────────────────────────────────
 
   /**
    * Insert a connection, or refresh it in place if the realm is already
@@ -69,32 +86,32 @@ export class ConnectionDatabase {
    * realm_id is unchanged, so member assignments (keyed on realm_id) are kept.
    */
   async upsertConnection(conn: NewConnection, encryptedAccessToken: string, encryptedRefreshToken: string): Promise<number> {
-    const stmt = this.db.prepare(`
-      INSERT INTO connections (
-        client_name, realm_id, access_token, refresh_token,
-        token_expiry, refresh_expiry, scopes, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active')
-      ON CONFLICT(realm_id) DO UPDATE SET
-        access_token = excluded.access_token,
-        refresh_token = excluded.refresh_token,
-        token_expiry = excluded.token_expiry,
-        refresh_expiry = excluded.refresh_expiry,
-        scopes = excluded.scopes,
-        status = 'active'
-    `);
-
-    stmt.run(
-      conn.clientName,
-      conn.realmId,
-      encryptedAccessToken,
-      encryptedRefreshToken,
-      conn.tokenExpiry.toISOString(),
-      conn.refreshExpiry.toISOString(),
-      conn.scopes.join(',')
+    const row = await this.sql.get<{ id: number }>(
+      `INSERT INTO connections (
+         client_name, realm_id, access_token, refresh_token,
+         token_expiry, refresh_expiry, scopes, status, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)
+       ON CONFLICT (realm_id) DO UPDATE SET
+         access_token = excluded.access_token,
+         refresh_token = excluded.refresh_token,
+         token_expiry = excluded.token_expiry,
+         refresh_expiry = excluded.refresh_expiry,
+         scopes = excluded.scopes,
+         status = 'active',
+         updated_at = excluded.updated_at
+       RETURNING id`,
+      [
+        conn.clientName,
+        conn.realmId,
+        encryptedAccessToken,
+        encryptedRefreshToken,
+        conn.tokenExpiry.toISOString(),
+        conn.refreshExpiry.toISOString(),
+        conn.scopes.join(','),
+        nowIso(),
+      ]
     );
-
-    const row = this.db.prepare('SELECT id FROM connections WHERE realm_id = ?').get(conn.realmId) as { id: number };
-    return row.id;
+    return row!.id;
   }
 
   /**
@@ -102,98 +119,74 @@ export class ConnectionDatabase {
    * from QuickBooks). No-op if the realm does not exist.
    */
   async renameConnection(realmId: string, clientName: string): Promise<void> {
-    this.db.prepare('UPDATE connections SET client_name = ? WHERE realm_id = ?').run(clientName, realmId);
+    await this.sql.run('UPDATE connections SET client_name = ?, updated_at = ? WHERE realm_id = ?', [
+      clientName,
+      nowIso(),
+      realmId,
+    ]);
   }
 
   /**
    * Insert a new connection
    */
   async insertConnection(conn: NewConnection, encryptedAccessToken: string, encryptedRefreshToken: string): Promise<number> {
-    const stmt = this.db.prepare(`
-      INSERT INTO connections (
-        client_name, realm_id, access_token, refresh_token,
-        token_expiry, refresh_expiry, scopes
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    const result = stmt.run(
-      conn.clientName,
-      conn.realmId,
-      encryptedAccessToken,
-      encryptedRefreshToken,
-      conn.tokenExpiry.toISOString(),
-      conn.refreshExpiry.toISOString(),
-      conn.scopes.join(',')
+    const row = await this.sql.get<{ id: number }>(
+      `INSERT INTO connections (
+         client_name, realm_id, access_token, refresh_token,
+         token_expiry, refresh_expiry, scopes
+       ) VALUES (?, ?, ?, ?, ?, ?, ?)
+       RETURNING id`,
+      [
+        conn.clientName,
+        conn.realmId,
+        encryptedAccessToken,
+        encryptedRefreshToken,
+        conn.tokenExpiry.toISOString(),
+        conn.refreshExpiry.toISOString(),
+        conn.scopes.join(','),
+      ]
     );
-
-    return result.lastInsertRowid as number;
+    return row!.id;
   }
 
-  /**
-   * Get connection by realm ID
-   */
   async getConnectionByRealmId(realmId: string): Promise<ConnectionRecord | null> {
-    const stmt = this.db.prepare('SELECT * FROM connections WHERE realm_id = ?');
-    return stmt.get(realmId) as ConnectionRecord | null;
+    return (await this.sql.get<ConnectionRecord>('SELECT * FROM connections WHERE realm_id = ?', [realmId])) ?? null;
   }
 
-  /**
-   * Get connection by client name
-   */
   async getConnectionByClientName(clientName: string): Promise<ConnectionRecord | null> {
-    const stmt = this.db.prepare('SELECT * FROM connections WHERE client_name = ?');
-    return stmt.get(clientName) as ConnectionRecord | null;
+    return (await this.sql.get<ConnectionRecord>('SELECT * FROM connections WHERE client_name = ?', [clientName])) ?? null;
   }
 
-  /**
-   * Get all connections
-   */
   async getAllConnections(): Promise<ConnectionRecord[]> {
-    const stmt = this.db.prepare('SELECT * FROM connections ORDER BY client_name');
-    return stmt.all() as ConnectionRecord[];
+    return this.sql.all<ConnectionRecord>('SELECT * FROM connections ORDER BY client_name');
   }
 
-  /**
-   * Get connections by status
-   */
   async getConnectionsByStatus(status: ConnectionStatus): Promise<ConnectionRecord[]> {
-    const stmt = this.db.prepare('SELECT * FROM connections WHERE status = ? ORDER BY client_name');
-    return stmt.all(status) as ConnectionRecord[];
+    return this.sql.all<ConnectionRecord>('SELECT * FROM connections WHERE status = ? ORDER BY client_name', [status]);
   }
 
-  /**
-   * Update connection tokens
-   */
   async updateTokens(realmId: string, encryptedAccessToken: string, encryptedRefreshToken: string, update: TokenUpdate): Promise<void> {
-    const stmt = this.db.prepare(`
-      UPDATE connections 
-      SET access_token = ?, refresh_token = ?, token_expiry = ?, refresh_expiry = ?
-      WHERE realm_id = ?
-    `);
-
-    stmt.run(
-      encryptedAccessToken,
-      encryptedRefreshToken,
-      update.tokenExpiry.toISOString(),
-      update.refreshExpiry.toISOString(),
-      realmId
+    await this.sql.run(
+      `UPDATE connections
+       SET access_token = ?, refresh_token = ?, token_expiry = ?, refresh_expiry = ?, updated_at = ?
+       WHERE realm_id = ?`,
+      [
+        encryptedAccessToken,
+        encryptedRefreshToken,
+        update.tokenExpiry.toISOString(),
+        update.refreshExpiry.toISOString(),
+        nowIso(),
+        realmId,
+      ]
     );
   }
 
-  /**
-   * Update connection status
-   */
   async updateStatus(realmId: string, status: ConnectionStatus): Promise<void> {
-    const stmt = this.db.prepare('UPDATE connections SET status = ? WHERE realm_id = ?');
-    stmt.run(status, realmId);
+    await this.sql.run('UPDATE connections SET status = ?, updated_at = ? WHERE realm_id = ?', [status, nowIso(), realmId]);
   }
 
-  /**
-   * Delete connection
-   */
   async deleteConnection(realmId: string): Promise<void> {
-    const stmt = this.db.prepare('DELETE FROM connections WHERE realm_id = ?');
-    stmt.run(realmId);
+    await this.sql.run('DELETE FROM connections WHERE realm_id = ?', [realmId]);
   }
 
   /**
@@ -201,12 +194,12 @@ export class ConnectionDatabase {
    */
   async getConnectionsExpiringSoon(minutesThreshold: number): Promise<ConnectionRecord[]> {
     const threshold = new Date(Date.now() + minutesThreshold * 60 * 1000).toISOString();
-    const stmt = this.db.prepare(`
-      SELECT * FROM connections
-      WHERE status = 'active' AND token_expiry < ?
-      ORDER BY token_expiry
-    `);
-    return stmt.all(threshold) as ConnectionRecord[];
+    return this.sql.all<ConnectionRecord>(
+      `SELECT * FROM connections
+       WHERE status = 'active' AND token_expiry < ?
+       ORDER BY token_expiry`,
+      [threshold]
+    );
   }
 
   /**
@@ -214,20 +207,16 @@ export class ConnectionDatabase {
    * open — candidates for the daemon's self-heal revival pass.
    */
   async getRevivableConnections(): Promise<ConnectionRecord[]> {
-    const now = new Date().toISOString();
-    const stmt = this.db.prepare(`
-      SELECT * FROM connections
-      WHERE status = 'expired' AND refresh_expiry > ?
-      ORDER BY client_name
-    `);
-    return stmt.all(now) as ConnectionRecord[];
+    return this.sql.all<ConnectionRecord>(
+      `SELECT * FROM connections
+       WHERE status = 'expired' AND refresh_expiry > ?
+       ORDER BY client_name`,
+      [nowIso()]
+    );
   }
 
   // ── Users ────────────────────────────────────────────────────────────────
 
-  /**
-   * Insert a new user
-   */
   async insertUser(fields: {
     name: string;
     email: string | null;
@@ -239,58 +228,45 @@ export class ConnectionDatabase {
     apiKeyEncrypted: string | null;
     keyPrefix: string;
   }): Promise<number> {
-    const stmt = this.db.prepare(`
-      INSERT INTO users (name, email, role, access_level, username, password_hash, api_key_hash, api_key_encrypted, key_prefix)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    const result = stmt.run(
-      fields.name,
-      fields.email,
-      fields.role,
-      fields.accessLevel,
-      fields.username,
-      fields.passwordHash,
-      fields.apiKeyHash,
-      fields.apiKeyEncrypted,
-      fields.keyPrefix
+    const row = await this.sql.get<{ id: number }>(
+      `INSERT INTO users (name, email, role, access_level, username, password_hash, api_key_hash, api_key_encrypted, key_prefix)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       RETURNING id`,
+      [
+        fields.name,
+        fields.email,
+        fields.role,
+        fields.accessLevel,
+        fields.username,
+        fields.passwordHash,
+        fields.apiKeyHash,
+        fields.apiKeyEncrypted,
+        fields.keyPrefix,
+      ]
     );
-    return result.lastInsertRowid as number;
+    return row!.id;
   }
 
-  /**
-   * Get user by ID
-   */
   async getUserById(id: number): Promise<UserRecord | null> {
-    const stmt = this.db.prepare('SELECT * FROM users WHERE id = ?');
-    return (stmt.get(id) as UserRecord | undefined) ?? null;
+    return (await this.sql.get<UserRecord>('SELECT * FROM users WHERE id = ?', [id])) ?? null;
   }
 
-  /**
-   * Get user by API key hash
-   */
   async getUserByKeyHash(apiKeyHash: string): Promise<UserRecord | null> {
-    const stmt = this.db.prepare('SELECT * FROM users WHERE api_key_hash = ?');
-    return (stmt.get(apiKeyHash) as UserRecord | undefined) ?? null;
+    return (await this.sql.get<UserRecord>('SELECT * FROM users WHERE api_key_hash = ?', [apiKeyHash])) ?? null;
   }
 
-  /**
-   * Get user by username (callers normalize to lowercase before lookup)
-   */
+  /** Get user by username (callers normalize to lowercase before lookup) */
   async getUserByUsername(username: string): Promise<UserRecord | null> {
-    const stmt = this.db.prepare('SELECT * FROM users WHERE username = ?');
-    return (stmt.get(username) as UserRecord | undefined) ?? null;
+    return (await this.sql.get<UserRecord>('SELECT * FROM users WHERE username = ?', [username])) ?? null;
   }
 
-  /**
-   * Get all users
-   */
   async getAllUsers(): Promise<UserRecord[]> {
-    const stmt = this.db.prepare('SELECT * FROM users ORDER BY name');
-    return stmt.all() as UserRecord[];
+    return this.sql.all<UserRecord>('SELECT * FROM users ORDER BY name');
   }
 
   /**
-   * Update user fields (only the provided ones)
+   * Update user fields (only the provided ones). Administrative changes bump
+   * updated_at; last_used_at touches (below) deliberately do not.
    */
   async updateUser(
     id: number,
@@ -312,23 +288,22 @@ export class ConnectionDatabase {
     if (fields.username !== undefined) { sets.push('username = ?'); values.push(fields.username); }
     if (fields.status !== undefined) { sets.push('status = ?'); values.push(fields.status); }
     if (sets.length === 0) return;
-    values.push(id);
-    this.db.prepare(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`).run(...values);
+    sets.push('updated_at = ?');
+    values.push(nowIso(), id);
+    await this.sql.run(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`, values);
   }
 
-  /**
-   * Set or clear a user's dashboard password hash
-   */
+  /** Set or clear a user's dashboard password hash */
   async setUserPassword(id: number, passwordHash: string | null): Promise<void> {
-    this.db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(passwordHash, id);
+    await this.sql.run('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?', [passwordHash, nowIso(), id]);
   }
 
-  /**
-   * Replace a user's API key hash (key rotation)
-   */
+  /** Replace a user's API key hash (key rotation) */
   async updateUserKey(id: number, apiKeyHash: string, keyPrefix: string, apiKeyEncrypted: string | null): Promise<void> {
-    this.db.prepare('UPDATE users SET api_key_hash = ?, key_prefix = ?, api_key_encrypted = ? WHERE id = ?')
-      .run(apiKeyHash, keyPrefix, apiKeyEncrypted, id);
+    await this.sql.run(
+      'UPDATE users SET api_key_hash = ?, key_prefix = ?, api_key_encrypted = ?, updated_at = ? WHERE id = ?',
+      [apiKeyHash, keyPrefix, apiKeyEncrypted, nowIso(), id]
+    );
   }
 
   /**
@@ -336,33 +311,27 @@ export class ConnectionDatabase {
    * Deliberately does NOT touch api_key_hash, so it can't change auth.
    */
   async setUserKeyEncrypted(id: number, apiKeyEncrypted: string): Promise<void> {
-    this.db.prepare('UPDATE users SET api_key_encrypted = ? WHERE id = ?').run(apiKeyEncrypted, id);
+    await this.sql.run('UPDATE users SET api_key_encrypted = ? WHERE id = ?', [apiKeyEncrypted, id]);
   }
 
-  /**
-   * Record that a user's key was just used
-   */
+  /** Record that a user's key was just used */
   async touchUserLastUsed(id: number): Promise<void> {
-    this.db.prepare("UPDATE users SET last_used_at = datetime('now') WHERE id = ?").run(id);
+    await this.sql.run('UPDATE users SET last_used_at = ? WHERE id = ?', [nowIso(), id]);
   }
 
-  /**
-   * Delete a user (assignments cascade)
-   */
+  /** Delete a user (assignments cascade) */
   async deleteUser(id: number): Promise<void> {
-    this.db.prepare('DELETE FROM users WHERE id = ?').run(id);
+    await this.sql.run('DELETE FROM users WHERE id = ?', [id]);
   }
 
-  /**
-   * Replace a user's client assignments
-   */
+  /** Replace a user's client assignments */
   async setUserRealms(userId: number, realmIds: string[]): Promise<void> {
-    const replaceAll = this.db.transaction((ids: string[]) => {
-      this.db.prepare('DELETE FROM user_clients WHERE user_id = ?').run(userId);
-      const insert = this.db.prepare('INSERT OR IGNORE INTO user_clients (user_id, realm_id) VALUES (?, ?)');
-      for (const realmId of ids) insert.run(userId, realmId);
+    await this.sql.transaction(async (tx) => {
+      await tx.run('DELETE FROM user_clients WHERE user_id = ?', [userId]);
+      for (const realmId of realmIds) {
+        await tx.run('INSERT INTO user_clients (user_id, realm_id) VALUES (?, ?) ON CONFLICT DO NOTHING', [userId, realmId]);
+      }
     });
-    replaceAll(realmIds);
   }
 
   /**
@@ -371,55 +340,55 @@ export class ConnectionDatabase {
    * are unaffected since their access is role-based, not row-based.
    */
   async setRealmUsers(realmId: string, userIds: number[]): Promise<void> {
-    const replaceAll = this.db.transaction((ids: number[]) => {
-      this.db.prepare('DELETE FROM user_clients WHERE realm_id = ?').run(realmId);
-      const insert = this.db.prepare('INSERT OR IGNORE INTO user_clients (user_id, realm_id) VALUES (?, ?)');
-      for (const userId of ids) insert.run(userId, realmId);
+    await this.sql.transaction(async (tx) => {
+      await tx.run('DELETE FROM user_clients WHERE realm_id = ?', [realmId]);
+      for (const userId of userIds) {
+        await tx.run('INSERT INTO user_clients (user_id, realm_id) VALUES (?, ?) ON CONFLICT DO NOTHING', [userId, realmId]);
+      }
     });
-    replaceAll(userIds);
   }
 
-  /**
-   * Get realm IDs assigned to a user
-   */
+  /** Get realm IDs assigned to a user */
   async getUserRealms(userId: number): Promise<string[]> {
-    const rows = this.db.prepare('SELECT realm_id FROM user_clients WHERE user_id = ? ORDER BY realm_id')
-      .all(userId) as Array<{ realm_id: string }>;
+    const rows = await this.sql.all<{ realm_id: string }>(
+      'SELECT realm_id FROM user_clients WHERE user_id = ? ORDER BY realm_id',
+      [userId]
+    );
     return rows.map((r) => r.realm_id);
   }
 
-  /**
-   * Remove a realm from every user's assignments (when a company is disconnected)
-   */
+  /** Remove a realm from every user's assignments (when a company is disconnected) */
   async removeRealmAssignments(realmId: string): Promise<void> {
-    this.db.prepare('DELETE FROM user_clients WHERE realm_id = ?').run(realmId);
+    await this.sql.run('DELETE FROM user_clients WHERE realm_id = ?', [realmId]);
   }
 
   // ── Sessions (dashboard sign-in) ─────────────────────────────────────────
 
   async insertSession(userId: number, tokenHash: string, expiresAtIso: string): Promise<void> {
-    this.db.prepare('INSERT INTO sessions (user_id, token_hash, expires_at) VALUES (?, ?, ?)')
-      .run(userId, tokenHash, expiresAtIso);
+    await this.sql.run('INSERT INTO sessions (user_id, token_hash, expires_at) VALUES (?, ?, ?)', [
+      userId,
+      tokenHash,
+      expiresAtIso,
+    ]);
   }
 
-  /**
-   * Resolve an unexpired session token hash to its user row.
-   */
+  /** Resolve an unexpired session token hash to its user row. */
   async getSessionUser(tokenHash: string): Promise<UserRecord | null> {
-    const stmt = this.db.prepare(`
-      SELECT u.* FROM sessions s
-      JOIN users u ON u.id = s.user_id
-      WHERE s.token_hash = ? AND s.expires_at > datetime('now')
-    `);
-    return (stmt.get(tokenHash) as UserRecord | undefined) ?? null;
+    const row = await this.sql.get<UserRecord>(
+      `SELECT u.* FROM sessions s
+       JOIN users u ON u.id = s.user_id
+       WHERE s.token_hash = ? AND s.expires_at > ?`,
+      [tokenHash, nowIso()]
+    );
+    return row ?? null;
   }
 
   async touchSession(tokenHash: string): Promise<void> {
-    this.db.prepare("UPDATE sessions SET last_used_at = datetime('now') WHERE token_hash = ?").run(tokenHash);
+    await this.sql.run('UPDATE sessions SET last_used_at = ? WHERE token_hash = ?', [nowIso(), tokenHash]);
   }
 
   async deleteSessionByTokenHash(tokenHash: string): Promise<void> {
-    this.db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash);
+    await this.sql.run('DELETE FROM sessions WHERE token_hash = ?', [tokenHash]);
   }
 
   /**
@@ -428,33 +397,38 @@ export class ConnectionDatabase {
    */
   async deleteUserSessions(userId: number, exceptTokenHash?: string): Promise<void> {
     if (exceptTokenHash) {
-      this.db.prepare('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?').run(userId, exceptTokenHash);
+      await this.sql.run('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?', [userId, exceptTokenHash]);
     } else {
-      this.db.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
+      await this.sql.run('DELETE FROM sessions WHERE user_id = ?', [userId]);
     }
   }
 
   async purgeExpiredSessions(): Promise<void> {
-    this.db.prepare("DELETE FROM sessions WHERE expires_at <= datetime('now')").run();
+    await this.sql.run('DELETE FROM sessions WHERE expires_at <= ?', [nowIso()]);
   }
 
   // ── Upload tokens (REST attachments endpoint) ────────────────────────────
 
   async insertUploadToken(tokenHash: string, realmId: string, issuedBy: string, expiresAtIso: string): Promise<void> {
-    this.db.prepare('INSERT INTO upload_tokens (token_hash, realm_id, issued_by, expires_at) VALUES (?, ?, ?, ?)')
-      .run(tokenHash, realmId, issuedBy, expiresAtIso);
+    await this.sql.run('INSERT INTO upload_tokens (token_hash, realm_id, issued_by, expires_at) VALUES (?, ?, ?, ?)', [
+      tokenHash,
+      realmId,
+      issuedBy,
+      expiresAtIso,
+    ]);
   }
 
   /** Resolve an unexpired upload token hash to its realm binding. */
   async getUploadToken(tokenHash: string): Promise<{ realm_id: string; expires_at: string } | null> {
-    const row = this.db.prepare(
-      "SELECT realm_id, expires_at FROM upload_tokens WHERE token_hash = ? AND expires_at > datetime('now')"
-    ).get(tokenHash) as { realm_id: string; expires_at: string } | undefined;
+    const row = await this.sql.get<{ realm_id: string; expires_at: string }>(
+      'SELECT realm_id, expires_at FROM upload_tokens WHERE token_hash = ? AND expires_at > ?',
+      [tokenHash, nowIso()]
+    );
     return row ?? null;
   }
 
   async purgeExpiredUploadTokens(): Promise<void> {
-    this.db.prepare("DELETE FROM upload_tokens WHERE expires_at <= datetime('now')").run();
+    await this.sql.run('DELETE FROM upload_tokens WHERE expires_at <= ?', [nowIso()]);
   }
 
   // ── OAuth 2.1 authorization server ───────────────────────────────────────
@@ -467,15 +441,16 @@ export class ConnectionDatabase {
     grantTypes: string[];
     scope: string | null;
   }): Promise<void> {
-    this.db.prepare(
-      'INSERT INTO oauth_clients (client_id, client_secret_hash, client_name, redirect_uris, grant_types, scope) VALUES (?, ?, ?, ?, ?, ?)'
-    ).run(
-      client.clientId,
-      client.clientSecretHash,
-      client.clientName,
-      JSON.stringify(client.redirectUris),
-      JSON.stringify(client.grantTypes),
-      client.scope
+    await this.sql.run(
+      'INSERT INTO oauth_clients (client_id, client_secret_hash, client_name, redirect_uris, grant_types, scope) VALUES (?, ?, ?, ?, ?, ?)',
+      [
+        client.clientId,
+        client.clientSecretHash,
+        client.clientName,
+        JSON.stringify(client.redirectUris),
+        JSON.stringify(client.grantTypes),
+        client.scope,
+      ]
     );
   }
 
@@ -487,8 +462,7 @@ export class ConnectionDatabase {
     grant_types: string;
     scope: string | null;
   } | null> {
-    const row = this.db.prepare('SELECT * FROM oauth_clients WHERE client_id = ?').get(clientId) as any;
-    return row ?? null;
+    return (await this.sql.get<any>('SELECT * FROM oauth_clients WHERE client_id = ?', [clientId])) ?? null;
   }
 
   async insertOAuthCode(row: {
@@ -501,12 +475,13 @@ export class ConnectionDatabase {
     resource: string | null;
     expiresAt: string;
   }): Promise<void> {
-    this.db.prepare(
-      'INSERT INTO oauth_auth_codes (code_hash, client_id, user_id, redirect_uri, code_challenge, scope, resource, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run(row.codeHash, row.clientId, row.userId, row.redirectUri, row.codeChallenge, row.scope, row.resource, row.expiresAt);
+    await this.sql.run(
+      'INSERT INTO oauth_auth_codes (code_hash, client_id, user_id, redirect_uri, code_challenge, scope, resource, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [row.codeHash, row.clientId, row.userId, row.redirectUri, row.codeChallenge, row.scope, row.resource, row.expiresAt]
+    );
   }
 
-  /** Fetch and immediately delete an auth code — codes are single-use. */
+  /** Fetch and delete an auth code in one statement — codes are single-use. */
   async consumeOAuthCode(codeHash: string): Promise<{
     client_id: string;
     user_id: number;
@@ -515,9 +490,7 @@ export class ConnectionDatabase {
     scope: string | null;
     expires_at: string;
   } | null> {
-    const row = this.db.prepare('SELECT * FROM oauth_auth_codes WHERE code_hash = ?').get(codeHash) as any;
-    if (row) this.db.prepare('DELETE FROM oauth_auth_codes WHERE code_hash = ?').run(codeHash);
-    return row ?? null;
+    return (await this.sql.get<any>('DELETE FROM oauth_auth_codes WHERE code_hash = ? RETURNING *', [codeHash])) ?? null;
   }
 
   async insertOAuthToken(row: {
@@ -528,9 +501,10 @@ export class ConnectionDatabase {
     scope: string | null;
     expiresAt: string;
   }): Promise<void> {
-    this.db.prepare(
-      'INSERT INTO oauth_tokens (token_hash, kind, client_id, user_id, scope, expires_at) VALUES (?, ?, ?, ?, ?, ?)'
-    ).run(row.tokenHash, row.kind, row.clientId, row.userId, row.scope, row.expiresAt);
+    await this.sql.run(
+      'INSERT INTO oauth_tokens (token_hash, kind, client_id, user_id, scope, expires_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [row.tokenHash, row.kind, row.clientId, row.userId, row.scope, row.expiresAt]
+    );
   }
 
   async getOAuthToken(tokenHash: string, kind: 'access' | 'refresh'): Promise<{
@@ -538,33 +512,37 @@ export class ConnectionDatabase {
     client_id: string;
     scope: string | null;
   } | null> {
-    const row = this.db.prepare(
-      "SELECT user_id, client_id, scope FROM oauth_tokens WHERE token_hash = ? AND kind = ? AND expires_at > datetime('now')"
-    ).get(tokenHash, kind) as any;
-    return row ?? null;
+    return (
+      (await this.sql.get<any>(
+        'SELECT user_id, client_id, scope FROM oauth_tokens WHERE token_hash = ? AND kind = ? AND expires_at > ?',
+        [tokenHash, kind, nowIso()]
+      )) ?? null
+    );
   }
 
   async deleteOAuthToken(tokenHash: string): Promise<void> {
-    this.db.prepare('DELETE FROM oauth_tokens WHERE token_hash = ?').run(tokenHash);
+    await this.sql.run('DELETE FROM oauth_tokens WHERE token_hash = ?', [tokenHash]);
   }
 
   /** Revoke every OAuth token for a user (used when access is withdrawn). */
   async deleteOAuthTokensForUser(userId: number): Promise<void> {
-    this.db.prepare('DELETE FROM oauth_tokens WHERE user_id = ?').run(userId);
+    await this.sql.run('DELETE FROM oauth_tokens WHERE user_id = ?', [userId]);
   }
 
   async purgeExpiredOAuth(): Promise<void> {
-    this.db.prepare("DELETE FROM oauth_tokens WHERE expires_at <= datetime('now')").run();
-    this.db.prepare("DELETE FROM oauth_auth_codes WHERE expires_at <= datetime('now')").run();
+    const now = nowIso();
+    await this.sql.run('DELETE FROM oauth_tokens WHERE expires_at <= ?', [now]);
+    await this.sql.run('DELETE FROM oauth_auth_codes WHERE expires_at <= ?', [now]);
   }
 
   // ── Connection alerts (email notifications) ──────────────────────────────
 
   /** Has this exact break (realm + dedupe key) already been reported? */
   async hasConnectionAlert(realmId: string, kind: ConnectionAlertRecord['kind'], dedupeKey: string): Promise<boolean> {
-    const row = this.db
-      .prepare('SELECT 1 FROM connection_alerts WHERE realm_id = ? AND kind = ? AND dedupe_key = ?')
-      .get(realmId, kind, dedupeKey);
+    const row = await this.sql.get(
+      'SELECT 1 AS ok FROM connection_alerts WHERE realm_id = ? AND kind = ? AND dedupe_key = ?',
+      [realmId, kind, dedupeKey]
+    );
     return row !== undefined;
   }
 
@@ -577,25 +555,27 @@ export class ConnectionDatabase {
     recipients: string[];
     providerId: string | null;
   }): Promise<void> {
-    this.db
-      .prepare(
-        'INSERT OR IGNORE INTO connection_alerts (realm_id, client_name, kind, dedupe_key, recipients, provider_id) VALUES (?, ?, ?, ?, ?, ?)'
-      )
-      .run(row.realmId, row.clientName, row.kind, row.dedupeKey, row.recipients.join(', '), row.providerId);
+    await this.sql.run(
+      `INSERT INTO connection_alerts (realm_id, client_name, kind, dedupe_key, recipients, provider_id)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT DO NOTHING`,
+      [row.realmId, row.clientName, row.kind, row.dedupeKey, row.recipients.join(', '), row.providerId]
+    );
   }
 
   /** The most recent alert sent, for the dashboard's status line. */
   async getLatestConnectionAlert(): Promise<ConnectionAlertRecord | null> {
-    const row = this.db
-      .prepare('SELECT * FROM connection_alerts ORDER BY sent_at DESC, id DESC LIMIT 1')
-      .get() as ConnectionAlertRecord | undefined;
-    return row ?? null;
+    return (
+      (await this.sql.get<ConnectionAlertRecord>(
+        'SELECT * FROM connection_alerts ORDER BY sent_at DESC, id DESC LIMIT 1'
+      )) ?? null
+    );
   }
 
   /**
    * Close database connection
    */
   async close(): Promise<void> {
-    this.db.close();
+    await this.driver.close();
   }
 }

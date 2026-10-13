@@ -5,6 +5,7 @@ import { QBOManager } from '../../src/index.js';
 import { oauthRoutes } from '../../src/server/routes/oauth.js';
 import { registerMcpRoutes } from '../../src/server/mcp.js';
 import { resolveAuth } from '../../src/server/auth.js';
+import { testDatabaseConfig } from '../support/db.js';
 
 const ENCRYPTION_KEY = 'a'.repeat(64);
 const MASTER_KEY = 'master-key-for-tests';
@@ -21,7 +22,7 @@ describe('OAuth authorization server for per-user MCP sign-in', () => {
   let app: FastifyInstance;
 
   beforeEach(async () => {
-    qbo = new QBOManager({ dbPath: ':memory:', encryptionKey: ENCRYPTION_KEY });
+    qbo = new QBOManager({ ...testDatabaseConfig(), encryptionKey: ENCRYPTION_KEY });
     const now = Date.now();
     for (const [name, realm] of [['Acme Corp', 'realm-1'], ['Beta LLC', 'realm-2']]) {
       await (qbo as any).tokenStore.storeConnection({

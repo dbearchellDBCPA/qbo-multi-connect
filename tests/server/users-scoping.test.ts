@@ -13,12 +13,13 @@ import { connectionsRoutes } from '../../src/server/routes/connections.js';
 import { companyRoutes } from '../../src/server/routes/company.js';
 import { authRoutes } from '../../src/server/routes/auth.js';
 import { registerMcpRoutes } from '../../src/server/mcp.js';
+import { testDatabaseConfig } from '../support/db.js';
 
 const ENCRYPTION_KEY = 'a'.repeat(64);
 const MASTER_KEY = 'master-key-for-tests';
 
 function makeManager(): QBOManager {
-  return new QBOManager({ dbPath: ':memory:', encryptionKey: ENCRYPTION_KEY });
+  return new QBOManager({ ...testDatabaseConfig(), encryptionKey: ENCRYPTION_KEY });
 }
 
 async function addConnection(qbo: QBOManager, clientName: string, realmId: string): Promise<void> {
@@ -288,47 +289,50 @@ describe('user timestamps', () => {
 
   afterEach(() => qbo.close());
 
-  it('parses SQLite UTC timestamps as UTC', async () => {
+  it('parses stored timestamps as UTC, including the legacy SQLite shape', async () => {
     const { user } = await qbo.users.create({ name: 'Jane' });
-    (qbo as any).db['db']
-      .prepare("UPDATE users SET last_used_at = '2020-01-02 03:04:05' WHERE id = ?")
-      .run(user.id);
+    // Databases written by earlier versions hold "YYYY-MM-DD HH:MM:SS" (UTC,
+    // no zone marker); Postgres columns only ever hold real timestamps.
+    const legacy = qbo.dialect === 'sqlite' ? '2020-01-02 03:04:05' : '2020-01-02T03:04:05.000Z';
+    await (qbo as any).db.driver.run('UPDATE users SET last_used_at = ? WHERE id = ?', [legacy, user.id]);
     expect((await qbo.users.get(user.id))?.lastUsedAt?.toISOString()).toBe('2020-01-02T03:04:05.000Z');
   });
 
   it('does not clobber updated_at when only last_used_at is touched', async () => {
     const { user, apiKey } = await qbo.users.create({ name: 'Jane' });
-    const raw = (qbo as any).db['db'];
-    raw.prepare("UPDATE users SET updated_at = '2020-01-01 00:00:00' WHERE id = ?").run(user.id);
+    const raw = (qbo as any).db.driver;
+    const stamp = '2020-01-01T00:00:00.000Z';
+    await raw.run('UPDATE users SET updated_at = ? WHERE id = ?', [stamp, user.id]);
 
     await qbo.users.findByApiKey(apiKey); // touches last_used_at
-    const after = raw.prepare('SELECT updated_at, last_used_at FROM users WHERE id = ?').get(user.id);
-    expect(after.updated_at).toBe('2020-01-01 00:00:00');
+    const after = await raw.get('SELECT updated_at, last_used_at FROM users WHERE id = ?', [user.id]);
+    expect(after.updated_at).toBe(stamp);
     expect(after.last_used_at).not.toBeNull();
 
     await qbo.users.update(user.id, { name: 'Janet' }); // admin change DOES bump it
-    const bumped = raw.prepare('SELECT updated_at FROM users WHERE id = ?').get(user.id);
-    expect(bumped.updated_at).not.toBe('2020-01-01 00:00:00');
+    const bumped = await raw.get('SELECT updated_at FROM users WHERE id = ?', [user.id]);
+    expect(bumped.updated_at).not.toBe(stamp);
   });
 
   it('throttles last_used_at writes for steady traffic', async () => {
     const { user, apiKey } = await qbo.users.create({ name: 'Jane' });
-    const raw = (qbo as any).db['db'];
+    const raw = (qbo as any).db.driver;
+    const lastUsed = async () => (await raw.get('SELECT last_used_at FROM users WHERE id = ?', [user.id])).last_used_at;
 
     await qbo.users.findByApiKey(apiKey);
-    const first = raw.prepare('SELECT last_used_at FROM users WHERE id = ?').get(user.id).last_used_at;
-    expect(first).not.toBeNull();
+    expect(await lastUsed()).not.toBeNull();
 
     // Within the throttle window: no rewrite even if the stored value is distinctive
-    raw.prepare("UPDATE users SET last_used_at = datetime('now', '-10 seconds') WHERE id = ?").run(user.id);
-    const marker = raw.prepare('SELECT last_used_at FROM users WHERE id = ?').get(user.id).last_used_at;
+    const marker = new Date(Date.now() - 10_000).toISOString();
+    await raw.run('UPDATE users SET last_used_at = ? WHERE id = ?', [marker, user.id]);
     await qbo.users.findByApiKey(apiKey);
-    expect(raw.prepare('SELECT last_used_at FROM users WHERE id = ?').get(user.id).last_used_at).toBe(marker);
+    expect(await lastUsed()).toBe(marker);
 
     // Outside the window: touched again
-    raw.prepare("UPDATE users SET last_used_at = '2020-01-01 00:00:00' WHERE id = ?").run(user.id);
+    const stale = '2020-01-01T00:00:00.000Z';
+    await raw.run('UPDATE users SET last_used_at = ? WHERE id = ?', [stale, user.id]);
     await qbo.users.findByApiKey(apiKey);
-    expect(raw.prepare('SELECT last_used_at FROM users WHERE id = ?').get(user.id).last_used_at).not.toBe('2020-01-01 00:00:00');
+    expect(await lastUsed()).not.toBe(stale);
   });
 });
 
@@ -948,9 +952,7 @@ describe('username/password sign-in', () => {
 
   it('expired sessions stop authenticating', async () => {
     const { token } = (await login('jane.smith', 'correct-horse-1')).json();
-    (qbo as any).db.db
-      .prepare("UPDATE sessions SET expires_at = datetime('now', '-1 minute')")
-      .run();
+    await (qbo as any).db.driver.run('UPDATE sessions SET expires_at = ?', [new Date(Date.now() - 60_000).toISOString()]);
     const res = await app.inject({ method: 'GET', url: '/api/me', headers: { authorization: `Bearer ${token}` } });
     expect(res.statusCode).toBe(401);
   });
@@ -972,7 +974,7 @@ describe('username/password sign-in', () => {
 
   it('backfills retrievable storage for legacy keys on key auth', async () => {
     // Simulate a key created before api_key_encrypted existed.
-    (qbo as any).db.db.prepare('UPDATE users SET api_key_encrypted = NULL WHERE id = ?').run(janeId);
+    await (qbo as any).db.driver.run('UPDATE users SET api_key_encrypted = NULL WHERE id = ?', [janeId]);
     const { token } = (await login('jane.smith', 'correct-horse-1')).json();
     const before = await app.inject({ method: 'GET', url: '/api/me/key', headers: { authorization: `Bearer ${token}` } });
     expect(before.json()).toMatchObject({ apiKey: null, retrievable: false });

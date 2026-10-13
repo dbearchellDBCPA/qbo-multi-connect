@@ -28,7 +28,7 @@ export class UploadTokenService {
     await this.db.purgeExpiredUploadTokens();
     const token = `${UPLOAD_TOKEN_PREFIX}${randomBytes(24).toString('hex')}`;
     const expiresAt = new Date(Date.now() + UPLOAD_TOKEN_TTL_MS);
-    await this.db.insertUploadToken(hashToken(token), realmId, issuedBy, expiresAt.toISOString().replace('T', ' ').slice(0, 19));
+    await this.db.insertUploadToken(hashToken(token), realmId, issuedBy, expiresAt.toISOString());
     return { token, expiresAt };
   }
 

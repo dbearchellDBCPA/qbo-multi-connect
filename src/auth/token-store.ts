@@ -1,5 +1,6 @@
 import { ConnectionDatabase } from '../db/index.js';
 import { encrypt, decrypt } from '../crypto/encrypt.js';
+import { parseDbTimestamp } from '../db/time.js';
 import type {
   Connection,
   ConnectionRecord,
@@ -121,12 +122,12 @@ export class TokenStore {
       realmId: record.realm_id,
       accessToken: decrypt(record.access_token, this.encryptionKey),
       refreshToken: decrypt(record.refresh_token, this.encryptionKey),
-      tokenExpiry: new Date(record.token_expiry),
-      refreshExpiry: new Date(record.refresh_expiry),
+      tokenExpiry: parseDbTimestamp(record.token_expiry),
+      refreshExpiry: parseDbTimestamp(record.refresh_expiry),
       scopes: record.scopes.split(','),
       status: record.status,
-      createdAt: new Date(record.created_at),
-      updatedAt: new Date(record.updated_at),
+      createdAt: parseDbTimestamp(record.created_at),
+      updatedAt: parseDbTimestamp(record.updated_at),
     };
   }
 }
