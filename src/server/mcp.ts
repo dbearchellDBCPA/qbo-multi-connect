@@ -1,4 +1,5 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { PRINT_STATUS_VALUES, PRINT_STATUS_DESCRIPTION, PrintStatusError, buildBillPaymentCreatePayload, applyBillPaymentPayChanges, applyExpenseCreatePrintStatus, applyExpenseUpdatePrintStatus } from './print-status.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
@@ -1974,7 +1975,7 @@ export async function registerMcpRoutes(
     // ── create_bill_payment ──────────────────────────────────────────────────
     server.tool(
       'create_bill_payment',
-      'Record a bill payment (pay a vendor) in QuickBooks Online. Supports class, department, and (where applicable) sales terms at the appropriate QBO level (header or line).',
+      'Record a bill payment (pay a vendor) in QuickBooks Online. Check payments require bank_account_id; optional print_status sets CheckPayment.PrintStatus (defaults to NotSet when doc_number is given). Supports class, department, and (where applicable) sales terms at the appropriate QBO level (header or line).',
       {
         client_name: z.string().describe('The name of the client company'),
         vendor_id: z.string().describe('QBO Vendor ID'),
@@ -1987,42 +1988,23 @@ export async function registerMcpRoutes(
         credit_card_account_id: z.string().optional().describe('Credit card account ID (for CreditCard payments)'),
         private_note: z.string().optional().describe('Private memo'),
         department_id: z.string().optional().describe('Header DepartmentRef.value'),
+        print_status: z.enum(PRINT_STATUS_VALUES).optional().describe(PRINT_STATUS_DESCRIPTION + ' Maps to CheckPayment.PrintStatus.'),
         bill_ids: z.array(z.object({
           bill_id: z.string().describe('Bill ID to apply payment to'),
           amount: z.number().optional().describe('Amount to apply to this bill'),
         })).optional().describe('Bills to apply payment to'),
       },
-      async ({ client_name, vendor_id, vendor_name, total_amount, txn_date, doc_number, pay_type, bank_account_id, credit_card_account_id, private_note, department_id, bill_ids }) => {
+      async ({ client_name, vendor_id, vendor_name, total_amount, txn_date, doc_number, pay_type, bank_account_id, credit_card_account_id, private_note, department_id, print_status, bill_ids }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) {
           return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
         }
 
         try {
-          const payload: any = {
-            VendorRef: { value: vendor_id, name: vendor_name },
-            TotalAmt: total_amount,
-            PayType: pay_type,
-          };
-          if (txn_date) payload.TxnDate = txn_date;
-          // Omit DocNumber entirely when not supplied — QBO stores "" verbatim
-          // and it sorts differently from null in reports.
-          if (doc_number) payload.DocNumber = doc_number;
-          if (department_id) payload.DepartmentRef = { value: department_id };
-          if (private_note) payload.PrivateNote = private_note;
-
-          if (pay_type === 'Check' && bank_account_id) {
-            payload.CheckPayment = { BankAccountRef: { value: bank_account_id } };
-          } else if (pay_type === 'CreditCard' && credit_card_account_id) {
-            payload.CreditCardPayment = { CCAccountRef: { value: credit_card_account_id } };
-          }
-
-          if (bill_ids && bill_ids.length > 0) {
-            payload.Line = bill_ids.map(b => ({
-              Amount: b.amount ?? total_amount,
-              LinkedTxn: [{ TxnId: b.bill_id, TxnType: 'Bill' }],
-            }));
-          }
+          const payload = buildBillPaymentCreatePayload({
+            vendor_id, vendor_name, total_amount, txn_date, doc_number, pay_type,
+            bank_account_id, credit_card_account_id, private_note, department_id, print_status, bill_ids,
+          });
 
           const result = await qboManager.transactions.createBillPayment(realmId, payload);
           const bp = (result as any)?.BillPayment;
@@ -2031,6 +2013,7 @@ export async function registerMcpRoutes(
             : JSON.stringify(result, null, 2);
           return { content: [{ type: 'text', text: summary }] };
         } catch (err: any) {
+          if (err instanceof PrintStatusError) return { content: [{ type: 'text', text: err.message }] };
           return { content: [{ type: 'text', text: `Error creating bill payment: ${err?.message ?? err}` }] };
         }
       }
@@ -2039,7 +2022,7 @@ export async function registerMcpRoutes(
     // ── update_bill_payment ──────────────────────────────────────────────────
     server.tool(
       'update_bill_payment',
-      'Update an existing bill payment in place — amount, date, ref number, memo, pay account, and/or the linked-bill line amounts. Read-modify-write: fetches the current BillPayment, merges only what you pass, writes the full object back with a fresh SyncToken; untouched fields are preserved. Changing the amount adjusts the linked bill\'s open balance by the difference (the fix for a payment recorded at the wrong amount vs. the actual bank wire). If total_amt is changed and the payment has exactly ONE linked bill line, that line amount is synced automatically; with multiple linked bills pass `lines` explicitly so the split is deliberate.',
+      'Update an existing bill payment in place — amount, date, ref number, memo, pay account, check print_status, and/or the linked-bill line amounts. Read-modify-write: fetches the current BillPayment, merges only what you pass, writes the full object back with a fresh SyncToken; untouched fields are preserved. Changing the amount adjusts the linked bill\'s open balance by the difference (the fix for a payment recorded at the wrong amount vs. the actual bank wire). If total_amt is changed and the payment has exactly ONE linked bill line, that line amount is synced automatically; with multiple linked bills pass `lines` explicitly so the split is deliberate.',
       {
         client_name: z.string().describe('The name of the client company'),
         bill_payment_id: z.string().describe('The QBO BillPayment ID to update'),
@@ -2048,12 +2031,13 @@ export async function registerMcpRoutes(
         doc_number: z.string().max(21).optional().describe('New reference / check number'),
         private_note: z.string().optional().describe('New private memo'),
         pay_account_id: z.string().optional().describe('New pay-from account: a bank account for Check payments, a credit card account for CreditCard payments (matched to the payment\'s existing PayType)'),
+        print_status: z.enum(PRINT_STATUS_VALUES).optional().describe(PRINT_STATUS_DESCRIPTION + ' Maps to CheckPayment.PrintStatus; merged into the existing CheckPayment so BankAccountRef is kept.'),
         lines: z.array(z.object({
           bill_id: z.string().describe('Linked Bill ID this portion pays'),
           amount: z.number().describe('Amount applied to that bill'),
         })).optional().describe('Replacement application lines (replaces ALL existing linked-bill lines if provided). Line amounts should sum to total_amt.'),
       },
-      async ({ client_name, bill_payment_id, total_amt, txn_date, doc_number, private_note, pay_account_id, lines }) => {
+      async ({ client_name, bill_payment_id, total_amt, txn_date, doc_number, private_note, pay_account_id, print_status, lines }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
         try {
@@ -2065,13 +2049,7 @@ export async function registerMcpRoutes(
           if (txn_date) payload.TxnDate = txn_date;
           if (doc_number) payload.DocNumber = doc_number;
           if (private_note !== undefined) payload.PrivateNote = private_note;
-          if (pay_account_id) {
-            if (bp.PayType === 'CreditCard') {
-              payload.CreditCardPayment = { CCAccountRef: { value: pay_account_id } };
-            } else {
-              payload.CheckPayment = { BankAccountRef: { value: pay_account_id } };
-            }
-          }
+          applyBillPaymentPayChanges(bp, payload, { pay_account_id, doc_number, print_status });
 
           if (lines) {
             payload.Line = lines.map(l => ({
@@ -2100,6 +2078,7 @@ export async function registerMcpRoutes(
             : JSON.stringify(result, null, 2);
           return { content: [{ type: 'text', text: summary }] };
         } catch (err: any) {
+          if (err instanceof PrintStatusError) return { content: [{ type: 'text', text: err.message }] };
           return { content: [{ type: 'text', text: `Error updating bill payment: ${err?.message ?? err}` }] };
         }
       }
@@ -2132,7 +2111,7 @@ export async function registerMcpRoutes(
     // ── create_expense ───────────────────────────────────────────────────────
     server.tool(
       'create_expense',
-      'Create an expense (check, cash purchase, or credit card charge) in QuickBooks Online. Supports class, department, and (where applicable) sales terms at the appropriate QBO level (header or line).',
+      'Create an expense (check, cash purchase, or credit card charge) in QuickBooks Online. Optional print_status sets Purchase.PrintStatus for Check expenses (defaults to NotSet when doc_number is given). Supports class, department, and (where applicable) sales terms at the appropriate QBO level (header or line).',
       {
         client_name: z.string().describe('The name of the client company'),
         payment_type: z.enum(['Cash', 'Check', 'CreditCard']).describe('How the expense was paid'),
@@ -2144,6 +2123,7 @@ export async function registerMcpRoutes(
         vendor_name: z.string().optional().describe('Vendor name. If vendor_id is omitted, this is resolved to the payee by EXACT DisplayName match and the call fails if no unique match exists — nothing is silently dropped. When vendor_id is provided, this is display-only.'),
         private_note: z.string().optional().describe('Private memo'),
         department_id: z.string().optional().describe('Header DepartmentRef.value'),
+        print_status: z.enum(PRINT_STATUS_VALUES).optional().describe(PRINT_STATUS_DESCRIPTION + ' Maps to Purchase.PrintStatus (payment_type Check only).'),
         lines: z.array(z.object({
           description: z.string().optional(),
           amount: z.number().describe('Line amount'),
@@ -2156,13 +2136,15 @@ export async function registerMcpRoutes(
           class_id: z.string().optional(),
         })).describe('Expense line items'),
       },
-      async ({ client_name, payment_type, account_id, account_name, txn_date, doc_number, vendor_id, vendor_name, private_note, department_id, lines }) => {
+      async ({ client_name, payment_type, account_id, account_name, txn_date, doc_number, vendor_id, vendor_name, private_note, department_id, print_status, lines }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) {
           return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
         }
 
         try {
+          const createProbe: any = {};
+          applyExpenseCreatePrintStatus(createProbe, { payment_type, doc_number, print_status });
           // Resolve vendor_name to a real payee when no vendor_id was given —
           // never silently post a payee-less transaction.
           let entityRef: { value: string; name?: string } | null = vendor_id
@@ -2190,6 +2172,7 @@ export async function registerMcpRoutes(
           if (entityRef) payload.EntityRef = { ...entityRef, type: 'Vendor' };
           if (department_id) payload.DepartmentRef = { value: department_id };
           if (private_note) payload.PrivateNote = private_note;
+          if (createProbe.PrintStatus) payload.PrintStatus = createProbe.PrintStatus;
 
           const result = await qboManager.transactions.createExpense(realmId, payload);
           const exp = (result as any)?.Purchase;
@@ -2198,6 +2181,7 @@ export async function registerMcpRoutes(
             : JSON.stringify(result, null, 2);
           return { content: [{ type: 'text', text: summary }] };
         } catch (err: any) {
+          if (err instanceof PrintStatusError) return { content: [{ type: 'text', text: err.message }] };
           return { content: [{ type: 'text', text: `Error creating expense: ${err?.message ?? err}` }] };
         }
       }
@@ -2206,7 +2190,7 @@ export async function registerMcpRoutes(
     // ── update_expense ───────────────────────────────────────────────────────
     server.tool(
       'update_expense',
-      'Update an existing expense (Purchase) in place — edits the original transaction rather than creating a correcting entry. Auto-fetches the current Purchase + SyncToken by ID first, so you only pass the ID plus the fields you want changed. Header fields use sparse update (only provided fields change). ' + REPLACEMENT_LINES_BEHAVIOUR + ' Account/vendor/class refs are validated by QBO server-side; its error message (wrong ID, inactive entity, closed period, stale SyncToken) is surfaced on failure.',
+      'Update an existing expense (Purchase) in place — edits the original transaction rather than creating a correcting entry. Auto-fetches the current Purchase + SyncToken by ID first, so you only pass the ID plus the fields you want changed. Header fields use sparse update (only provided fields change); print_status sets Purchase.PrintStatus on Check expenses (NotSet by default when doc_number is passed, else preserved). ' + REPLACEMENT_LINES_BEHAVIOUR + ' Account/vendor/class refs are validated by QBO server-side; its error message (wrong ID, inactive entity, closed period, stale SyncToken) is surfaced on failure.',
       {
         client_name: z.string().describe('The name of the client company'),
         expense_id: z.string().describe('The QBO Expense (Purchase) ID to update'),
@@ -2219,6 +2203,7 @@ export async function registerMcpRoutes(
         vendor_name: z.string().optional().describe('Vendor name. If vendor_id is omitted, this is resolved to the payee by EXACT DisplayName match and the call fails if no unique match exists. When vendor_id is provided, this is display-only.'),
         private_note: z.string().optional().describe('New private memo'),
         department_id: z.string().optional().describe('New header DepartmentRef.value'),
+        print_status: z.enum(PRINT_STATUS_VALUES).optional().describe(PRINT_STATUS_DESCRIPTION + ' Maps to Purchase.PrintStatus (Check expenses only).'),
         lines: z.array(z.object({
           line_id: z.string().optional().describe(LINE_ID_PARAM_DESCRIPTION),
           description: z.string().optional(),
@@ -2233,7 +2218,7 @@ export async function registerMcpRoutes(
           class_id: z.string().optional(),
         })).optional().describe('Replacement line items — the complete new line set (omitted existing lines are removed). Pass the lines from get_expense (with line_id) to edit in place; without line_id, Ids are matched by position.'),
       },
-      async ({ client_name, expense_id, payment_type, account_id, account_name, txn_date, doc_number, vendor_id, vendor_name, private_note, department_id, lines }) => {
+      async ({ client_name, expense_id, payment_type, account_id, account_name, txn_date, doc_number, vendor_id, vendor_name, private_note, department_id, print_status, lines }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) {
           return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
@@ -2266,6 +2251,7 @@ export async function registerMcpRoutes(
             payment_type, account_id, account_name, txn_date, doc_number,
             entity_ref: entityRef, private_note, department_id, lines,
           });
+          applyExpenseUpdatePrintStatus(exp, payload, { payment_type, doc_number, print_status });
 
           const result = await qboManager.transactions.updateExpense(realmId, payload);
           const updated = (result as any)?.Purchase;
@@ -2285,6 +2271,7 @@ export async function registerMcpRoutes(
           return { content: [{ type: 'text', text: summary }] };
         } catch (err: any) {
           if (err instanceof LineIdError) return { content: [{ type: 'text', text: err.message }] };
+          if (err instanceof PrintStatusError) return { content: [{ type: 'text', text: err.message }] };
           return { content: [{ type: 'text', text: `Error updating expense: ${err?.message ?? err}` }] };
         }
       }
