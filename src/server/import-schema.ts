@@ -72,7 +72,7 @@ export const importLineSchema = z
 
 export const linkedSchema = z
   .object({
-    source_id: sourceIdSchema.describe('source_id of a previously imported Invoice/CreditMemo (Payment) or Bill/VendorCredit (BillPayment)'),
+    source_id: sourceIdSchema.describe('source_id of a previously imported Invoice/CreditMemo/JournalEntry (Payment) or Bill/VendorCredit (BillPayment)'),
     amount: z.number().describe('Amount applied to that transaction'),
   })
   .strict();
@@ -89,7 +89,7 @@ export const normalizedTransactionSchema = z
     account_name: z.string().optional().describe('Same slot as account_number, by (fully qualified) name'),
     class: z.string().optional().describe('Transaction-level class, used for lines that do not carry one'),
     lines: z.array(importLineSchema).max(1000).optional(),
-    linked: z.array(linkedSchema).max(500).optional().describe('Payment → Invoices/CreditMemos, BillPayment → Bills/VendorCredits, by source_id'),
+    linked: z.array(linkedSchema).max(500).optional().describe('Payment → Invoices/CreditMemos/JournalEntry credits (credits net against invoices), BillPayment → Bills/VendorCredits, by source_id'),
     payment_method: z.enum(['Cash', 'Check', 'CreditCard']).optional().describe('Expense: PaymentType (default Cash). BillPayment: Check (default; Cash is treated as Check) or CreditCard'),
     check_number: z.string().optional().describe('Paper check number → DocNumber (Check / Expense paid by check / BillPayment) or PaymentRefNum (Payment)'),
     transfer_to_account_number: z.string().optional().describe('Transfer only: destination account by number'),

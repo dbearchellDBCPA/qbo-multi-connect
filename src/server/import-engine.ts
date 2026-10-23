@@ -36,6 +36,7 @@ import {
   type LinkLookup,
   type AppliedCredit,
   BILL_CREDIT_TYPES,
+  PAYMENT_CREDIT_TYPES,
 } from './import-build.js';
 import { stampLineIds, stampDepositLineIds, journalLineKind, expenseLineKind, salesLineKind } from './line-converters.js';
 import { DOC_NUMBER_MAX_LENGTH } from './doc-number.js';
@@ -89,6 +90,10 @@ export function normalizedAmount(t: NormalizedTransaction, linkedType?: (sourceI
   if (t.txn_type === 'BillPayment' && linkedType) {
     if (t.amount !== undefined) return t.amount;
     return (t.linked ?? []).reduce((s, l) => s + (BILL_CREDIT_TYPES.has(linkedType(l.source_id) ?? '') ? -1 : 1) * cents(l.amount), 0) / 100;
+  }
+  if (t.txn_type === 'Payment' && linkedType) {
+    if (t.amount !== undefined) return t.amount;
+    return Math.max(0, (t.linked ?? []).reduce((s, l) => s + (PAYMENT_CREDIT_TYPES.has(linkedType(l.source_id) ?? '') ? -1 : 1) * cents(l.amount), 0)) / 100;
   }
   if (t.txn_type === 'Payment' || t.txn_type === 'BillPayment') return t.amount ?? (t.linked ?? []).reduce((s, l) => s + cents(l.amount), 0) / 100;
   return lines.reduce((s, l) => s + cents(l.amount), 0) / 100;

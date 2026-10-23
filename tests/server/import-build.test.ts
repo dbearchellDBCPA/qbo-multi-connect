@@ -189,3 +189,37 @@ describe('stamps and helpers', () => {
     expect(() => normalizedTransactionSchema.parse({ ...base, txn_type: 'Expense', amout: 1 })).toThrow(/amout/);
   });
 });
+
+describe('buildTransaction — Payment with JE / CreditMemo credits', () => {
+  const links: LinkResolver = (sid) => {
+    const m = /^qbo:(\w+):(\d+)$/.exec(sid)!;
+    return { status: 'ready', qboType: m[1], qboId: m[2] };
+  };
+  const cust = { entity: { name: 'Globex Corp', type: 'Customer' } };
+  it('$0 Payment: invoices + JE credit net to 0', () => {
+    const p = ok({ ...base, txn_type: 'Payment', ...cust, linked: [{ source_id: 'qbo:Invoice:1001', amount: 400 }, { source_id: 'qbo:Invoice:1002', amount: 100 }, { source_id: 'qbo:JournalEntry:3136', amount: 500 }] }, {}, links);
+    expect(p.payload.TotalAmt).toBe(0);
+    expect(p.payload.Line).toEqual([
+      { Amount: 400, LinkedTxn: [{ TxnId: '1001', TxnType: 'Invoice' }] },
+      { Amount: 100, LinkedTxn: [{ TxnId: '1002', TxnType: 'Invoice' }] },
+      { Amount: 500, LinkedTxn: [{ TxnId: '3136', TxnType: 'JournalEntry' }] },
+    ]);
+  });
+  it('mixed invoice + CreditMemo + JE', () => {
+    const p = ok({ ...base, txn_type: 'Payment', ...cust, linked: [{ source_id: 'qbo:Invoice:1', amount: 500 }, { source_id: 'qbo:CreditMemo:9', amount: 50 }, { source_id: 'qbo:JournalEntry:3136', amount: 200 }] }, {}, links);
+    expect(p.payload.TotalAmt).toBe(250);
+  });
+  it('credits exceeding invoices / no invoice / amount below net are rejected', () => {
+    expect(fail({ ...base, txn_type: 'Payment', ...cust, linked: [{ source_id: 'qbo:Invoice:1', amount: 100 }, { source_id: 'qbo:JournalEntry:3136', amount: 150 }] }, {}, links)).toMatch(/exceed/);
+    expect(fail({ ...base, txn_type: 'Payment', ...cust, linked: [{ source_id: 'qbo:JournalEntry:3136', amount: 150 }] }, {}, links)).toMatch(/at least one Invoice/);
+    expect(fail({ ...base, txn_type: 'Payment', ...cust, amount: 10, linked: [{ source_id: 'qbo:Invoice:1', amount: 100 }, { source_id: 'qbo:JournalEntry:3136', amount: 50 }] }, {}, links)).toMatch(/less than/);
+  });
+});
+
+describe('buildTransaction — Payment explicit amount 0 with JE credit', () => {
+  it('accepts amount: 0', () => {
+    const links: LinkResolver = (sid) => { const m = /^qbo:(\w+):(\d+)$/.exec(sid)!; return { status: 'ready', qboType: m[1], qboId: m[2] }; };
+    const p = ok({ ...base, txn_type: 'Payment', entity: { name: 'Globex Corp', type: 'Customer' }, amount: 0, linked: [{ source_id: 'qbo:Invoice:1', amount: 100 }, { source_id: 'qbo:JournalEntry:3136', amount: 100 }] }, {}, links);
+    expect(p.payload.TotalAmt).toBe(0);
+  });
+});
