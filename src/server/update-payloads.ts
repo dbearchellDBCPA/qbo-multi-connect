@@ -86,6 +86,28 @@ export function buildBillUpdatePayload(
   return payload;
 }
 
+// ── Vendor credit ─────────────────────────────────────────────────────────────
+
+/**
+ * Read-modify-write payload for a VendorCredit. Header fields are sparse
+ * (only provided ones change); VendorCredit lines share the Bill line shape,
+ * so replacement lines carry existing Ids (line_id, else by position).
+ */
+export function buildVendorCreditUpdatePayload(
+  existing: any,
+  args: { txn_date?: string; doc_number?: string; private_note?: string; lines?: BillLineInput[] }
+): any {
+  const payload: any = { ...existing };
+  if (args.txn_date) payload.TxnDate = args.txn_date;
+  if (args.private_note !== undefined) payload.PrivateNote = args.private_note;
+  applyDocNumberOnUpdate(payload, args.doc_number);
+  if (args.lines) {
+    payload.Line = replaceLinesWithIds(existing?.Line, buildBillLines(args.lines), args.lines, expenseLineKind, 'vendor credit');
+    payload.sparse = false;
+  }
+  return payload;
+}
+
 // ── Expense (Purchase) ────────────────────────────────────────────────────────
 
 export interface ExpenseLineInput {

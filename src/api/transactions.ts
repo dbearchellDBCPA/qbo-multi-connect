@@ -246,6 +246,44 @@ export class TransactionsAPI {
   }
 
   /**
+   * Get vendor credit by ID
+   */
+  async getVendorCredit(realmId: string, vendorCreditId: string): Promise<unknown> {
+    return this.client.get(realmId, `vendorcredit/${vendorCreditId}`, {});
+  }
+
+  /**
+   * Create a vendor credit
+   */
+  async createVendorCredit(realmId: string, vendorCredit: any): Promise<unknown> {
+    return this.client.post(realmId, 'vendorcredit', vendorCredit);
+  }
+
+  /**
+   * Update a vendor credit (requires Id + SyncToken)
+   */
+  async updateVendorCredit(realmId: string, vendorCredit: any): Promise<unknown> {
+    if (!vendorCredit.Id || !vendorCredit.SyncToken) {
+      throw new Error('VendorCredit must have Id and SyncToken for updates');
+    }
+    return this.client.post(realmId, 'vendorcredit', vendorCredit);
+  }
+
+  /**
+   * Delete a vendor credit (QBO operation=delete)
+   */
+  async deleteVendorCredit(realmId: string, vendorCreditId: string, syncToken: string): Promise<unknown> {
+    return this.client.post(realmId, 'vendorcredit?operation=delete', { Id: vendorCreditId, SyncToken: syncToken });
+  }
+
+  /**
+   * Void a vendor credit (operation=void) — fallback when QBO refuses the delete
+   */
+  async voidVendorCredit(realmId: string, vendorCreditId: string, syncToken: string): Promise<unknown> {
+    return this.client.post(realmId, 'vendorcredit?operation=void', { Id: vendorCreditId, SyncToken: syncToken, sparse: true });
+  }
+
+  /**
    * Create a payment
    */
   async createPayment(realmId: string, payment: any): Promise<unknown> {
