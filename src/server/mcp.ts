@@ -31,6 +31,7 @@ import {
 import {
   buildBillLines,
   buildBillUpdatePayload,
+  buildVendorCreditUpdatePayload,
   buildExpenseLines,
   buildExpenseUpdatePayload,
   buildSalesLines,
@@ -351,6 +352,7 @@ const DESTRUCTIVE_TOOLS = new Set<string>([
   'delete_journal_entry',
   'delete_invoice',
   'delete_bill',
+  'delete_vendor_credit',
   'delete_customer',
   'delete_vendor',
   'delete_account',
@@ -1915,6 +1917,102 @@ export async function registerMcpRoutes(
           return { content: [{ type: 'text', text: `Bill #${bill.DocNumber ?? bill_id} (ID: ${bill_id}) deleted successfully.` }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error deleting bill: ${err?.message ?? err}` }] };
+        }
+      }
+    );
+
+    // ── update_vendor_credit ─────────────────────────────────────────────────
+    server.tool(
+      'update_vendor_credit',
+      'Update an existing vendor credit in place. Fetches the current VendorCredit + fresh SyncToken first, then applies changes: only the header fields you provide change. ' + REPLACEMENT_LINES_BEHAVIOUR + ' When lines are passed the write is verified after posting and rolled back to the original on a mismatch.',
+      {
+        client_name: z.string().describe('The name of the client company'),
+        vendor_credit_id: z.string().describe('The QBO VendorCredit ID to update'),
+        txn_date: z.string().optional().describe('New credit date (YYYY-MM-DD)'),
+        doc_number: z.string().optional().describe(`New ref no. — ${DOC_NUMBER_UPDATE_PARAM_DESCRIPTION}`),
+        private_note: z.string().optional().describe('New private memo (empty string clears it)'),
+        lines: z.array(z.object({
+          line_id: z.string().optional().describe(LINE_ID_PARAM_DESCRIPTION),
+          description: z.string().optional(),
+          amount: z.number(),
+          detail_type: z.enum(['AccountBasedExpenseLineDetail', 'ItemBasedExpenseLineDetail']).default('AccountBasedExpenseLineDetail'),
+          account_id: z.string().optional(),
+          account_name: z.string().optional(),
+          item_id: z.string().optional(),
+          item_name: z.string().optional(),
+          quantity: z.number().optional(),
+          unit_price: z.number().optional(),
+          class_id: z.string().optional().describe('Line ClassRef.value'),
+        })).optional().describe('Replacement line items — the complete new line set (omitted existing lines are removed). Pass the lines from get_vendor_credit (with line_id) to edit in place; without line_id, Ids are matched by position.'),
+      },
+      async ({ client_name, vendor_credit_id, txn_date, doc_number, private_note, lines }) => {
+        const docErr = docNumberError(doc_number);
+        if (docErr) return { content: [{ type: 'text', text: docErr }] };
+        const realmId = await findRealmId(qboManager, client_name);
+        if (!realmId) {
+          return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
+        }
+        try {
+          const existing = await qboManager.transactions.getVendorCredit(realmId, vendor_credit_id) as any;
+          const vc = existing?.VendorCredit;
+          if (!vc) return { content: [{ type: 'text', text: `Vendor credit ${vendor_credit_id} not found.` }] };
+
+          const payload = buildVendorCreditUpdatePayload(vc, { txn_date, doc_number, private_note, lines });
+          const result = await qboManager.transactions.updateVendorCredit(realmId, payload);
+          const updated = (result as any)?.VendorCredit;
+          if (updated && lines) {
+            const failure = await verifyLinesAndMaybeRollback({
+              entityLabel: 'VendorCredit',
+              original: vc,
+              submitted: postedLineStats(payload.Line),
+              updated,
+              rollback: async (p) => ((await qboManager.transactions.updateVendorCredit(realmId, p)) as any)?.VendorCredit ?? null,
+            });
+            if (failure) return { content: [{ type: 'text', text: failure }] };
+          }
+          const summary = updated
+            ? `Vendor credit #${updated.DocNumber ?? updated.Id} updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken} | Date: ${updated.TxnDate} | Total: ${formatCurrency(updated.TotalAmt)}${docNumberSummary(updated, 'Ref No')}`
+            : JSON.stringify(result, null, 2);
+          return { content: [{ type: 'text', text: summary }] };
+        } catch (err: any) {
+          if (err instanceof LineIdError) return { content: [{ type: 'text', text: err.message }] };
+          return { content: [{ type: 'text', text: `Error updating vendor credit: ${err?.message ?? err}` }] };
+        }
+      }
+    );
+
+    // ── delete_vendor_credit ─────────────────────────────────────────────────
+    server.tool(
+      'delete_vendor_credit',
+      'Delete a vendor credit from QuickBooks Online (QBO operation=delete, with a fresh SyncToken). If QBO refuses the delete, the credit is voided instead and the response says so. The response echoes what was removed (id, date, amount, vendor) for the audit trail.',
+      {
+        client_name: z.string().describe('The name of the client company'),
+        vendor_credit_id: z.string().describe('The QBO VendorCredit ID to delete'),
+      },
+      async ({ client_name, vendor_credit_id }) => {
+        const realmId = await findRealmId(qboManager, client_name);
+        if (!realmId) {
+          return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
+        }
+        let vc: any;
+        try {
+          const existing = await qboManager.transactions.getVendorCredit(realmId, vendor_credit_id) as any;
+          vc = existing?.VendorCredit;
+          if (!vc) return { content: [{ type: 'text', text: `Vendor credit ${vendor_credit_id} not found.` }] };
+        } catch (err: any) {
+          return { content: [{ type: 'text', text: `Error fetching vendor credit: ${err?.message ?? err}` }] };
+        }
+        const what = `vendor credit ${vendor_credit_id}${vc.DocNumber ? ` (ref ${vc.DocNumber})` : ''}: ${vc.TxnDate}, ${formatCurrency(vc.TotalAmt)}${vc.VendorRef ? ` from ${vc.VendorRef.name ?? vc.VendorRef.value}` : ''}`;
+        try {
+          await qboManager.transactions.deleteVendorCredit(realmId, vendor_credit_id, vc.SyncToken);
+          return { content: [{ type: 'text', text: `Deleted ${what}.` }] };
+        } catch (delErr: any) {
+          try {
+            await qboManager.transactions.voidVendorCredit(realmId, vendor_credit_id, vc.SyncToken);
+            return { content: [{ type: 'text', text: `QBO refused the delete (${delErr?.message ?? delErr}); voided ${what} instead.` }] };
+          } catch (voidErr: any) {
+            return { content: [{ type: 'text', text: `Error deleting vendor credit: ${delErr?.message ?? delErr}\nVoid fallback also failed: ${voidErr?.message ?? voidErr}` }] };
+          }
         }
       }
     );
@@ -4308,6 +4406,40 @@ export async function registerMcpRoutes(
           return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error fetching bill: ${err?.message ?? err}` }] };
+        }
+      }
+    );
+
+    // ── get_vendor_credit ─────────────────────────────────────────────────────
+    server.tool(
+      'get_vendor_credit',
+      'Fetch a vendor credit in update-ready shape. The returned `lines` array can be passed directly to update_vendor_credit with no reshaping. Each line carries its QBO line_id so the update edits those exact lines in place; lines you drop are removed, lines you add without line_id are created.',
+      {
+        client_name: z.string().describe('The name of the client company'),
+        vendor_credit_id: z.string().describe('QBO VendorCredit ID'),
+      },
+      async ({ client_name, vendor_credit_id }) => {
+        const realmId = await findRealmId(qboManager, client_name);
+        if (!realmId) return { content: [{ type: 'text', text: `Client not found: "${client_name}".` }] };
+        try {
+          const raw = await qboManager.transactions.getVendorCredit(realmId, vendor_credit_id) as any;
+          const vc = raw?.VendorCredit;
+          if (!vc) return { content: [{ type: 'text', text: `Vendor credit ${vendor_credit_id} not found.` }] };
+          const result = {
+            id: vc.Id,
+            sync_token: vc.SyncToken,
+            doc_number: vc.DocNumber,
+            vendor_id: vc.VendorRef?.value,
+            vendor_name: vc.VendorRef?.name,
+            txn_date: vc.TxnDate,
+            private_note: vc.PrivateNote,
+            total_amt: vc.TotalAmt,
+            balance: vc.Balance,
+            lines: qboBillLinesToUpdateShape(vc.Line ?? []),
+          };
+          return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        } catch (err: any) {
+          return { content: [{ type: 'text', text: `Error fetching vendor credit: ${err?.message ?? err}` }] };
         }
       }
     );
