@@ -89,7 +89,7 @@ async function startServer() {
 
   // Health check endpoint
   fastify.get('/health', async (_request, reply) => {
-    await reply.send({ status: 'ok', timestamp: new Date().toISOString() });
+    await reply.send({ status: 'ok', commit: process.env.RAILWAY_GIT_COMMIT_SHA ?? null, timestamp: new Date().toISOString() });
   });
 
   // OAuth callback route
