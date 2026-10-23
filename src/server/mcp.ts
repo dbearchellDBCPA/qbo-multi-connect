@@ -1,5 +1,6 @@
 import { buildPaymentCreatePayload, PaymentArgsError } from './payment-payload.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { serverVersion } from './build-info.js';
 import { PRINT_STATUS_VALUES, PRINT_STATUS_DESCRIPTION, PrintStatusError, buildBillPaymentCreatePayload, applyBillPaymentPayChanges, applyExpenseCreatePrintStatus, applyExpenseUpdatePrintStatus } from './print-status.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
@@ -411,7 +412,7 @@ export async function registerMcpRoutes(
     const qboManager = createScopedManager(qboRoot, scope);
     const server = new McpServer({
       name: 'qbo-multi-connect',
-      version: '1.0.0',
+      version: serverVersion(),
     });
 
     // Every tool below registers with the 4-arg form tool(name, description,
