@@ -510,6 +510,21 @@ Row statuses are `created`, `updated`, `unchanged`, `skipped`, `blocked` and
 `failed`. `blocked` means a payment whose Bill or Invoice is not imported yet.
 Each call also writes a JSON and CSV log.
 
+Payments can apply credits: a BillPayment's `linked[]` takes VendorCredits /
+JournalEntry credits, and a Payment's `linked[]` takes CreditMemos /
+JournalEntry (A/R) credits next to its Invoices. Credits are positive lines
+that reduce TotalAmt (Σ invoices − Σ credits), so fully covered invoices post
+a $0 Payment. `qbo:<Type>:<Id>` refs (e.g. `qbo:JournalEntry:3136`) link to
+transactions not in the import store.
+
+`create_payment` (Receive Payment) does the same directly via `credits[]`:
+
+```
+create_payment(client_name="Acme", customer_id="58", total_amount=0,
+  invoice_ids=[{invoice_id:"1001", amount:400}, {invoice_id:"1002", amount:100}],
+  credits=[{txn_type:"JournalEntry", txn_id:"3136", amount:500}])
+```
+
 The mapping store is `qbo-import-index.db` and the logs are under
 `import-runs/`. Both sit in the server data directory next to `QBO_DB_PATH`
 (`/data` on Railway). The store is its own SQLite file, so the connections DB

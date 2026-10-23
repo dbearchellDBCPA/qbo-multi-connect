@@ -72,6 +72,8 @@ export interface AppliedCredit {
   amount: number;
 }
 
+/** Payment: customer credits applied to invoices (reduce TotalAmt). */
+export const PAYMENT_CREDIT_TYPES: ReadonlySet<string> = new Set(['CreditMemo', 'JournalEntry']);
 export const BILL_CREDIT_TYPES: ReadonlySet<string> = new Set(['VendorCredit', 'JournalEntry']);
 
 /** Short label for a source_id in messages: "netsuite:275459" → "275459", "qbo:Bill:10303" → "10303". */
@@ -661,6 +663,7 @@ export function buildTransaction(txn: NormalizedTransaction, ctx: CompanyContext
       const blockers: string[] = [];
       const qboLines: any[] = [];
       let appliedCents = 0;
+      let hasCredit = false;
       linked.forEach((lk, i) => {
         const p = amountProblem(lk.amount, `linked ${i + 1}`);
         if (p) lc.errors.push(p);
@@ -674,10 +677,17 @@ export function buildTransaction(txn: NormalizedTransaction, ctx: CompanyContext
           lc.errors.push(`linked ${i + 1}: source_id ${lk.source_id} was imported as a ${r.qboType}; a ${type} can only be applied to ${allowedTargets.join(' / ')}.`);
           return;
         }
+        if (PAYMENT_CREDIT_TYPES.has(r.qboType)) { appliedCents -= 2 * cents(lk.amount ?? 0); hasCredit = true; }
         qboLines.push({ Amount: lk.amount, LinkedTxn: [{ TxnId: r.status === 'ready' ? r.qboId : `pending:${lk.source_id}`, TxnType: r.qboType }] });
       });
-      const total = txn.amount ?? appliedCents / 100;
-      const tp = amountProblem(total, 'amount');
+      // Credits (CreditMemo / JournalEntry A/R credit) are positive Lines that reduce TotalAmt: invoices − credits.
+      if (hasCredit && blockers.length === 0) {
+        if (appliedCents < 0) lc.errors.push(`Payment credits exceed the invoices in linked[] by ${money(-appliedCents / 100)}.`);
+        if (!qboLines.some((l) => l.LinkedTxn[0].TxnType === 'Invoice')) lc.errors.push('Payment credits need at least one Invoice in linked[] to apply to.');
+      }
+      const total = txn.amount ?? Math.max(0, appliedCents) / 100;
+      // A Payment whose credits fully cover its invoices is a legitimate $0 Payment.
+      const tp = hasCredit && total === 0 ? undefined : amountProblem(total, 'amount');
       if (tp) lc.errors.push(tp);
       if (txn.amount !== undefined && cents(txn.amount) < appliedCents) {
         lc.errors.push(`amount ${money(txn.amount)} is less than the ${money(appliedCents / 100)} applied through linked[].`);

@@ -1,3 +1,4 @@
+import { buildPaymentCreatePayload, PaymentArgsError } from './payment-payload.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { PRINT_STATUS_VALUES, PRINT_STATUS_DESCRIPTION, PrintStatusError, buildBillPaymentCreatePayload, applyBillPaymentPayChanges, applyExpenseCreatePrintStatus, applyExpenseUpdatePrintStatus } from './print-status.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -1920,7 +1921,7 @@ export async function registerMcpRoutes(
     // ── create_payment ───────────────────────────────────────────────────────
     server.tool(
       'create_payment',
-      'Record a customer payment in QuickBooks Online. Can be applied to specific invoices or as an unapplied payment. Supports class, department, and (where applicable) sales terms at the appropriate QBO level (header or line).',
+      'Record a customer payment (Receive Payment) in QuickBooks Online. Can be applied to specific invoices or as an unapplied payment. Customer credits (CreditMemo or JournalEntry A/R credits) can be applied to the invoices via credits[]; TotalAmt = invoices − credits, so a $0 payment applies credits to open invoices. Supports class, department, and (where applicable) sales terms at the appropriate QBO level (header or line).',
       {
         client_name: z.string().describe('The name of the client company'),
         customer_id: z.string().describe('QBO Customer ID'),
@@ -1934,31 +1935,24 @@ export async function registerMcpRoutes(
         invoice_ids: z.array(z.object({
           invoice_id: z.string().describe('Invoice ID to apply payment to'),
           amount: z.number().optional().describe('Amount to apply to this invoice (defaults to full invoice balance)'),
-        })).optional().describe('Invoices to apply payment to. If omitted, payment is unapplied.'),
+        })).optional().describe('Invoices to apply payment to. If omitted, payment is unapplied. When credits are given, every invoice needs an explicit amount.'),
+        credits: z.array(z.object({
+          txn_type: z.enum(['CreditMemo', 'JournalEntry']).describe('CreditMemo, or JournalEntry (its A/R credit line for this customer)'),
+          txn_id: z.string().min(1).describe('QBO Id of the CreditMemo / JournalEntry'),
+          amount: z.number().describe('Credit amount to apply (positive)'),
+        }).strict()).optional().describe('Customer credits applied to the invoices — each becomes its own Payment line (positive Amount, LinkedTxn CreditMemo/JournalEntry). Requires invoice_ids with explicit amounts; total_amount must equal Σ invoice amounts − Σ credits (0 when credits fully cover the invoices = a $0 payment).'),
       },
-      async ({ client_name, customer_id, customer_name, total_amount, txn_date, payment_method_id, deposit_to_account_id, private_note, department_id, invoice_ids }) => {
+      async ({ client_name, customer_id, customer_name, total_amount, txn_date, payment_method_id, deposit_to_account_id, private_note, department_id, invoice_ids, credits }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) {
           return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
         }
 
         try {
-          const payload: any = {
-            CustomerRef: { value: customer_id, name: customer_name },
-            TotalAmt: total_amount,
-          };
-          if (txn_date) payload.TxnDate = txn_date;
-          if (payment_method_id) payload.PaymentMethodRef = { value: payment_method_id };
-          if (deposit_to_account_id) payload.DepositToAccountRef = { value: deposit_to_account_id };
-          if (department_id) payload.DepartmentRef = { value: department_id };
-          if (private_note) payload.PrivateNote = private_note;
-
-          if (invoice_ids && invoice_ids.length > 0) {
-            payload.Line = invoice_ids.map(inv => ({
-              Amount: inv.amount ?? total_amount,
-              LinkedTxn: [{ TxnId: inv.invoice_id, TxnType: 'Invoice' }],
-            }));
-          }
+          const payload = buildPaymentCreatePayload({
+            customer_id, customer_name, total_amount, txn_date, payment_method_id,
+            deposit_to_account_id, private_note, department_id, invoice_ids, credits,
+          });
 
           const result = await qboManager.transactions.createPayment(realmId, payload);
           const pmt = (result as any)?.Payment;
@@ -1967,6 +1961,7 @@ export async function registerMcpRoutes(
             : JSON.stringify(result, null, 2);
           return { content: [{ type: 'text', text: summary }] };
         } catch (err: any) {
+          if (err instanceof PaymentArgsError) return { content: [{ type: 'text', text: err.message }], isError: true };
           return { content: [{ type: 'text', text: `Error creating payment: ${err?.message ?? err}` }] };
         }
       }
