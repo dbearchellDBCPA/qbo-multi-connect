@@ -21,14 +21,6 @@ export class CompanyAPI {
   }
 
   /**
-   * Update company preferences (POST /preferences). Pass `sparse: true` plus
-   * Id and SyncToken to change only the fields supplied.
-   */
-  async updatePreferences(realmId: string, body: Record<string, unknown>): Promise<unknown> {
-    return this.client.post(realmId, 'preferences', body);
-  }
-
-  /**
    * Get company currency
    */
   async getCurrency(realmId: string): Promise<unknown> {

@@ -1,4 +1,3 @@
-import { setClosingDate, formatSetClosingDateResult } from './closing-date.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { PRINT_STATUS_VALUES, PRINT_STATUS_DESCRIPTION, PrintStatusError, buildBillPaymentCreatePayload, applyBillPaymentPayChanges, applyExpenseCreatePrintStatus, applyExpenseUpdatePrintStatus } from './print-status.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -534,28 +533,6 @@ export async function registerMcpRoutes(
           return { content: [{ type: 'text', text: lines.join('\n') }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error fetching closing date: ${err?.message ?? err}` }] };
-        }
-      }
-    );
-
-    // ── set_closing_date ──────────────────────────────────────────────────────
-    server.tool(
-      'set_closing_date',
-      "WRITE. Set the company's books closing date (Preferences.AccountingInfoPrefs.BookCloseDate) via a sparse Preferences update using the current SyncToken, then re-read Preferences to confirm. Returns before, after (as re-read from QBO) and the new SyncToken; a no-op if the date already matches. closing_date must be YYYY-MM-DD. closing_date: null (turn the close off) is NOT supported by QBO's API and returns an error without writing — clear it in the QBO UI. CAVEATS: Intuit documents BookCloseDate as read-only, so QBO may ignore the update; the tool reports an error if the re-read value doesn't match. QBO's API neither exposes nor changes the closing-date password; it is left as-is. API writes dated on/before the closing date are rejected (6200/6210 Account Period Closed) regardless of the password, which only gates UI edits. Intended workflow: note the current date (get_closing_date), move it earlier, fix the transaction, then ALWAYS restore the original date.",
-      {
-        client_name: z.string().describe('The name of the client company'),
-        closing_date: z.string().nullable().describe('New closing date YYYY-MM-DD, or null to turn the close off (not supported by the QBO API — returns an error).'),
-      },
-      async ({ client_name, closing_date }) => {
-        const realmId = await findRealmId(qboManager, client_name);
-        if (!realmId) {
-          return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
-        }
-        try {
-          const r = await setClosingDate(qboManager.company, realmId, closing_date, { canWrite: scope.canWrite });
-          return { content: [{ type: 'text', text: formatSetClosingDateResult(client_name, r) }], ...(r.ok ? {} : { isError: true }) };
-        } catch (err: any) {
-          return { content: [{ type: 'text', text: `Error setting closing date: ${err?.message ?? err}` }], isError: true };
         }
       }
     );
