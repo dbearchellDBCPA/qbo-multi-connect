@@ -661,6 +661,29 @@ curl -H "Authorization: Bearer YOUR_API_KEY" \
   "http://localhost:3456/api/company/REALM_ID/query?q=SELECT%20*%20FROM%20Invoice%20WHERE%20TxnDate%20%3E%20%272026-01-01%27"
 ```
 
+## MCP Tools — Books closing date
+
+- `get_closing_date` (read-only) — `{ client_name }`. Returns `Preferences.AccountingInfoPrefs.BookCloseDate`.
+- `set_closing_date` (write; hidden from read-only API keys and refused for them) — `{ client_name: string, closing_date: "YYYY-MM-DD" | null }`.
+  Reads Preferences for the current `Id`/`SyncToken`/`BookCloseDate`, POSTs a sparse update
+  `{ sparse: true, Id, SyncToken, AccountingInfoPrefs: { BookCloseDate } }`, then **re-reads Preferences** and
+  returns `before`, `after` (as QBO reports it) and the new `SyncToken`. If the date already matches it sends nothing and reports *unchanged*.
+  Malformed or impossible dates are rejected before any QBO call.
+
+**Caveats (researched 2026-10-23):**
+
+- **Intuit documents `BookCloseDate` as read-only** (Preferences reference, minor version 21). QBO may accept the POST and
+  ignore the field. That's why the tool re-reads: if `after` doesn't equal the requested date, it returns an error telling you to change it in the QBO UI.
+  This hasn't been tested against a live company (by policy, no writes to client companies).
+- **`closing_date: null` (turn the close off) is not supported.** No documented or community-verified API way exists to clear it.
+  Leaving the field out of a sparse update changes nothing, and an empty string isn't a valid date. The tool returns a clear error and writes nothing.
+  To turn the close off, an admin uses Settings → Account and settings → Advanced → Accounting → Close the books. To *lift* the close, set an earlier date instead.
+- **Closing-date password:** QBO's API neither exposes nor manages it. Changing the date via the API doesn't touch the password setting, so it stays as-is.
+  The password only gates *UI* edits in the closed period. API writes dated on or before the closing date are **rejected outright**
+  (faults 6200 / 6210 "Account Period Closed"), whatever the password is. That's why moving the date is the only API route to fix a closed-period transaction.
+- **Workflow:** `get_closing_date` to record the original date → `set_closing_date` to an earlier date → fix the transaction →
+  `set_closing_date` back to the original date. **Always restore the original date.** QBO's "Exceptions to Closing Date" report will show the changes.
+
 ## Configuration
 
 | Variable | Required | Default | Description |
