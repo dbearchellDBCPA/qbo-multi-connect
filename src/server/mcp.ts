@@ -1,3 +1,4 @@
+import { registerTransferTools } from './transfer-tools.js';
 import { buildPaymentCreatePayload, PaymentArgsError } from './payment-payload.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { serverVersion } from './build-info.js';
@@ -361,6 +362,8 @@ const DESTRUCTIVE_TOOLS = new Set<string>([
   'delete_expense',
   'delete_bill_payment',
   'delete_imported_transactions',
+  'delete_transfer',
+  'convert_to_transfer',
 ]);
 
 // Read-only tools never mutate QBO state. All get_*/list_* tools plus the query tool.
@@ -464,6 +467,9 @@ export async function registerMcpRoutes(
       store: importStore,
       runner: options.importRunnerOptions,
     });
+
+    // ── Transfer tools + Expense/Deposit → Transfer (src/server/transfer-tools.ts)
+    registerTransferTools(server, qboManager, (name) => findRealmId(qboManager, name));
 
     // ── list_clients ──────────────────────────────────────────────────────────
     server.tool('list_clients', 'List all connected QuickBooks Online companies', {}, async () => {
