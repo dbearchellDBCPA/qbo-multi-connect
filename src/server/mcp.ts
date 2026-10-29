@@ -1,4 +1,5 @@
 import { registerTransferTools } from './transfer-tools.js';
+import { registerBulkTxnTools } from './bulk-txn-tools.js';
 import { buildPaymentCreatePayload, PaymentArgsError } from './payment-payload.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { serverVersion } from './build-info.js';
@@ -470,6 +471,7 @@ export async function registerMcpRoutes(
 
     // ── Transfer tools + Expense/Deposit → Transfer (src/server/transfer-tools.ts)
     registerTransferTools(server, qboManager, (name) => findRealmId(qboManager, name));
+    registerBulkTxnTools(server, qboManager, (name) => findRealmId(qboManager, name), resolveVendorByName);
 
     // ── list_clients ──────────────────────────────────────────────────────────
     server.tool('list_clients', 'List all connected QuickBooks Online companies', {}, async () => {
