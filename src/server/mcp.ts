@@ -1,4 +1,5 @@
 import { registerTransferTools } from './transfer-tools.js';
+import { createBillPaymentValidated } from './bill-payment-credits.js';
 import { registerBulkTxnTools } from './bulk-txn-tools.js';
 import { buildPaymentCreatePayload, PaymentArgsError } from './payment-payload.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -2077,7 +2078,7 @@ export async function registerMcpRoutes(
     // ── create_bill_payment ──────────────────────────────────────────────────
     server.tool(
       'create_bill_payment',
-      'Record a bill payment (pay a vendor) in QuickBooks Online. Check payments require bank_account_id; optional print_status sets CheckPayment.PrintStatus (defaults to NotSet when doc_number is given). Supports class, department, and (where applicable) sales terms at the appropriate QBO level (header or line).',
+      'Record a bill payment (pay a vendor) in QuickBooks Online. Check payments require bank_account_id; optional print_status sets CheckPayment.PrintStatus (defaults to NotSet when doc_number is given). Supports class, department, and (where applicable) sales terms at the appropriate QBO level (header or line). VENDOR CREDITS: pass credits[] ({txn_type:"VendorCredit", txn_id, amount, bill_id?}) to apply vendor credits to the bills — then every bill needs an explicit amount (the gross amount applied to that bill, cash + credits) and total_amount must equal Σ bill amounts − Σ credits (0 allowed: a $0 bill payment where credits equal the bills). Each bill becomes a Line (LinkedTxn Bill) followed by a Line per credit applied to it (LinkedTxn VendorCredit). When credits[] is given or dry_run=true the call is validated first: every Bill and VendorCredit is fetched and must exist, belong to vendor_id, and have an open/unapplied Balance covering its amount; and each must be not reconciled/cleared per QBO\'s TransactionList report (reconciled, cleared, or status-unreadable items are refused unless allow_reconciled=true). dry_run=true returns the exact payload and every check without posting. After a live post the BillPayment, each Bill and each VendorCredit are re-read and their resulting balances reported; if anything does not match, the new BillPayment is deleted (rollback) and the failure reported.',
       {
         client_name: z.string().describe('The name of the client company'),
         vendor_id: z.string().describe('QBO Vendor ID'),
@@ -2094,15 +2095,30 @@ export async function registerMcpRoutes(
         bill_ids: z.array(z.object({
           bill_id: z.string().describe('Bill ID to apply payment to'),
           amount: z.number().optional().describe('Amount to apply to this bill'),
-        })).optional().describe('Bills to apply payment to'),
+        })).optional().describe('Bills to apply payment to. With credits[], amount is required per bill and is the gross amount applied (cash + credits).'),
+        credits: z.array(z.object({
+          txn_type: z.literal('VendorCredit').describe("Credit type — 'VendorCredit'"),
+          txn_id: z.string().describe('QBO VendorCredit ID'),
+          amount: z.number().describe('Amount of this credit to apply (> 0)'),
+          bill_id: z.string().optional().describe('Bill (from bill_ids) this credit applies to; required when paying more than one bill'),
+        }).strict()).optional().describe('Vendor credits to apply to the bills. total_amount must equal Σ bill amounts − Σ credits (0 allowed).'),
+        dry_run: z.boolean().optional().describe('true = validate and return the exact payload + checks; nothing is posted. Default false.'),
+        allow_reconciled: z.boolean().optional().describe('Allow applying to bills/credits that are reconciled, cleared, or whose reconcile status cannot be read. Default false (refused).'),
       },
-      async ({ client_name, vendor_id, vendor_name, total_amount, txn_date, doc_number, pay_type, bank_account_id, credit_card_account_id, private_note, department_id, print_status, bill_ids }) => {
+      async ({ client_name, vendor_id, vendor_name, total_amount, txn_date, doc_number, pay_type, bank_account_id, credit_card_account_id, private_note, department_id, print_status, bill_ids, credits, dry_run, allow_reconciled }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) {
           return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
         }
 
         try {
+          if ((credits && credits.length > 0) || dry_run) {
+            const r = await createBillPaymentValidated(qboManager, realmId, {
+              vendor_id, vendor_name, total_amount, txn_date, doc_number, pay_type,
+              bank_account_id, credit_card_account_id, private_note, department_id, print_status, bill_ids, credits,
+            }, { dry_run: dry_run === true, allow_reconciled: allow_reconciled === true });
+            return { content: [{ type: 'text', text: r.text }], ...(r.ok ? {} : { isError: true }) };
+          }
           const payload = buildBillPaymentCreatePayload({
             vendor_id, vendor_name, total_amount, txn_date, doc_number, pay_type,
             bank_account_id, credit_card_account_id, private_note, department_id, print_status, bill_ids,
