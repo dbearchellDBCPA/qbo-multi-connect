@@ -9,7 +9,8 @@
  * Validated flow (used whenever credits[] is given or dry_run=true):
  *   1. structural checks (strict amounts, total = bills − credits)
  *   2. fetch every Bill / VendorCredit: exists, same vendor, open Balance covers
- *   3. reconcile/cleared status via TransactionList (refuse unless allow_reconciled)
+ *   3. no reconcile/cleared check: Bills and VendorCredits are A/P documents and
+ *      never carry a cleared/reconciled status in QBO (allow_reconciled is a no-op)
  *   4. dry_run → return payload + checks; else post, re-read BillPayment + each
  *      Bill + each VendorCredit, verify balances; on mismatch delete the new
  *      BillPayment (rollback) and report.
@@ -85,50 +86,9 @@ export function buildBillPaymentWithCreditsPayload(a: CreateBillPaymentWithCredi
   return payload;
 }
 
-// ── Reconcile status ─────────────────────────────────────────────────────────
-
-const TYPE_LABEL: Record<string, string[]> = { Bill: ['bill'], VendorCredit: ['vendor credit', 'vendorcredit', 'credit'] };
-
-/** Does a TransactionList report have a row for this txn id (and, when a type column exists, this type)? */
-export function reportHasTxn(report: any, id: string, type: string): boolean {
-  const labels = TYPE_LABEL[type] ?? [type.toLowerCase()];
-  const walk = (rows: any[] | undefined): boolean =>
-    (rows ?? []).some((r) => {
-      const cols: any[] = r?.ColData ?? [];
-      const idCol = cols.find((c) => c?.id === id);
-      if (idCol) {
-        const typeVals = cols.map((c) => String(c?.value ?? '').toLowerCase());
-        const hasTypeCol = typeVals.some((v) => ['bill', 'vendor credit', 'check', 'bill payment (check)', 'journal entry', 'invoice', 'deposit', 'expense', 'credit'].includes(v));
-        if (!hasTypeCol || typeVals.some((v) => labels.includes(v))) return true;
-      }
-      return walk(r?.Rows?.Row);
-    });
-  return walk(report?.Rows?.Row);
-}
-
-export type ReconStatus = 'not_reconciled' | 'reconciled' | 'cleared' | 'unknown';
-
-/**
- * Reconcile status of a Bill / VendorCredit from QBO's TransactionList report
- * (no account filter, the txn's date, the vendor): present in cleared=Reconciled → reconciled;
- * in cleared=Cleared → cleared; in cleared=Uncleared → not_reconciled; otherwise (not found
- * anywhere, or the report errored) → unknown.
- */
-export async function readReconStatus(q: any, realmId: string, type: string, txn: any, vendorId: string): Promise<{ status: ReconStatus; detail?: string }> {
-  const base = { startDate: txn.TxnDate, endDate: txn.TxnDate, vendorId };
-  try {
-    for (const [cleared, status] of [['Reconciled', 'reconciled'], ['Cleared', 'cleared'], ['Uncleared', 'not_reconciled']] as const) {
-      const rep = await q.banking.transactionList(realmId, { ...base, cleared });
-      if (reportHasTxn(rep, String(txn.Id), type)) return { status };
-    }
-    return { status: 'unknown', detail: `${type} ${txn.Id} not found in TransactionList for ${txn.TxnDate} under any cleared status` };
-  } catch (e: any) {
-    return { status: 'unknown', detail: `TransactionList failed: ${e?.message ?? e}` };
-  }
-}
-
 // ── Validated create flow ────────────────────────────────────────────────────
 
+/** allow_reconciled is accepted for schema compatibility; it is a no-op (no reconcile check on A/P documents). */
 export interface FlowOpts { dry_run: boolean; allow_reconciled: boolean }
 
 interface Check { item: string; ok: boolean; message: string; [k: string]: unknown }
@@ -169,14 +129,10 @@ export async function createBillPaymentValidated(q: any, realmId: string, a: Cre
     else if (toCents(bal) < toCents(it.apply)) problems.push(it.type === 'Bill'
       ? `${label}: open balance ${bal.toFixed(2)} is less than the ${it.apply.toFixed(2)} to apply.`
       : `${label}: unapplied balance ${bal.toFixed(2)} is less than the ${it.apply.toFixed(2)} to apply.`);
-    const recon = await readReconStatus(q, realmId, it.type, txn, a.vendor_id);
-    if (recon.status !== 'not_reconciled') {
-      if (o.allow_reconciled) checks.push({ item: label, ok: true, message: `${label}: reconcile status ${recon.status} — allowed by allow_reconciled=true.${recon.detail ? ` (${recon.detail})` : ''}` });
-      else problems.push(`${label}: reconcile status is ${recon.status} — refused (pass allow_reconciled=true to override).${recon.detail ? ` (${recon.detail})` : ''}`);
-    }
     before[label] = { type: it.type, id: it.id, balance: bal, apply: it.apply };
-    checks.push({ item: label, ok: problems.length === 0, message: problems.length ? problems.join(' ') : `${label}: ok (vendor ${a.vendor_id}, balance ${bal.toFixed(2)}, applying ${it.apply.toFixed(2)}, reconcile ${recon.status}).`, date: txn.TxnDate, balance: bal, reconcile_status: recon.status });
+    checks.push({ item: label, ok: problems.length === 0, message: problems.length ? problems.join(' ') : `${label}: ok (vendor ${a.vendor_id}, balance ${bal.toFixed(2)}, applying ${it.apply.toFixed(2)}).`, date: txn.TxnDate, balance: bal, reconcile_status: 'not_applicable' });
   }
+  checks.push({ item: 'reconcile_status', ok: true, message: 'Reconcile status: not applicable to A/P documents (Bills and VendorCredits never carry a cleared/reconciled status in QBO); not checked. allow_reconciled is accepted but has no effect here.' });
   const valid = checks.every((c) => c.ok);
   const report = { dry_run: o.dry_run, valid, payload, checks };
   if (o.dry_run) return { ok: valid, text: `DRY RUN — nothing was posted. ${valid ? 'All checks passed.' : 'Checks FAILED; a live run would be refused.'}\n${JSON.stringify(report, null, 2)}` };
