@@ -125,9 +125,10 @@ describe('create_bill_payment credits[] — e2e (mocked Intuit)', () => {
       { Amount: 4512, LinkedTxn: [{ TxnId: '11768', TxnType: 'Bill' }] },
       { Amount: 4512, LinkedTxn: [{ TxnId: '11353', TxnType: 'VendorCredit' }] },
     ]);
-    expect(rep.checks.map((c: any) => c.reconcile_status)).toEqual(['not_reconciled', 'not_reconciled']);
+    expect(rep.checks.slice(0, 2).map((c: any) => c.reconcile_status)).toEqual(['not_applicable', 'not_applicable']);
+    expect(rep.checks.some((c: any) => /not applicable to A\/P documents/.test(c.message))).toBe(true);
     expect(posts).toHaveLength(0);
-    expect(reports).toContain('Uncleared|3|2026-09-15');
+    expect(reports).toHaveLength(0);
   });
 
   it('Spa Medical $0 payment posts, re-reads, and reports zero balances', async () => {
@@ -144,20 +145,21 @@ describe('create_bill_payment credits[] — e2e (mocked Intuit)', () => {
     ]);
   });
 
-  it.each(['Reconciled', 'Cleared', 'missing', 'error'] as const)('refuses when reconcile status is %s', async (m) => {
+  it.each(['missing', 'Reconciled', 'error'] as const)('Bill 11768 + VendorCredit 11353 pass with no reconcile lookup (TransactionList %s)', async (m) => {
     mode.recon = m;
+    const d = await call(spa({ dry_run: true }));
+    expect(d.isError).toBe(false);
+    expect(d.text).toContain('All checks passed.');
+    expect(d.text).not.toMatch(/refused/);
     const r = await call(spa());
-    expect(r.isError).toBe(true);
-    expect(r.text).toContain('Refused — nothing was posted.');
-    expect(r.text).toMatch(/reconcile status is (reconciled|cleared|unknown) — refused/);
-    expect(posts).toHaveLength(0);
+    expect(r.text).toContain('recorded and verified');
+    expect(reports).toHaveLength(0);
   });
 
-  it('allow_reconciled overrides', async () => {
-    mode.recon = 'Reconciled';
+  it('allow_reconciled is still accepted (no-op)', async () => {
     const r = await call(spa({ allow_reconciled: true }));
     expect(r.text).toContain('recorded and verified');
-    expect(r.text).toContain('allowed by allow_reconciled=true');
+    expect(reports).toHaveLength(0);
   });
 
   it('refuses vendor mismatch and insufficient balances, per item', async () => {

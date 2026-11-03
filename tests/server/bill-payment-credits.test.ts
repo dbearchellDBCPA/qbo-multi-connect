@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildBillPaymentWithCreditsPayload, BillPaymentCreditsError, reportHasTxn } from '../../src/server/bill-payment-credits.js';
+import { buildBillPaymentWithCreditsPayload, BillPaymentCreditsError } from '../../src/server/bill-payment-credits.js';
 
 const base = { vendor_id: '3', pay_type: 'Check' as const, bank_account_id: '35', txn_date: '2026-10-07' };
 
@@ -32,12 +32,3 @@ describe('buildBillPaymentWithCreditsPayload', () => {
   });
 });
 
-describe('reportHasTxn', () => {
-  const rep = { Rows: { Row: [{ ColData: [{ value: '2026-10-07' }, { value: 'Bill', id: '11768' }] }, { ColData: [{ value: '2026-10-07' }, { value: 'Vendor Credit', id: '11353' }] }] } };
-  it('matches id and type', () => {
-    expect(reportHasTxn(rep, '11768', 'Bill')).toBe(true);
-    expect(reportHasTxn(rep, '11353', 'VendorCredit')).toBe(true);
-    expect(reportHasTxn(rep, '11353', 'Bill')).toBe(false);
-    expect(reportHasTxn(rep, '1', 'Bill')).toBe(false);
-  });
-});
