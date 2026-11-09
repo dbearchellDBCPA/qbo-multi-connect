@@ -23,6 +23,7 @@ import {
   qboPoLinesToUpdateShape,
   qboDepositLinesToUpdateShape,
   buildDepositTxnLines,
+  DEPOSIT_LINKED_TXN_TYPES,
   buildDepositUpdatePayload,
   depositLineEntityError,
   swapItemInLines,
@@ -4023,6 +4024,16 @@ export async function registerMcpRoutes(
       }
     );
 
+    // Deposit lines linking a txn out of Undeposited Funds. QBO rejects any
+    // Deposit LinkedTxn without TxnLineId (error 2020) — "0" for whole-txn
+    // links (Payment / SalesReceipt / RefundReceipt).
+    const depositLinkedTxnSchema = z.object({
+      payment_id: z.string().describe('TxnId of the Payment (or SalesReceipt/RefundReceipt/JournalEntry per txn_type) sitting in Undeposited Funds'),
+      amount: z.number().describe('Amount of this linked transaction to deposit'),
+      txn_type: z.enum(DEPOSIT_LINKED_TXN_TYPES).optional().describe('LinkedTxn.TxnType (default "Payment")'),
+      txn_line_id: z.string().optional().describe('LinkedTxn.TxnLineId. Defaults to "0" for Payment/SalesReceipt/RefundReceipt (QBO convention for whole-transaction links); required for JournalEntry/Transfer (the line id being deposited)'),
+    });
+
     // ── create_deposit ────────────────────────────────────────────────────────
     server.tool(
       'create_deposit',
@@ -4034,10 +4045,7 @@ export async function registerMcpRoutes(
         private_note: z.string().optional().describe('Memo'),
         department_id: z.string().optional().describe('Header DepartmentRef.value'),
         doc_number: z.string().optional().describe(DOC_NUMBER_PARAM_DESCRIPTION),
-        linked_payment_ids: z.array(z.object({
-          payment_id: z.string().describe('Payment ID to include in this deposit (from Undeposited Funds)'),
-          amount: z.number().describe('Amount of this payment to deposit'),
-        })).optional().describe('Existing customer payments to move from Undeposited Funds into the bank account'),
+        linked_payment_ids: z.array(depositLinkedTxnSchema).optional().describe('Existing customer payments to move from Undeposited Funds into the bank account'),
         deposit_lines: z.array(z.object({
           amount: z.number().describe('Amount'),
           account_id: z.string().describe('Income or liability account ID'),
@@ -4080,7 +4088,7 @@ export async function registerMcpRoutes(
     // ── update_deposit ────────────────────────────────────────────────────────
     server.tool(
       'update_deposit',
-      'Update an existing bank deposit in place. Read-modify-write: fetches the current Deposit, merges only what you pass, and writes the FULL object back with a fresh SyncToken — untouched fields are preserved. Line semantics, per array independently: a PROVIDED array replaces that kind of line with exactly what you pass; an OMITTED array preserves the existing lines of that kind (so re-coding a direct line never silently unlinks payments); linked_payment_ids: [] explicitly removes the linked payments (they return to Undeposited Funds); omit both arrays for a metadata-only update that leaves lines untouched. Every line change is verified against QBO after the write and automatically rolled back to the original lines if the result does not match. Deposit lines accept a "Received From" entity (entity_id + entity_type: Vendor | Customer | Employee) so vendor-refund deposits can be attributed to the vendor, plus per-line class_id (ClassRef) and payment_method_id (PaymentMethodRef) — both round-trip through get_deposit, and preserved lines keep the Class and Payment Method they already had.',
+      'Update an existing bank deposit in place. Read-modify-write: fetches the current Deposit, merges only what you pass, and writes the FULL object back with a fresh SyncToken — untouched fields are preserved. Line semantics, per array independently: a PROVIDED array replaces that kind of line with exactly what you pass; an OMITTED array preserves the existing lines of that kind (so re-coding a direct line never silently unlinks payments); linked_payment_ids: [] explicitly removes the linked payments (they return to Undeposited Funds); add_linked_payment_ids appends linked payments from Undeposited Funds while keeping every existing line (each LinkedTxn is sent with TxnLineId — "0" for Payment/SalesReceipt/RefundReceipt); dry_run=true returns the payload and new total without writing; omit both arrays for a metadata-only update that leaves lines untouched. Every line change is verified against QBO after the write and automatically rolled back to the original lines if the result does not match. Deposit lines accept a "Received From" entity (entity_id + entity_type: Vendor | Customer | Employee) so vendor-refund deposits can be attributed to the vendor, plus per-line class_id (ClassRef) and payment_method_id (PaymentMethodRef) — both round-trip through get_deposit, and preserved lines keep the Class and Payment Method they already had.',
       {
         client_name: z.string().describe('The name of the client company'),
         deposit_id: z.string().describe('The QBO Deposit ID to update'),
@@ -4088,10 +4096,9 @@ export async function registerMcpRoutes(
         txn_date: z.string().optional().describe('New deposit date (YYYY-MM-DD)'),
         private_note: z.string().optional().describe('New memo'),
         doc_number: z.string().optional().describe(DOC_NUMBER_UPDATE_PARAM_DESCRIPTION),
-        linked_payment_ids: z.array(z.object({
-          payment_id: z.string().describe('Payment ID included in this deposit (from Undeposited Funds)'),
-          amount: z.number().describe('Amount of this payment'),
-        })).optional().describe('Replacement set of linked customer payments (part of the full line replacement)'),
+        linked_payment_ids: z.array(depositLinkedTxnSchema).optional().describe('Replacement set of linked customer payments (part of the full line replacement)'),
+        add_linked_payment_ids: z.array(depositLinkedTxnSchema).optional().describe('Linked payments to ADD to this deposit (moved out of Undeposited Funds) while keeping every existing line — no need to restate the current lines. Appended to linked_payment_ids when that is also passed. Refused if the txn is already linked.'),
+        dry_run: z.boolean().optional().describe('true = build and return the exact update payload (lines, new total) without writing to QBO'),
         deposit_lines: z.array(z.object({
           amount: z.number().describe('Amount'),
           account_id: z.string().describe('Income or liability account ID'),
@@ -4103,7 +4110,7 @@ export async function registerMcpRoutes(
           payment_method_id: z.string().optional().describe('QBO PaymentMethod ID for this line (DepositLineDetail.PaymentMethodRef), e.g. Cash or Check. Use get_payment_methods to find IDs.'),
         })).optional().describe('Replacement set of direct deposit lines (part of the full line replacement)'),
       },
-      async ({ client_name, deposit_id, deposit_account_id, txn_date, private_note, doc_number, linked_payment_ids, deposit_lines }) => {
+      async ({ client_name, deposit_id, deposit_account_id, txn_date, private_note, doc_number, linked_payment_ids, add_linked_payment_ids, dry_run, deposit_lines }) => {
         const docErr = docNumberError(doc_number);
         if (docErr) return { content: [{ type: 'text', text: docErr }] };
         const realmId = await findRealmId(qboManager, client_name);
@@ -4116,15 +4123,29 @@ export async function registerMcpRoutes(
           const dep = existing?.Deposit;
           if (!dep) return { content: [{ type: 'text', text: `Deposit ${deposit_id} not found.` }] };
 
-          const replacingLines = Boolean(linked_payment_ids || deposit_lines);
+          const replacingLines = Boolean(linked_payment_ids || deposit_lines || add_linked_payment_ids?.length);
           const payload = buildDepositUpdatePayload(dep, {
             deposit_account_id,
             txn_date,
             private_note,
             doc_number,
             linked_payment_ids,
+            add_linked_payment_ids,
             deposit_lines,
           });
+
+          if (dry_run) {
+            const stats = postedLineStats(payload.Line);
+            const preview = {
+              dry_run: true,
+              deposit_id: dep.Id,
+              current_total: dep.TotalAmt,
+              new_total: stats.total,
+              line_count: stats.count,
+              payload,
+            };
+            return { content: [{ type: 'text', text: `DRY RUN — nothing was written to QBO.\n${JSON.stringify(preview, null, 2)}` }] };
+          }
 
           const result = await qboManager.banking.updateDeposit(realmId, payload);
           const updated = (result as any)?.Deposit;
@@ -4306,7 +4327,7 @@ export async function registerMcpRoutes(
             if (!payment_id) return { content: [{ type: 'text', text: 'match_type=deposit_payment requires payment_id.' }] };
             const payload: any = {
               DepositToAccountRef: { value: bank_account_id },
-              Line: [{ Amount: amount, LinkedTxn: [{ TxnId: payment_id, TxnType: 'Payment' }] }],
+              Line: buildDepositTxnLines([{ payment_id, amount }]),
             };
             if (txn_date) payload.TxnDate = txn_date;
             if (private_note) payload.PrivateNote = private_note;
@@ -4540,7 +4561,7 @@ export async function registerMcpRoutes(
     // ── get_deposit ───────────────────────────────────────────────────────────
     server.tool(
       'get_deposit',
-      'Fetch a deposit in update-ready shape. Returns linked_payment_ids (payments from Undeposited Funds) and deposit_lines (direct income lines) — both preserved on round-trip. Each direct line includes account_id, description, the "Received From" entity, and per-line class_id / payment_method_id when QBO has them, in the exact shape update_deposit accepts.',
+      'Fetch a deposit in update-ready shape. Returns linked_payment_ids (payments / sales receipts from Undeposited Funds; txn_type shown when not Payment, txn_line_id as QBO stores it) and deposit_lines (direct income lines) — both preserved on round-trip. Each direct line includes account_id, description, the "Received From" entity, and per-line class_id / payment_method_id when QBO has them, in the exact shape update_deposit accepts.',
       {
         client_name: z.string().describe('The name of the client company'),
         deposit_id: z.string().describe('QBO Deposit ID'),

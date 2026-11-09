@@ -71,7 +71,7 @@ describe('update_deposit — lines REPLACE, never append', () => {
       deposit_lines: [{ amount: 25, account_id: '83' }],
     });
     expect(payload.Line).toHaveLength(2);
-    expect(payload.Line[0].LinkedTxn).toEqual([{ TxnId: 'pmt-9', TxnType: 'Payment' }]);
+    expect(payload.Line[0].LinkedTxn).toEqual([{ TxnId: 'pmt-9', TxnType: 'Payment', TxnLineId: '0' }]);
     expect(payload.Line[1].DepositLineDetail.AccountRef.value).toBe('83');
   });
 
@@ -114,7 +114,7 @@ describe('update_deposit — per-kind preserve/replace semantics', () => {
       deposit_lines: [{ amount: 80.08, account_id: '73', entity_id: '6', entity_type: 'Vendor' }],
     });
     expect(payload.Line).toHaveLength(2);
-    expect(payload.Line[0].LinkedTxn).toEqual([{ TxnId: 'pmt-1', TxnType: 'Payment' }]);
+    expect(payload.Line[0].LinkedTxn).toEqual([{ TxnId: 'pmt-1', TxnType: 'Payment', TxnLineId: '0' }]);
     expect(payload.Line[0].Amount).toBe(400);
     expect(payload.Line[1].DepositLineDetail.AccountRef.value).toBe('73'); // re-coded
     expect(payload.Line[1].DepositLineDetail.Entity).toEqual({ value: '6', type: 'VENDOR' });
@@ -508,7 +508,7 @@ describe('deposit lines — Class and Payment Method', () => {
       [{ payment_id: 'pmt-1', amount: 400 }],
       [{ amount: 100, account_id: '150', class_id: CLASS_UNRESTRICTED, payment_method_id: PM_CHECK }]
     );
-    expect(lines[0]).toEqual({ Amount: 400, LinkedTxn: [{ TxnId: 'pmt-1', TxnType: 'Payment' }] });
+    expect(lines[0]).toEqual({ Amount: 400, LinkedTxn: [{ TxnId: 'pmt-1', TxnType: 'Payment', TxnLineId: '0' }] });
     expect(lines[0]).not.toHaveProperty('DepositLineDetail');
   });
 });

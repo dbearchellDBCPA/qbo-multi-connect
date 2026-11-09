@@ -587,6 +587,19 @@ update_sales_receipt(client_name="Acme Corp", sales_receipt_id="456", lines=reco
 Funds) and `deposit_lines` (direct income lines). Both must be passed on
 round-trip to avoid accidentally returning payments to Undeposited Funds.
 
+Every Deposit `LinkedTxn` is sent with `TxnLineId` (QBO rejects it otherwise
+with error 2020 "LinkedTxn.TxnLineId is missing"): `"0"` for Payment /
+SalesReceipt / RefundReceipt, or the explicit `txn_line_id` (required for
+JournalEntry / Transfer). Linked lines round-trip exactly as QBO returned them.
+To move one more payment out of Undeposited Funds onto an existing deposit
+without restating its lines, use `add_linked_payment_ids` (and `dry_run: true`
+to preview the payload and new total):
+
+```python
+update_deposit(client_name="Acme Corp", deposit_id="85740",
+               add_linked_payment_ids=[{"payment_id": "85780", "amount": 20.00}])
+```
+
 `get_expense` pairs with `update_expense`, which edits the original Purchase
 in place (same ID, incremented SyncToken) rather than creating a correcting
 entry. It auto-fetches the current record + SyncToken by ID, applies sparse

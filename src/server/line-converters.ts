@@ -288,9 +288,46 @@ export interface DepositDirectLineInput {
   payment_method_id?: string;
 }
 
+/**
+ * Transaction types that can sit on a Deposit line as a LinkedTxn (funds
+ * moved out of Undeposited Funds). Payment / SalesReceipt / RefundReceipt
+ * link the WHOLE transaction, so QBO's TxnLineId for them is "0".
+ * JournalEntry / Transfer link a specific line and need its real line id.
+ */
+export const DEPOSIT_LINKED_TXN_TYPES = ['Payment', 'SalesReceipt', 'RefundReceipt', 'JournalEntry', 'Transfer'] as const;
+export type DepositLinkedTxnType = (typeof DEPOSIT_LINKED_TXN_TYPES)[number] | (string & {});
+const WHOLE_TXN_LINK_TYPES = new Set(['Payment', 'SalesReceipt', 'RefundReceipt']);
+
 export interface DepositLinkedPaymentInput {
+  /** TxnId of the linked transaction (named payment_id for backward compatibility). */
   payment_id: string;
   amount: number;
+  /** LinkedTxn.TxnType — defaults to "Payment". */
+  txn_type?: DepositLinkedTxnType;
+  /** LinkedTxn.TxnLineId — defaults to "0" for Payment/SalesReceipt/RefundReceipt; required otherwise. */
+  txn_line_id?: string;
+}
+
+export class DepositLinkedTxnError extends Error {}
+
+/**
+ * QBO error 2020 "LinkedTxn.TxnLineId is missing" (FCCCG Deposit 85740,
+ * 2026-11-09): every LinkedTxn on a Deposit line MUST carry TxnLineId.
+ * Returns the TxnLineId to send, or throws when none can be inferred.
+ */
+export function depositLinkedTxnLineId(lp: DepositLinkedPaymentInput): string {
+  if (lp.txn_line_id != null && String(lp.txn_line_id) !== '') return String(lp.txn_line_id);
+  const type = lp.txn_type ?? 'Payment';
+  if (WHOLE_TXN_LINK_TYPES.has(type)) return '0';
+  throw new DepositLinkedTxnError(
+    `Linked ${type} ${lp.payment_id} needs txn_line_id (the ${type} line being deposited). ` +
+    `Only Payment / SalesReceipt / RefundReceipt default to TxnLineId "0". Nothing was posted.`
+  );
+}
+
+/** Build the LinkedTxn array for one deposit line (always includes TxnLineId). */
+export function depositLinkedTxn(lp: DepositLinkedPaymentInput): any[] {
+  return [{ TxnId: String(lp.payment_id), TxnType: lp.txn_type ?? 'Payment', TxnLineId: depositLinkedTxnLineId(lp) }];
 }
 
 export interface DepositUpdateShape {
@@ -303,8 +340,16 @@ export function qboDepositLinesToUpdateShape(lines: any[]): DepositUpdateShape {
   const deposit_lines: DepositDirectLineInput[] = [];
 
   for (const l of (lines ?? [])) {
-    if (l.LinkedTxn?.length && l.LinkedTxn[0].TxnType === 'Payment') {
-      linked_payment_ids.push({ payment_id: l.LinkedTxn[0].TxnId, amount: l.Amount ?? 0 });
+    if (l.LinkedTxn?.length && l.LinkedTxn[0]?.TxnId != null) {
+      // Any linked txn (Payment, SalesReceipt, RefundReceipt, JournalEntry…)
+      // round-trips exactly as QBO returned it, including TxnLineId, so a
+      // preserved line is re-posted with the same link. Fields stay absent
+      // when they carry the default so the plain-Payment shape is unchanged.
+      const lt = l.LinkedTxn[0];
+      const lp: DepositLinkedPaymentInput = { payment_id: String(lt.TxnId), amount: l.Amount ?? 0 };
+      if (lt.TxnType && lt.TxnType !== 'Payment') lp.txn_type = lt.TxnType;
+      if (lt.TxnLineId != null && String(lt.TxnLineId) !== '') lp.txn_line_id = String(lt.TxnLineId);
+      linked_payment_ids.push(lp);
     } else if (l.DetailType === 'DepositLineDetail' && l.DepositLineDetail) {
       const d = l.DepositLineDetail;
       const dl: DepositDirectLineInput = { amount: l.Amount ?? 0, account_id: d.AccountRef?.value ?? '' };
@@ -348,9 +393,11 @@ export function buildDepositTxnLines(
 ): any[] {
   const lines: any[] = [];
   for (const lp of linkedPayments) {
+    // Linked lines carry Amount + LinkedTxn only: QBO takes the account
+    // (Undeposited Funds) from the linked txn, so no DepositLineDetail.
     lines.push({
       Amount: lp.amount,
-      LinkedTxn: [{ TxnId: lp.payment_id, TxnType: 'Payment' }],
+      LinkedTxn: depositLinkedTxn(lp),
     });
   }
   for (const dl of depositLines) {
@@ -569,7 +616,7 @@ export const journalLineKind: LineKindFn = (l) =>
   l?.DetailType === 'JournalEntryLineDetail' ? 'monetary' : null;
 
 function isDepositLinkedPayment(l: any): boolean {
-  return l?.LinkedTxn?.[0]?.TxnId != null && l?.LinkedTxn?.[0]?.TxnType === 'Payment';
+  return l?.LinkedTxn?.[0]?.TxnId != null;
 }
 
 /**
@@ -583,7 +630,7 @@ function isDepositLinkedPayment(l: any): boolean {
  * changing account on one line must keep that line's Id.
  *
  * Matching:
- *  - Linked Payment lines → by LinkedTxn[0].TxnId
+ *  - Linked lines (Payment/SalesReceipt/…) → by LinkedTxn[0].TxnType + TxnId
  *  - DepositLineDetail lines → by index among direct lines (so re-coding
  *    account keeps the same Id)
  * Extra new lines beyond the existing count get no Id (true add). Shrinking
@@ -595,7 +642,7 @@ export function stampDepositLineIds(existingLines: any[] | undefined | null, new
     entityLabel: 'deposit',
     lineKind: (l) =>
       isDepositLinkedPayment(l) ? 'linked' : l?.DetailType === 'DepositLineDetail' ? 'direct' : null,
-    matchKey: (l) => (isDepositLinkedPayment(l) ? `txn:${String(l.LinkedTxn[0].TxnId)}` : null),
+    matchKey: (l) => (isDepositLinkedPayment(l) ? `txn:${String(l.LinkedTxn[0].TxnType ?? 'Payment')}:${String(l.LinkedTxn[0].TxnId)}` : null),
   });
 }
 
@@ -628,6 +675,8 @@ export function buildDepositUpdatePayload(
     /** undefined = untouched, "" = clear, otherwise set. Never touches Line. */
     doc_number?: string;
     linked_payment_ids?: DepositLinkedPaymentInput[];
+    /** Appended to linked_payment_ids (or to the existing linked lines when that is omitted). */
+    add_linked_payment_ids?: DepositLinkedPaymentInput[];
     deposit_lines?: DepositDirectLineInput[];
   }
 ): any {
@@ -636,9 +685,20 @@ export function buildDepositUpdatePayload(
   if (args.txn_date) payload.TxnDate = args.txn_date;
   if (args.private_note !== undefined) payload.PrivateNote = args.private_note;
   if (args.doc_number !== undefined) payload.DocNumber = args.doc_number;
-  if (args.linked_payment_ids || args.deposit_lines) {
+  if (args.linked_payment_ids || args.deposit_lines || args.add_linked_payment_ids?.length) {
     const current = qboDepositLinesToUpdateShape(existing?.Line ?? []);
-    const linked = args.linked_payment_ids ?? current.linked_payment_ids;
+    const base = args.linked_payment_ids ?? current.linked_payment_ids;
+    const key = (lp: DepositLinkedPaymentInput) => `${lp.txn_type ?? 'Payment'}:${String(lp.payment_id)}`;
+    const have = new Set(base.map(key));
+    for (const lp of args.add_linked_payment_ids ?? []) {
+      if (have.has(key(lp))) {
+        throw new DepositLinkedTxnError(
+          `${lp.txn_type ?? 'Payment'} ${lp.payment_id} is already linked on this deposit. Nothing was posted.`
+        );
+      }
+      have.add(key(lp));
+    }
+    const linked = [...base, ...(args.add_linked_payment_ids ?? [])];
     const direct = args.deposit_lines ?? current.deposit_lines;
     payload.Line = stampDepositLineIds(existing?.Line, buildDepositTxnLines(linked, direct));
     // Full update so omitted line Ids are dropped rather than left hanging.
