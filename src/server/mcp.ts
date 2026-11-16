@@ -1,3 +1,10 @@
+import {
+  BANK_REGISTER_COLUMNS,
+  defaultUnclearedRange,
+  filterToUncleared,
+  formatBankRegister,
+  resolveRegisterAccount,
+} from './bank-register.js';
 import { registerTransferTools } from './transfer-tools.js';
 import { createBillPaymentValidated } from './bill-payment-credits.js';
 import { registerBulkTxnTools } from './bulk-txn-tools.js';
@@ -250,56 +257,7 @@ function formatCashFlow(reportData: any, clientName: string, startDate: string, 
   return lines.join('\n');
 }
 
-// ─── TransactionList / Bank Register Formatter ───────────────────────────────
-
-function formatTransactionList(report: any, clientName: string, accountName?: string, title = 'BANK REGISTER'): string {
-  const cols: any[] = report?.Columns?.Column ?? [];
-  const colTitles = cols.map((c: any) => (c.ColTitle ?? '').toLowerCase());
-
-  const idxDate = colTitles.findIndex((t: string) => t === 'date');
-  const idxType = colTitles.findIndex((t: string) => t.includes('transaction type') || t === 'type');
-  const idxNum  = colTitles.findIndex((t: string) => t === 'no.' || t === 'no' || t === 'num');
-  const idxName = colTitles.findIndex((t: string) => t === 'name');
-  const idxMemo = colTitles.findIndex((t: string) => t.includes('memo') || t.includes('description'));
-  const idxAmt  = colTitles.findIndex((t: string) => t === 'amount');
-  const idxBal  = colTitles.findIndex((t: string) => t === 'balance');
-  const idxClr  = colTitles.findIndex((t: string) => t === 'clr' || t === 'cleared' || t === 'reconcile status');
-
-  const rows: any[] = [];
-  function collectRows(rowSet: any): void {
-    if (!rowSet?.Row) return;
-    for (const row of rowSet.Row) {
-      if (row.type === 'Data') rows.push(row);
-      else if (row.Rows) collectRows(row.Rows);
-    }
-  }
-  collectRows(report?.Rows);
-
-  const lines: string[] = [
-    `${title} — ${clientName}`,
-    accountName ? `Account: ${accountName}` : '',
-    `Transactions: ${rows.length}`,
-    '─'.repeat(110),
-    `${'Date'.padEnd(12)} ${'Type'.padEnd(20)} ${'No.'.padEnd(8)} ${'Name'.padEnd(25)} ${'Memo'.padEnd(25)} ${'Clr'.padEnd(4)} ${'Amount'.padStart(12)} ${'Balance'.padStart(12)}`,
-    '─'.repeat(110),
-  ].filter(Boolean);
-
-  for (const row of rows) {
-    const cd = row.ColData ?? [];
-    const v = (i: number) => (i >= 0 ? cd[i]?.value ?? '' : '');
-    const date  = v(idxDate).padEnd(12);
-    const type  = v(idxType).substring(0, 19).padEnd(20);
-    const num   = v(idxNum).substring(0, 7).padEnd(8);
-    const name  = v(idxName).substring(0, 24).padEnd(25);
-    const memo  = v(idxMemo).substring(0, 24).padEnd(25);
-    const clr   = v(idxClr).substring(0, 3).padEnd(4);
-    const amt   = formatCurrency(v(idxAmt)).padStart(12);
-    const bal   = idxBal >= 0 ? formatCurrency(v(idxBal)).padStart(12) : ''.padStart(12);
-    lines.push(`${date} ${type} ${num} ${name} ${memo} ${clr} ${amt} ${bal}`);
-  }
-
-  return lines.join('\n');
-}
+// Bank-register formatting lives in bank-register.ts (pure + unit-tested).
 
 // ─── Client Lookup Helper ─────────────────────────────────────────────────────
 
@@ -396,6 +354,39 @@ function strictArgs(shape: Record<string, any>): z.ZodTypeAny {
 }
 
 // ─── MCP Server Setup ─────────────────────────────────────────────────────────
+
+
+async function loadBankRegister(
+  qboManager: ScopedQBOManager,
+  realmId: string,
+  opts: { account_id: string; account_name?: string; start_date: string; end_date: string; uncleared: boolean },
+): Promise<{ report: any; label: string } | { error: string }> {
+  const accountsResp: any = await qboManager.accounts.getAll(realmId);
+  const accountList: any[] = accountsResp?.QueryResponse?.Account ?? [];
+  const resolved = resolveRegisterAccount(accountList, opts.account_id);
+  if (!resolved.ok) return { error: resolved.error };
+  const account = resolved.account;
+  const label = opts.account_name?.trim() || account.label;
+
+  const glOptions = {
+    startDate: opts.start_date,
+    endDate: opts.end_date,
+    accountIds: account.id,
+    columns: BANK_REGISTER_COLUMNS,
+  };
+  let report: any;
+  try {
+    report = await qboManager.reports.generalLedger(realmId, glOptions);
+  } catch {
+    report = await qboManager.reports.generalLedger(realmId, {
+      startDate: opts.start_date,
+      endDate: opts.end_date,
+      accountIds: account.id,
+    });
+  }
+  if (opts.uncleared) report = filterToUncleared(report);
+  return { report, label };
+}
 
 export async function registerMcpRoutes(
   fastify: FastifyInstance,
@@ -3968,13 +3959,15 @@ export async function registerMcpRoutes(
     // ═══════════════════════════════════════════════════════════════════════════
 
     // ── get_bank_register ─────────────────────────────────────────────────────
+    // TransactionList has no `account` filter (QBO ignores unknown params), so
+    // this uses GeneralLedger with Account.Id + is_cleared/rbal_nat_amount.
     server.tool(
       'get_bank_register',
-      'Read the posted transaction register for a bank or credit card account. Uses the QBO TransactionList report. Returns date, type, number, name, memo, cleared status, amount, and running balance.',
+      'Read the posted transaction register for a bank or credit card account. Uses the QBO GeneralLedger report (TransactionList has no account filter). Returns date, type, number, name, memo, cleared status (Clr), amount, and running balance. account_id accepts a QBO Account ID, account number, or exact account name — unresolved terms error out instead of returning every account.',
       {
         client_name: z.string().describe('The name of the client company'),
-        account_id: z.string().describe('QBO Account ID for the bank or credit card account (use get_accounts to find IDs)'),
-        account_name: z.string().optional().describe('Account name for display'),
+        account_id: z.string().describe('Bank or credit card account: QBO Account ID, account number (e.g. "104" or "1150040001"), or exact account name. Resolved to Account.Id before calling Intuit; unmatched terms return an error, never an unfiltered register.'),
+        account_name: z.string().optional().describe('Optional display name. Not used as a filter if account_id already resolves.'),
         start_date: z.string().describe('Start date YYYY-MM-DD'),
         end_date: z.string().describe('End date YYYY-MM-DD'),
       },
@@ -3982,12 +3975,9 @@ export async function registerMcpRoutes(
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
         try {
-          const report = await qboManager.banking.transactionList(realmId, {
-            startDate: start_date,
-            endDate: end_date,
-            accountId: account_id,
-          });
-          const formatted = formatTransactionList(report, client_name, account_name ?? account_id, 'BANK REGISTER');
+          const pulled = await loadBankRegister(qboManager, realmId, { account_id, account_name, start_date, end_date, uncleared: false });
+          if ('error' in pulled) return { content: [{ type: 'text', text: pulled.error }] };
+          const formatted = formatBankRegister(pulled.report, client_name, pulled.label, 'BANK REGISTER', { start: start_date, end: end_date });
           return { content: [{ type: 'text', text: formatted }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error fetching bank register: ${err?.message ?? err}` }] };
@@ -3998,25 +3988,24 @@ export async function registerMcpRoutes(
     // ── get_uncleared_transactions ────────────────────────────────────────────
     server.tool(
       'get_uncleared_transactions',
-      'Get uncleared (outstanding) transactions for a bank or credit card account. Useful for reconciliation prep.',
+      'Get uncleared (outstanding) transactions for a bank or credit card account. Useful for reconciliation prep. Uses the GeneralLedger report filtered to the resolved account, then drops rows whose Clr status is cleared or reconciled. account_id accepts a QBO Account ID, account number, or exact account name. If start_date/end_date are omitted, defaults to the last 10 years through today (QBO\'s own default is this month-to-date, which hides older outstanding items).',
       {
         client_name: z.string().describe('The name of the client company'),
-        account_id: z.string().describe('QBO Account ID for the bank or credit card account'),
-        account_name: z.string().optional().describe('Account name for display'),
-        start_date: z.string().optional().describe('Start date YYYY-MM-DD'),
-        end_date: z.string().optional().describe('End date YYYY-MM-DD'),
+        account_id: z.string().describe('Bank or credit card account: QBO Account ID, account number, or exact account name. Unmatched terms return an error, never an unfiltered list.'),
+        account_name: z.string().optional().describe('Optional display name. Not used as a filter if account_id already resolves.'),
+        start_date: z.string().optional().describe('Start date YYYY-MM-DD. Defaults to 10 years ago when omitted.'),
+        end_date: z.string().optional().describe('End date YYYY-MM-DD. Defaults to today when omitted.'),
       },
       async ({ client_name, account_id, account_name, start_date, end_date }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
         try {
-          const report = await qboManager.banking.transactionList(realmId, {
-            startDate: start_date,
-            endDate: end_date,
-            accountId: account_id,
-            cleared: 'Uncleared',
-          });
-          const formatted = formatTransactionList(report, client_name, account_name ?? account_id, 'UNCLEARED TRANSACTIONS');
+          const range = defaultUnclearedRange();
+          const start = start_date || range.start;
+          const end = end_date || range.end;
+          const pulled = await loadBankRegister(qboManager, realmId, { account_id, account_name, start_date: start, end_date: end, uncleared: true });
+          if ('error' in pulled) return { content: [{ type: 'text', text: pulled.error }] };
+          const formatted = formatBankRegister(pulled.report, client_name, pulled.label, 'UNCLEARED TRANSACTIONS', { start, end });
           return { content: [{ type: 'text', text: formatted }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error fetching uncleared transactions: ${err?.message ?? err}` }] };
@@ -4272,7 +4261,7 @@ export async function registerMcpRoutes(
     // ── match_transaction ─────────────────────────────────────────────────────
     server.tool(
       'match_transaction',
-      'Best-effort "match" a bank register entry to an existing QBO transaction. Since QBO\'s public API does not expose the For Review queue or a native match endpoint, this creates the appropriate linking transaction:\n- Match to an Invoice → creates a Payment with LinkedTxn\n- Match to a Bill → creates a BillPayment with LinkedTxn\n- Move Payments from Undeposited Funds → creates a Deposit with LinkedTxn',
+      'Creates a new Payment, BillPayment, or Deposit — this is NOT a bank-feed "For Review" match and does not link, clear, or reconcile an existing register entry. QBO\'s public API has no For Review queue or native match endpoint, so this tool posts a new linking transaction:\n- invoice → creates a Payment applied to an Invoice\n- bill → creates a BillPayment applied to a Bill\n- deposit_payment → creates a Deposit that moves a Payment out of Undeposited Funds',
       {
         client_name: z.string().describe('The name of the client company'),
         match_type: z.enum(['invoice', 'bill', 'deposit_payment']).describe(

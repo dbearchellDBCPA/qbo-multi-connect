@@ -76,12 +76,17 @@ export class BankingAPI {
     return this.client.get(realmId, `creditcardpaymenttxn/${paymentId}`, {});
   }
 
-  // ── TransactionList report (bank register read) ─────────────────────────
+  // ── TransactionList report ──────────────────────────────────────────────
   //
-  // The TransactionList report is QBO's canonical way to read the posted
-  // register for a given account. It accepts many filters but the ones
-  // most useful for a bank-register view are `account`, `start_date`,
-  // `end_date`, and `cleared`.
+  // TransactionList accepts start_date, end_date, and cleared (Cleared /
+  // Uncleared / Reconciled / Deposited), plus source_account_type. It does
+  // NOT have an `account` (Account.Id) filter — QBO ignores that param and
+  // returns the company-wide list. get_bank_register / get_uncleared_transactions
+  // therefore use reports.GeneralLedger, which does filter by account and
+  // can request is_cleared + rbal_nat_amount. This method is still used for
+  // date + cleared lookups (e.g. convert_to_transfer's reconcile check).
+  // `accountId` is still sent as `account` in case Intuit adds the param;
+  // do not treat a non-empty result as "this account only".
 
   async transactionList(
     realmId: string,
