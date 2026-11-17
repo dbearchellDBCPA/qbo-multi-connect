@@ -259,6 +259,64 @@ function stripWriteNoise(value: any): void {
   }
 }
 
+
+export function buildRecurringCreatePayload(args: {
+  txnType: RecurringTxnType;
+  template: Record<string, any>;
+  name: string;
+  recurType: string;
+  active?: boolean;
+  schedule: RecurringScheduleInfo;
+}): Record<string, any> {
+  const name = String(args.name ?? '').trim();
+  if (!name) throw new RecurringRequestError('name is required.');
+  if (!args.txnType || !TYPE_SET.has(args.txnType)) {
+    throw new RecurringRequestError(`txn_type must be one of ${RECURRING_TXN_TYPES.join(', ')}.`);
+  }
+  const template = args.template && typeof args.template === 'object' && !Array.isArray(args.template)
+    ? args.template
+    : null;
+  if (!template) throw new RecurringRequestError('template must be the inner transaction object (e.g. VendorRef and Line for a Bill).');
+  const schedule = { ...args.schedule };
+  const hasEnd = schedule.EndDate != null && String(schedule.EndDate).trim() !== '';
+  const hasMax = schedule.MaxOccurrences != null;
+  if (hasEnd && hasMax) {
+    throw new RecurringRequestError(
+      'Pass at most one of end_date or max_occurrences — QBO ScheduleInfo treats them as alternatives.',
+    );
+  }
+  if (hasEnd && !ISO_DATE.test(String(schedule.EndDate).trim())) {
+    throw new RecurringRequestError(`end_date must be YYYY-MM-DD (got "${schedule.EndDate}").`);
+  }
+  if (hasMax && (!Number.isInteger(Number(schedule.MaxOccurrences)) || Number(schedule.MaxOccurrences) < 1)) {
+    throw new RecurringRequestError(`max_occurrences must be a positive integer (got "${schedule.MaxOccurrences}").`);
+  }
+  if (schedule.StartDate && !ISO_DATE.test(String(schedule.StartDate).trim())) {
+    throw new RecurringRequestError(`start_date must be YYYY-MM-DD (got "${schedule.StartDate}").`);
+  }
+  const txn = structuredClone(template);
+  stripWriteNoise(txn);
+  delete txn.Id;
+  delete txn.SyncToken;
+  txn.RecurringInfo = {
+    Name: name,
+    RecurType: args.recurType,
+    Active: args.active !== false,
+    ScheduleInfo: schedule,
+  };
+  txn.sparse = false;
+  return { [args.txnType]: txn };
+}
+
+export function buildRecurringDeletePayload(unwrapped: UnwrappedRecurring): Record<string, any> {
+  if (!unwrapped.txn?.Id || unwrapped.txn.SyncToken == null || unwrapped.txn.SyncToken === '') {
+    throw new RecurringRequestError('Fetched RecurringTransaction is missing Id or SyncToken; cannot delete.');
+  }
+  const txn = structuredClone(unwrapped.txn);
+  stripWriteNoise(txn);
+  return { [unwrapped.txnType]: txn };
+}
+
 export function scheduleDiff(
   before: RecurringScheduleInfo,
   after: RecurringScheduleInfo,

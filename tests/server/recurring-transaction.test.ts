@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import { QBOError } from '../../src/api/client.js';
 import {
   RecurringRequestError,
+  buildRecurringCreatePayload,
+  buildRecurringDeletePayload,
   buildRecurringUpdatePayload,
   isNotFoundError,
   lineFingerprint,
@@ -270,5 +272,55 @@ describe('shapeRecurringInfo', () => {
     });
     expect(shaped.ScheduleInfo.UnknownFuture).toBe('keep');
     expect(shaped.ScheduleInfo.DayOfMonth).toBe(1);
+  });
+});
+
+describe('buildRecurringCreatePayload / delete payload', () => {
+  const billTemplate = {
+    domain: 'QBO',
+    VendorRef: { value: '32', name: 'Cal Telephone' },
+    TotalAmt: 74.36,
+    Line: [{ Id: '1', Amount: 74.36, Description: 'Monthly Phone Bill' }],
+  };
+
+  it('wraps a Bill template with RecurringInfo and strips Id/SyncToken/domain', () => {
+    const wrapper = buildRecurringCreatePayload({
+      txnType: 'Bill',
+      template: { ...billTemplate, Id: '20', SyncToken: '3' },
+      name: 'Monthly Telephone',
+      recurType: 'Automated',
+      schedule: { IntervalType: 'Monthly', NumInterval: 1, DayOfMonth: 1, DaysBefore: 5, StartDate: '2026-01-01', EndDate: '2026-12-01' },
+    });
+    expect(wrapper.Bill.VendorRef.value).toBe('32');
+    expect(wrapper.Bill.Line).toHaveLength(1);
+    expect(wrapper.Bill.Id).toBeUndefined();
+    expect(wrapper.Bill.SyncToken).toBeUndefined();
+    expect(wrapper.Bill.domain).toBeUndefined();
+    expect(wrapper.Bill.RecurringInfo).toMatchObject({
+      Name: 'Monthly Telephone',
+      RecurType: 'Automated',
+      Active: true,
+      ScheduleInfo: { IntervalType: 'Monthly', DayOfMonth: 1, EndDate: '2026-12-01', DaysBefore: 5 },
+    });
+  });
+
+  it('rejects EndDate and MaxOccurrences together', () => {
+    expect(() => buildRecurringCreatePayload({
+      txnType: 'Bill',
+      template: billTemplate,
+      name: 'Monthly Telephone',
+      recurType: 'Automated',
+      schedule: { EndDate: '2026-12-01', MaxOccurrences: 12 },
+    })).toThrow(/at most one/);
+  });
+
+  it('builds a type-wrapped delete body with Id and SyncToken preserved', () => {
+    const wrapper = monthlyTemplate('JournalEntry', '88', '7');
+    const unwrapped = unwrapRecurring(wrapper)!;
+    const payload = buildRecurringDeletePayload(unwrapped);
+    expect(payload.JournalEntry.Id).toBe('88');
+    expect(payload.JournalEntry.SyncToken).toBe('5');
+    expect(payload.JournalEntry.Line).toHaveLength(2);
+    expect(payload.JournalEntry.domain).toBeUndefined();
   });
 });

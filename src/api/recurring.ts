@@ -72,4 +72,17 @@ export class RecurringAPI {
   async update(realmId: string, wrapper: Record<string, unknown>): Promise<unknown> {
     return this.client.post(realmId, 'recurringtransaction', wrapper);
   }
+
+  /** Create a type-wrapped RecurringTransaction (Bill, JournalEntry, …). */
+  async create(realmId: string, wrapper: Record<string, unknown>): Promise<unknown> {
+    return this.client.post(realmId, 'recurringtransaction', wrapper);
+  }
+
+  /**
+   * Delete requires the full type-wrapped object (Id + SyncToken + lines),
+   * not a sparse Id/SyncToken body.
+   */
+  async delete(realmId: string, wrapper: Record<string, unknown>): Promise<unknown> {
+    return this.client.post(realmId, 'recurringtransaction?operation=delete', wrapper);
+  }
 }
