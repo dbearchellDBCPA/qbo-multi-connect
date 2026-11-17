@@ -22,6 +22,8 @@ import { registerCdcTools } from './cdc-tools.js';
 import { registerDocumentTools } from './document-tools.js';
 import { registerReportTools } from './report-tools.js';
 import { registerPaymentTools } from './payment-tools.js';
+import { registerTimeActivityTools } from './time-activity-tools.js';
+import { applyCustomFields, shapeCustomFields } from '../api/custom-fields.js';
 import { PdfDownloadStore } from './pdf-store.js';
 import { createBillPaymentValidated } from './bill-payment-credits.js';
 import { registerBulkTxnTools } from './bulk-txn-tools.js';
@@ -340,6 +342,7 @@ const DESTRUCTIVE_TOOLS = new Set<string>([
   'delete_expense',
   'delete_bill_payment',
   'delete_payment',
+  'delete_time_activity',
   'void_payment',
   'delete_imported_transactions',
   'delete_transfer',
@@ -367,6 +370,15 @@ function annotationsForTool(name: string): ToolAnnotations {
  * Build a strict argument schema from a raw shape. Unknown keys are rejected
  * with a message that names them (see the registration shim below).
  */
+const customFieldsArg = z.array(z.object({
+  definition_id: z.string().optional().describe('QBO CustomField.DefinitionId'),
+  name: z.string().optional().describe('QBO CustomField.Name'),
+  type: z.enum(['StringType', 'BooleanType', 'NumberType']).optional().describe('QBO CustomField.Type'),
+  string_value: z.string().optional(),
+  boolean_value: z.boolean().optional(),
+  number_value: z.number().optional(),
+})).optional().describe('Custom field values (QBO CustomField). Gets use include=enhancedAllCustomFields so values are returned; pass this on update to write them.');
+
 function strictArgs(shape: Record<string, any>): z.ZodTypeAny {
   // zod's own message names the offending key(s): 'Unrecognized key: "as_of_date"'.
   return z.object(shape).strict();
@@ -502,6 +514,7 @@ export async function registerMcpRoutes(
     registerCdcTools(server, qboManager, (name) => findRealmId(qboManager, name));
     registerReportTools(server, qboManager, (name) => findRealmId(qboManager, name));
     registerPaymentTools(server, qboManager, (name) => findRealmId(qboManager, name));
+    registerTimeActivityTools(server, qboManager, (name) => findRealmId(qboManager, name));
     registerDocumentTools(server, qboManager, (name) => findRealmId(qboManager, name), { pdfStore, publicBaseUrl: baseUrl });
     registerBulkTxnTools(server, qboManager, (name) => findRealmId(qboManager, name), resolveVendorByName);
 
@@ -1235,7 +1248,7 @@ export async function registerMcpRoutes(
     // ── query_transactions ────────────────────────────────────────────────────
     server.tool(
       'query_transactions',
-      'Execute a raw QBO SQL query for a client. Queryable entities include Invoice, Bill, Payment, BillPayment, Purchase, SalesReceipt, CreditMemo, RefundReceipt, JournalEntry, Deposit, Estimate, PurchaseOrder, Transfer, RecurringTransaction, Customer, Vendor, Employee, Account, Class, Department, Item, Budget, CompanyInfo, Preferences, TaxCode, TaxRate, PaymentMethod, Term, Attachable. Column projection (SELECT Id, DisplayName FROM …) is supported for scalar fields; QBO itself may reject complex-typed fields (e.g. BillAddr) in a projection list — use SELECT *, or get_customers/get_vendors with detail:"full", when you need addresses. Some fields are not queryable at all (e.g. TotalAmt on Deposit; TotalAmt does not exist on JournalEntry; Line-level fields) — QBO\'s validation error is surfaced verbatim. Results are cleaned of QBO wire noise (PurchaseEx-style JAXB blobs, empty CustomExtensions, domain, sparse) by default — MetaData create/update times are kept; pass raw=true for the untouched response.',
+      'Execute a raw QBO SQL query for a client. Queryable entities include Invoice, Bill, Payment, BillPayment, Purchase, SalesReceipt, CreditMemo, RefundReceipt, JournalEntry, Deposit, Estimate, PurchaseOrder, Transfer, RecurringTransaction, TimeActivity, Customer, Vendor, Employee, Account, Class, Department, Item, Budget, CompanyInfo, Preferences, TaxCode, TaxRate, PaymentMethod, Term, Attachable. Column projection (SELECT Id, DisplayName FROM …) is supported for scalar fields; QBO itself may reject complex-typed fields (e.g. BillAddr) in a projection list — use SELECT *, or get_customers/get_vendors with detail:"full", when you need addresses. Some fields are not queryable at all (e.g. TotalAmt on Deposit; TotalAmt does not exist on JournalEntry; Line-level fields) — QBO\'s validation error is surfaced verbatim. Results are cleaned of QBO wire noise (PurchaseEx-style JAXB blobs, empty CustomExtensions, domain, sparse) by default — MetaData create/update times are kept; pass raw=true for the untouched response.',
       {
         client_name: z.string().describe('The name of the client company'),
         query: z.string().describe('QBO SQL query, e.g. "SELECT * FROM Invoice WHERE TxnDate > \'2026-01-01\'" or "SELECT * FROM Budget"'),
@@ -1557,8 +1570,9 @@ export async function registerMcpRoutes(
           class_name: z.string().optional(),
           department_id: z.string().optional().describe('Line-level DepartmentRef.value'),
         })).optional().describe('Replacement lines — the complete new line set (omitted existing lines are removed). Carry line_id from get_journal_entry to edit in place; without line_id, Ids are matched by position. Debits must equal credits.'),
+        custom_fields: customFieldsArg,
       },
-      async ({ client_name, journal_entry_id, txn_date, private_note, doc_number, lines }) => {
+      async ({ client_name, journal_entry_id, txn_date, private_note, doc_number, lines, custom_fields }) => {
         const docErr = docNumberError(doc_number);
         if (docErr) return { content: [{ type: 'text', text: docErr }] };
         const realmId = await findRealmId(qboManager, client_name);
@@ -1588,6 +1602,7 @@ export async function registerMcpRoutes(
           // (line_id or positional) + sparse:false — see buildJournalEntryUpdatePayload.
           const payload = buildJournalEntryUpdatePayload(je, { txn_date, private_note, doc_number, lines });
 
+          applyCustomFields(payload, custom_fields);
           const result = await qboManager.journalEntries.update(realmId, payload);
           const updated = (result as any)?.JournalEntry;
           if (updated && lines) {
@@ -1725,8 +1740,9 @@ export async function registerMcpRoutes(
           class_id: z.string().optional().describe('Line ClassRef.value'),
           tax_code_id: z.string().optional().describe('Line TaxCodeRef.value (e.g. TAX / NON)'),
         })).optional().describe('Replacement line items — the complete new line set (omitted existing lines are removed). Pass the lines from get_invoice (with line_id) to edit in place; without line_id, Ids are matched by position.'),
+        custom_fields: customFieldsArg,
       },
-      async ({ client_name, invoice_id, doc_number, customer_id, txn_date, due_date, private_note, department_id, sales_term_id, lines }) => {
+      async ({ client_name, invoice_id, doc_number, customer_id, txn_date, due_date, private_note, department_id, sales_term_id, lines, custom_fields }) => {
         const docErr = docNumberError(doc_number);
         if (docErr) return { content: [{ type: 'text', text: docErr }] };
         const realmId = await findRealmId(qboManager, client_name);
@@ -1747,6 +1763,7 @@ export async function registerMcpRoutes(
             customer_id, txn_date, due_date, private_note, department_id, sales_term_id, doc_number, lines,
           });
 
+          applyCustomFields(payload, custom_fields);
           const result = await qboManager.transactions.updateInvoice(realmId, payload);
           const updated = (result as any)?.Invoice;
           if (updated && lines) {
@@ -1887,8 +1904,9 @@ export async function registerMcpRoutes(
           unit_price: z.number().optional(),
           class_id: z.string().optional().describe('Line ClassRef.value (kept on both account- and item-based lines)'),
         })).optional().describe('Replacement line items — the complete new line set (omitted existing lines are removed). Pass the lines from get_bill (with line_id) to edit in place; without line_id, Ids are matched by position.'),
+        custom_fields: customFieldsArg,
       },
-      async ({ client_name, bill_id, doc_number, vendor_id, txn_date, due_date, private_note, department_id, sales_term_id, lines }) => {
+      async ({ client_name, bill_id, doc_number, vendor_id, txn_date, due_date, private_note, department_id, sales_term_id, lines, custom_fields }) => {
         const docErr = docNumberError(doc_number);
         if (docErr) return { content: [{ type: 'text', text: docErr }] };
         const realmId = await findRealmId(qboManager, client_name);
@@ -1909,6 +1927,7 @@ export async function registerMcpRoutes(
             vendor_id, txn_date, due_date, private_note, department_id, sales_term_id, doc_number, lines,
           });
 
+          applyCustomFields(payload, custom_fields);
           const result = await qboManager.transactions.updateBill(realmId, payload);
           const updated = (result as any)?.Bill;
           if (updated && lines) {
@@ -1984,8 +2003,9 @@ export async function registerMcpRoutes(
           unit_price: z.number().optional(),
           class_id: z.string().optional().describe('Line ClassRef.value'),
         })).optional().describe('Replacement line items — the complete new line set (omitted existing lines are removed). Pass the lines from get_vendor_credit (with line_id) to edit in place; without line_id, Ids are matched by position.'),
+        custom_fields: customFieldsArg,
       },
-      async ({ client_name, vendor_credit_id, txn_date, doc_number, private_note, lines }) => {
+      async ({ client_name, vendor_credit_id, txn_date, doc_number, private_note, lines, custom_fields }) => {
         const docErr = docNumberError(doc_number);
         if (docErr) return { content: [{ type: 'text', text: docErr }] };
         const realmId = await findRealmId(qboManager, client_name);
@@ -1998,6 +2018,7 @@ export async function registerMcpRoutes(
           if (!vc) return { content: [{ type: 'text', text: `Vendor credit ${vendor_credit_id} not found.` }] };
 
           const payload = buildVendorCreditUpdatePayload(vc, { txn_date, doc_number, private_note, lines });
+          applyCustomFields(payload, custom_fields);
           const result = await qboManager.transactions.updateVendorCredit(realmId, payload);
           const updated = (result as any)?.VendorCredit;
           if (updated && lines) {
@@ -2366,8 +2387,9 @@ export async function registerMcpRoutes(
           unit_price: z.number().optional(),
           class_id: z.string().optional(),
         })).optional().describe('Replacement line items — the complete new line set (omitted existing lines are removed). Pass the lines from get_expense (with line_id) to edit in place; without line_id, Ids are matched by position.'),
+        custom_fields: customFieldsArg,
       },
-      async ({ client_name, expense_id, payment_type, account_id, account_name, txn_date, doc_number, vendor_id, vendor_name, private_note, department_id, print_status, lines }) => {
+      async ({ client_name, expense_id, payment_type, account_id, account_name, txn_date, doc_number, vendor_id, vendor_name, private_note, department_id, print_status, lines, custom_fields }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) {
           return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
@@ -2402,6 +2424,7 @@ export async function registerMcpRoutes(
           });
           applyExpenseUpdatePrintStatus(exp, payload, { payment_type, doc_number, print_status });
 
+          applyCustomFields(payload, custom_fields);
           const result = await qboManager.transactions.updateExpense(realmId, payload);
           const updated = (result as any)?.Purchase;
           if (updated && lines) {
@@ -2677,6 +2700,7 @@ export async function registerMcpRoutes(
         account_number: z.string().optional().describe('Account number with this vendor (QBO AcctNum)'),
         bill_rate: z.number().optional().describe('Default billable rate (QBO BillRate)'),
         term_id: z.string().optional().describe('Default payment terms (Term ID → TermRef)'),
+        custom_fields: customFieldsArg,
       },
       async (args) => {
         const { client_name, display_name, company_name, given_name, family_name, email, phone, vendor_1099 } = args;
@@ -2732,6 +2756,7 @@ export async function registerMcpRoutes(
         sales_term_id: z.string().optional().describe('Default payment terms (Term ID → SalesTermRef)'),
         resale_num: z.string().optional().describe('Resale number'),
         taxable: z.boolean().optional().describe('Is this customer taxable?'),
+        custom_fields: customFieldsArg,
       },
       async (args) => {
         const { client_name, display_name, company_name, given_name, family_name, email, phone } = args;
@@ -3230,6 +3255,7 @@ export async function registerMcpRoutes(
           // Sparse update: only caller-provided fields are sent, so untouched
           // addresses are never in the payload and QBO cannot rewrite them.
           const payload = buildCustomerUpdatePayload(cust, args);
+          applyCustomFields(payload, args.custom_fields);
           const result = await qboManager.transactions.updateCustomer(realmId, payload);
           const updated = (result as any)?.Customer;
           return { content: [{ type: 'text', text: updated ? `Customer "${updated.DisplayName}" updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken}${updated.BillAddr ? `\nBill addr: ${[updated.BillAddr.Line1, updated.BillAddr.City, updated.BillAddr.CountrySubDivisionCode, updated.BillAddr.PostalCode].filter(Boolean).join(', ')}` : ''}` : JSON.stringify(result, null, 2) }] };
@@ -3296,6 +3322,7 @@ export async function registerMcpRoutes(
           // Sparse update: only caller-provided fields are sent, so an
           // untouched billing address is never in the payload.
           const payload = buildVendorUpdatePayload(vendor, args);
+          applyCustomFields(payload, args.custom_fields);
           const result = await qboManager.transactions.updateVendor(realmId, payload);
           const updated = (result as any)?.Vendor;
           return { content: [{ type: 'text', text: updated ? `Vendor "${updated.DisplayName}" updated.\nID: ${updated.Id} | SyncToken: ${updated.SyncToken}${updated.BillAddr ? `\nBill addr: ${[updated.BillAddr.Line1, updated.BillAddr.City, updated.BillAddr.CountrySubDivisionCode, updated.BillAddr.PostalCode].filter(Boolean).join(', ')}` : ''}` : JSON.stringify(result, null, 2) }] };
@@ -3425,8 +3452,9 @@ export async function registerMcpRoutes(
           class_id: z.string().optional().describe('Line ClassRef.value'),
           tax_code_id: z.string().optional().describe('Line TaxCodeRef.value (e.g. TAX / NON)'),
         })).optional().describe('Replacement line items — the complete new line set (omitted existing lines are removed). Pass the lines from get_sales_receipt (with line_id) to edit in place; without line_id, Ids are matched by position.'),
+        custom_fields: customFieldsArg,
       },
-      async ({ client_name, sales_receipt_id, doc_number, txn_date, private_note, department_id, lines }) => {
+      async ({ client_name, sales_receipt_id, doc_number, txn_date, private_note, department_id, lines, custom_fields }) => {
         const docErr = docNumberError(doc_number);
         if (docErr) return { content: [{ type: 'text', text: docErr }] };
         const realmId = await findRealmId(qboManager, client_name);
@@ -3438,6 +3466,7 @@ export async function registerMcpRoutes(
           // Read-modify-write. Replacement lines carry existing Ids (line_id
           // or positional) + sparse:false; no lines → fetched Line untouched.
           const payload = buildSalesReceiptUpdatePayload(sr, { txn_date, private_note, department_id, doc_number, lines });
+          applyCustomFields(payload, custom_fields);
           const result = await qboManager.transactions.updateSalesReceipt(realmId, payload);
           const updated = (result as any)?.SalesReceipt;
           if (updated && lines) {
@@ -3572,8 +3601,9 @@ export async function registerMcpRoutes(
           quantity: z.number().optional(),
           unit_price: z.number().optional(),
         })).optional().describe('Replacement lines'),
+        custom_fields: customFieldsArg,
       },
-      async ({ client_name, credit_memo_id, txn_date, private_note, department_id, sales_term_id, lines }) => {
+      async ({ client_name, credit_memo_id, txn_date, private_note, department_id, sales_term_id, lines, custom_fields }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) return { content: [{ type: 'text', text: `Client not found: "${client_name}".` }] };
         try {
@@ -3593,6 +3623,7 @@ export async function registerMcpRoutes(
               return line;
             });
           }
+          applyCustomFields(payload, custom_fields);
           const result = await qboManager.transactions.updateCreditMemo(realmId, payload);
           const updated = (result as any)?.CreditMemo;
           if (updated && lines) {
@@ -3717,8 +3748,9 @@ export async function registerMcpRoutes(
           quantity: z.number().optional(),
           unit_price: z.number().optional(),
         })).optional(),
+        custom_fields: customFieldsArg,
       },
-      async ({ client_name, estimate_id, txn_date, expiry_date, private_note, department_id, sales_term_id, txn_status, lines }) => {
+      async ({ client_name, estimate_id, txn_date, expiry_date, private_note, department_id, sales_term_id, txn_status, lines, custom_fields }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) return { content: [{ type: 'text', text: `Client not found: "${client_name}".` }] };
         try {
@@ -3740,6 +3772,7 @@ export async function registerMcpRoutes(
               return line;
             });
           }
+          applyCustomFields(payload, custom_fields);
           const result = await qboManager.transactions.updateEstimate(realmId, payload);
           const updated = (result as any)?.Estimate;
           if (updated && lines) {
@@ -3867,8 +3900,9 @@ export async function registerMcpRoutes(
           unit_price: z.number().optional(),
           account_id: z.string().optional(),
         })).optional().describe('Replacement lines'),
+        custom_fields: customFieldsArg,
       },
-      async ({ client_name, po_id, txn_date, private_note, department_id, sales_term_id, lines }) => {
+      async ({ client_name, po_id, txn_date, private_note, department_id, sales_term_id, lines, custom_fields }) => {
         const realmId = await findRealmId(qboManager, client_name);
         if (!realmId) return { content: [{ type: 'text', text: `Client not found: "${client_name}".` }] };
         try {
@@ -3894,6 +3928,7 @@ export async function registerMcpRoutes(
               return line;
             });
           }
+          applyCustomFields(payload, custom_fields);
           const result = await qboManager.transactions.updatePurchaseOrder(realmId, payload);
           const updated = (result as any)?.PurchaseOrder;
           if (updated && lines) {
@@ -4505,6 +4540,7 @@ export async function registerMcpRoutes(
             department_id: sr.DepartmentRef?.value,
             total_amt: sr.TotalAmt,
             lines: qboSalesLinesToUpdateShape(sr.Line ?? []),
+            custom_fields: shapeCustomFields(sr),
           };
           return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
         } catch (err: any) {
@@ -4542,6 +4578,7 @@ export async function registerMcpRoutes(
             total_amt: inv.TotalAmt,
             balance: inv.Balance,
             lines: qboSalesLinesToUpdateShape(inv.Line ?? []),
+            custom_fields: shapeCustomFields(inv),
           };
           return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
         } catch (err: any) {
@@ -4579,6 +4616,7 @@ export async function registerMcpRoutes(
             total_amt: bill.TotalAmt,
             balance: bill.Balance,
             lines: qboBillLinesToUpdateShape(bill.Line ?? []),
+            custom_fields: shapeCustomFields(bill),
           };
           return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
         } catch (err: any) {
@@ -4613,6 +4651,7 @@ export async function registerMcpRoutes(
             total_amt: vc.TotalAmt,
             balance: vc.Balance,
             lines: qboBillLinesToUpdateShape(vc.Line ?? []),
+            custom_fields: shapeCustomFields(vc),
           };
           return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
         } catch (err: any) {
@@ -4645,6 +4684,7 @@ export async function registerMcpRoutes(
             total_amt: je.TotalAmt,
             // NOTE: JournalEntry uses per-line DepartmentRef (see lines[].department_id), not a header DepartmentRef.
             lines: qboJournalLinesToUpdateShape(je.Line ?? []),
+            custom_fields: shapeCustomFields(je),
           };
           return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
         } catch (err: any) {
@@ -4682,6 +4722,7 @@ export async function registerMcpRoutes(
             department_id: exp.DepartmentRef?.value,
             total_amt: exp.TotalAmt,
             lines: qboExpenseLinesToUpdateShape(exp.Line ?? []),
+            custom_fields: shapeCustomFields(exp),
           };
           return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
         } catch (err: any) {
@@ -4754,6 +4795,7 @@ export async function registerMcpRoutes(
             total_amt: cm.TotalAmt,
             remaining_credit: cm.RemainingCredit,
             lines: qboSalesLinesToUpdateShape(cm.Line ?? [], { includeLineId: false, editableOnly: false }),
+            custom_fields: shapeCustomFields(cm),
           };
           return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
         } catch (err: any) {
@@ -4791,6 +4833,7 @@ export async function registerMcpRoutes(
             sales_term_id: est.SalesTermRef?.value,
             total_amt: est.TotalAmt,
             lines: qboSalesLinesToUpdateShape(est.Line ?? [], { includeLineId: false, editableOnly: false }),
+            custom_fields: shapeCustomFields(est),
           };
           return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
         } catch (err: any) {
@@ -4827,6 +4870,7 @@ export async function registerMcpRoutes(
             po_status: po.POStatus,
             total_amt: po.TotalAmt,
             lines: qboPoLinesToUpdateShape(po.Line ?? []),
+            custom_fields: shapeCustomFields(po),
           };
           return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
         } catch (err: any) {

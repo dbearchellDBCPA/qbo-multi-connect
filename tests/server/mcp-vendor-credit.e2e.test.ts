@@ -125,7 +125,7 @@ describe('vendor credit tools — end to end over MCP (mocked Intuit)', () => {
     expect(byName.delete_vendor_credit.annotations?.destructiveHint).toBe(true);
     expect(byName.update_vendor_credit.annotations?.readOnlyHint).toBe(false);
     expect(Object.keys((byName.update_vendor_credit.inputSchema as any).properties).sort())
-      .toEqual(['client_name', 'doc_number', 'lines', 'private_note', 'txn_date', 'vendor_credit_id']);
+      .toEqual(['client_name', 'custom_fields', 'doc_number', 'lines', 'private_note', 'txn_date', 'vendor_credit_id']);
   });
 
   it('get_vendor_credit returns update-ready lines', async () => {
