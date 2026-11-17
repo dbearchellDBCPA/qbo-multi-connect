@@ -7,6 +7,7 @@ export { CompanyAPI } from './company.js';
 export { BankingAPI } from './banking.js';
 export { RecurringAPI } from './recurring.js';
 export { CdcAPI, CdcRequestError, CDC_MAX_LOOKBACK_DAYS } from './cdc.js';
+export { DocumentsAPI, DOCUMENT_TYPES } from './documents.js';
 export { ListsAPI } from './lists.js';
 export { BatchAPI } from './batch.js';
 export {

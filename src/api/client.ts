@@ -64,6 +64,8 @@ export class QBOClient {
       query?: Record<string, string>;
       body?: unknown;
       headers?: Record<string, string>;
+      /** When true, return { buffer, contentType } instead of parsed JSON (PDF downloads). */
+      raw?: boolean;
     } = {}
   ): Promise<T> {
     const connection = await this.tokenStore.getConnection(realmId);
@@ -151,7 +153,7 @@ export class QBOClient {
     }
 
     // Make request with retry logic for rate limits
-    return await this.requestWithRetry(method, url.toString(), headers, body);
+    return await this.requestWithRetry(method, url.toString(), headers, body, 0, Boolean(options.raw));
   }
 
   /**
@@ -162,7 +164,8 @@ export class QBOClient {
     url: string,
     headers: Record<string, string>,
     body?: unknown,
-    retryCount: number = 0
+    retryCount: number = 0,
+    raw: boolean = false
   ): Promise<T> {
     const maxRetries = 3;
 
@@ -199,7 +202,7 @@ export class QBOClient {
       console.warn(`Rate limited, retrying after ${delayMs}ms (attempt ${retryCount + 1}/${maxRetries})`);
       await new Promise(resolve => setTimeout(resolve, delayMs));
 
-      return this.requestWithRetry(method, url, headers, body, retryCount + 1);
+      return this.requestWithRetry(method, url, headers, body, retryCount + 1, raw);
     }
 
     // Handle errors
@@ -220,6 +223,13 @@ export class QBOClient {
       );
     }
 
+    // Binary responses (invoice PDFs, etc.) skip JSON parsing.
+    if (raw) {
+      const buffer = Buffer.from(await response.arrayBuffer());
+      const contentType = response.headers.get('content-type') || 'application/octet-stream';
+      return { buffer, contentType } as T;
+    }
+
     // Parse response
     const data = await response.json();
     return data as T;
@@ -230,6 +240,18 @@ export class QBOClient {
    */
   async get<T>(realmId: string, endpoint: string, query?: Record<string, string>): Promise<T> {
     return this.request<T>('GET', realmId, endpoint, { query });
+  }
+
+  /**
+   * GET a binary body (e.g. GET invoice/{id}/pdf). Overrides Accept and
+   * returns the raw bytes plus the response Content-Type.
+   */
+  async getBinary(
+    realmId: string,
+    endpoint: string,
+    accept: string = 'application/pdf',
+  ): Promise<{ buffer: Buffer; contentType: string }> {
+    return this.request('GET', realmId, endpoint, { headers: { Accept: accept }, raw: true });
   }
 
   /**
