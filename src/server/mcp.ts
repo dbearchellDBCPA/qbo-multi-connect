@@ -18,6 +18,7 @@ import {
   validateScheduleChange,
 } from './recurring-transaction.js';
 import { registerTransferTools } from './transfer-tools.js';
+import { registerCdcTools } from './cdc-tools.js';
 import { createBillPaymentValidated } from './bill-payment-credits.js';
 import { registerBulkTxnTools } from './bulk-txn-tools.js';
 import { buildPaymentCreatePayload, PaymentArgsError } from './payment-payload.js';
@@ -476,6 +477,7 @@ export async function registerMcpRoutes(
 
     // ── Transfer tools + Expense/Deposit → Transfer (src/server/transfer-tools.ts)
     registerTransferTools(server, qboManager, (name) => findRealmId(qboManager, name));
+    registerCdcTools(server, qboManager, (name) => findRealmId(qboManager, name));
     registerBulkTxnTools(server, qboManager, (name) => findRealmId(qboManager, name), resolveVendorByName);
 
     // ── list_clients ──────────────────────────────────────────────────────────

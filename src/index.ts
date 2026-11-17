@@ -1,6 +1,6 @@
 import { ConnectionDatabase } from './db/index.js';
 import { TokenStore, CallbackServer, generateAuthUrl, RefreshDaemon } from './auth/index.js';
-import { QBOClient, ReportsAPI, JournalEntriesAPI, TransactionsAPI, AccountsAPI, CompanyAPI, BankingAPI, RecurringAPI, ListsAPI, AttachmentsAPI, BatchAPI } from './api/index.js';
+import { QBOClient, ReportsAPI, JournalEntriesAPI, TransactionsAPI, AccountsAPI, CompanyAPI, BankingAPI, RecurringAPI, CdcAPI, ListsAPI, AttachmentsAPI, BatchAPI } from './api/index.js';
 import { UserService } from './users.js';
 import { UploadTokenService } from './upload-tokens.js';
 import { OAuthServerService } from './oauth-server.js';
@@ -41,6 +41,7 @@ export class QBOManager {
   public readonly company: CompanyAPI;
   public readonly banking: BankingAPI;
   public readonly recurring: RecurringAPI;
+  public readonly cdc: CdcAPI;
   public readonly lists: ListsAPI;
   public readonly attachments: AttachmentsAPI;
   public readonly batch: BatchAPI;
@@ -78,6 +79,7 @@ export class QBOManager {
     this.company = new CompanyAPI(this.client);
     this.banking = new BankingAPI(this.client);
     this.recurring = new RecurringAPI(this.client);
+    this.cdc = new CdcAPI(this.client);
     this.lists = new ListsAPI(this.client);
     this.attachments = new AttachmentsAPI(this.client);
     this.batch = new BatchAPI(this.client);

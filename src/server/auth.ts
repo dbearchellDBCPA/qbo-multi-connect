@@ -122,6 +122,7 @@ export type ScopedQBOManager = Pick<
   | 'company'
   | 'banking'
   | 'recurring'
+  | 'cdc'
   | 'lists'
   | 'attachments'
   | 'batch'
@@ -179,6 +180,7 @@ export function createScopedManager(qboManager: QBOManager, scope: AuthScope): S
     company: guardNamespace(qboManager.company, scope),
     banking: guardNamespace(qboManager.banking, scope),
     recurring: guardNamespace(qboManager.recurring, scope),
+    cdc: guardNamespace(qboManager.cdc, scope),
     lists: guardNamespace(qboManager.lists, scope),
     attachments: guardNamespace(qboManager.attachments, scope),
     batch: guardNamespace(qboManager.batch, scope),
