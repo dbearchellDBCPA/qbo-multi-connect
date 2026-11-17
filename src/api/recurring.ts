@@ -30,8 +30,8 @@ export class RecurringAPI {
   /**
    * Resolve a RecurringTransaction by the wrapped txn Id (what GET
    * /recurringtransaction/{id} uses) or by RecurDataRef.value (the id
-   * stamped on generated transactions). Direct GET first; on 404, scan
-   * the query list.
+   * stamped on generated transactions). Direct GET first; on HTTP 404 or
+   * a not-found Fault (code 610 / "Object Not Found"), scan the query list.
    */
   async resolve(realmId: string, id: string): Promise<{ unwrapped: UnwrappedRecurring; raw: unknown; matched_by: 'id' | 'recur_data_ref' }> {
     const rawId = String(id).trim();

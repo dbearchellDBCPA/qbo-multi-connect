@@ -9,6 +9,25 @@ const MASTER_KEY = 'master-key-for-recurring-tests';
 const CLIENT = 'United Way of the CSRA';
 const REALM = '9341454121860748';
 
+function objectNotFound610(id: string) {
+  const body = JSON.stringify({
+    Fault: {
+      Error: [{
+        Message: 'Object Not Found',
+        Detail: `Object Not Found : RecurringTransaction with specified id ${id} was not found.`,
+        code: '610',
+      }],
+      type: 'ValidationFault',
+    },
+  });
+  return new QBOError(
+    `QBO API error: Object Not Found — Object Not Found : RecurringTransaction with specified id ${id} was not found. (QBO code 610)`,
+    400,
+    body,
+  );
+}
+
+
 function monthlyBill() {
   return {
     Bill: {
@@ -208,6 +227,51 @@ describe('MCP get/update_recurring_transaction (mocked QBO only)', () => {
     expect(body.matched_by).toBe('recur_data_ref');
     expect(body.line_count).toBe(2);
     expect(querySpy).toHaveBeenCalled();
+  });
+
+  it('get_recurring_transaction resolves a RecurDataRef via query after GET Fault 610', async () => {
+    getSpy.mockImplementation((_realm: string, path: string) => {
+      if (path === 'recurringtransaction/20') return Promise.resolve(getEnvelope(storedBill));
+      if (path === 'recurringtransaction/88') return Promise.resolve(getEnvelope(storedJe));
+      const id = path.split('/').pop() ?? path;
+      return Promise.reject(objectNotFound610(id));
+    });
+    const { texts, isError } = await callTool('get_recurring_transaction', {
+      client_name: CLIENT,
+      recurring_transaction_id: '7',
+    });
+    expect(isError).toBe(false);
+    const body = lastJson(texts);
+    expect(body.txn_type).toBe('JournalEntry');
+    expect(body.id).toBe('88');
+    expect(body.recur_data_ref).toBe('7');
+    expect(body.matched_by).toBe('recur_data_ref');
+    expect(querySpy).toHaveBeenCalled();
+    expect(getSpy).toHaveBeenCalledWith(REALM, 'recurringtransaction/7', {});
+  });
+
+  it('update_recurring_transaction looks up a RecurDataRef after GET Fault 610', async () => {
+    getSpy.mockImplementation((_realm: string, path: string) => {
+      if (path === 'recurringtransaction/20') return Promise.resolve(getEnvelope(storedBill));
+      if (path === 'recurringtransaction/88') return Promise.resolve(getEnvelope(storedJe));
+      const id = path.split('/').pop() ?? path;
+      return Promise.reject(objectNotFound610(id));
+    });
+    const { texts, isError } = await callTool('update_recurring_transaction', {
+      client_name: CLIENT,
+      recurring_transaction_id: '2',
+      end_date: '2026-12-01',
+    });
+    expect(isError).toBe(false);
+    const body = lastJson(texts);
+    expect(body.dry_run).toBe(true);
+    expect(body.written).toBe(false);
+    expect(body.txn_type).toBe('Bill');
+    expect(body.schedule_after.EndDate).toBe('2026-12-01');
+    expect(body.payload.Bill.Id).toBe('20');
+    expect(querySpy).toHaveBeenCalled();
+    expect(getSpy).toHaveBeenCalledWith(REALM, 'recurringtransaction/2', {});
+    expect(postSpy).not.toHaveBeenCalled();
   });
 
   it('update_recurring_transaction dry_run (default) returns the EndDate diff and full payload without writing', async () => {
