@@ -19,6 +19,8 @@ import {
 } from './recurring-transaction.js';
 import { registerTransferTools } from './transfer-tools.js';
 import { registerCdcTools } from './cdc-tools.js';
+import { registerDocumentTools } from './document-tools.js';
+import { PdfDownloadStore } from './pdf-store.js';
 import { createBillPaymentValidated } from './bill-payment-credits.js';
 import { registerBulkTxnTools } from './bulk-txn-tools.js';
 import { buildPaymentCreatePayload, PaymentArgsError } from './payment-payload.js';
@@ -416,6 +418,22 @@ export async function registerMcpRoutes(
     (attachmentsDir ? dirname(attachmentsDir) : dirname(process.env.QBO_DB_PATH || './qbo-connections.db'));
   const importStore = new ImportStoreHandle(join(importDataDir, IMPORT_STORE_FILENAME));
   fastify.addHook('onClose', async () => importStore.close());
+  const pdfStore = new PdfDownloadStore(join(importDataDir, 'pdfs'));
+
+  // Capability-token download for transaction PDFs saved by get_transaction_pdf.
+  // The token is the secret; the Multi-Connect API key is not in the URL.
+  fastify.get<{ Params: { token: string } }>('/downloads/pdf/:token', async (request, reply) => {
+    const found = pdfStore.read(request.params.token);
+    if (!found) {
+      return reply.code(404).send({ error: 'Not Found', message: 'This PDF link is invalid or has expired. Request a new one with get_transaction_pdf.' });
+    }
+    return reply
+      .header('Content-Type', found.meta.contentType || 'application/pdf')
+      .header('Content-Disposition', `attachment; filename="${found.meta.fileName.replace(/"/g, '')}"`)
+      .header('Cache-Control', 'private, no-store')
+      .send(found.buffer);
+  });
+
 
   // Each request builds a server scoped to the caller's API key. The tools
   // below close over `qboManager`, which is the scoped view — member keys
@@ -478,6 +496,7 @@ export async function registerMcpRoutes(
     // ── Transfer tools + Expense/Deposit → Transfer (src/server/transfer-tools.ts)
     registerTransferTools(server, qboManager, (name) => findRealmId(qboManager, name));
     registerCdcTools(server, qboManager, (name) => findRealmId(qboManager, name));
+    registerDocumentTools(server, qboManager, (name) => findRealmId(qboManager, name), { pdfStore, publicBaseUrl: baseUrl });
     registerBulkTxnTools(server, qboManager, (name) => findRealmId(qboManager, name), resolveVendorByName);
 
     // ── list_clients ──────────────────────────────────────────────────────────
