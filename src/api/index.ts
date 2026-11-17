@@ -5,6 +5,7 @@ export { TransactionsAPI } from './transactions.js';
 export { AccountsAPI } from './accounts.js';
 export { CompanyAPI } from './company.js';
 export { BankingAPI } from './banking.js';
+export { RecurringAPI } from './recurring.js';
 export { ListsAPI } from './lists.js';
 export { BatchAPI } from './batch.js';
 export {
