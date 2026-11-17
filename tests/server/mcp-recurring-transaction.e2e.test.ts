@@ -131,13 +131,18 @@ describe('MCP get/update_recurring_transaction (mocked QBO only)', () => {
       return Promise.reject(new QBOError('not found', 404));
     });
     postSpy = vi.fn().mockImplementation((_realm: string, path: string, body: any) => {
+      if (path === 'recurringtransaction?operation=delete') {
+        return Promise.resolve({ RecurringTransaction: body, status: 'Deleted' });
+      }
       if (path !== 'recurringtransaction') return Promise.reject(new QBOError(`unexpected post ${path}`, 400));
       if (body?.Bill) {
-        storedBill = { Bill: { ...body.Bill, SyncToken: String(Number(body.Bill.SyncToken) + 1) } };
+        const nextToken = body.Bill.SyncToken == null ? '0' : String(Number(body.Bill.SyncToken) + 1);
+        storedBill = { Bill: { Id: body.Bill.Id ?? '20', ...body.Bill, SyncToken: nextToken } };
         return Promise.resolve({ RecurringTransaction: storedBill });
       }
       if (body?.JournalEntry) {
-        storedJe = { JournalEntry: { ...body.JournalEntry, SyncToken: String(Number(body.JournalEntry.SyncToken) + 1) } };
+        const nextToken = body.JournalEntry.SyncToken == null ? '0' : String(Number(body.JournalEntry.SyncToken) + 1);
+        storedJe = { JournalEntry: { Id: body.JournalEntry.Id ?? '88', ...body.JournalEntry, SyncToken: nextToken } };
         return Promise.resolve({ RecurringTransaction: storedJe });
       }
       return Promise.reject(new QBOError('bad wrapper', 400));
@@ -338,5 +343,59 @@ describe('MCP get/update_recurring_transaction (mocked QBO only)', () => {
     });
     expect(texts[0]).toMatch(/exactly one/);
     expect(postSpy).not.toHaveBeenCalled();
+  });
+
+  it('create_recurring_transaction posts a type-wrapped Bill template', async () => {
+    const { texts, isError } = await callTool('create_recurring_transaction', {
+      client_name: CLIENT,
+      txn_type: 'Bill',
+      name: 'Monthly Telephone',
+      recur_type: 'Automated',
+      interval_type: 'Monthly',
+      num_interval: 1,
+      day_of_month: 1,
+      days_before: 5,
+      start_date: '2026-01-01',
+      end_date: '2026-12-01',
+      template: {
+        VendorRef: { value: '32', name: 'Cal Telephone' },
+        TotalAmt: 74.36,
+        Line: [{ Amount: 74.36, Description: 'Monthly Phone Bill', DetailType: 'AccountBasedExpenseLineDetail', AccountBasedExpenseLineDetail: { AccountRef: { value: '77' } } }],
+      },
+    });
+    expect(isError).toBe(false);
+    const body = lastJson(texts);
+    expect(body.created).toBe(true);
+    expect(body.result.txn_type).toBe('Bill');
+    expect(postSpy).toHaveBeenCalledTimes(1);
+    const posted = postSpy.mock.calls[0][2];
+    expect(postSpy.mock.calls[0][1]).toBe('recurringtransaction');
+    expect(posted.Bill.RecurringInfo.Name).toBe('Monthly Telephone');
+    expect(posted.Bill.RecurringInfo.ScheduleInfo.EndDate).toBe('2026-12-01');
+    expect(posted.Bill.Line).toHaveLength(1);
+    expect(posted.Bill.Id).toBeUndefined();
+  });
+
+  it('delete_recurring_transaction defaults to a dry run and deletes only when confirm=true', async () => {
+    const dry = lastJson((await callTool('delete_recurring_transaction', {
+      client_name: CLIENT,
+      recurring_transaction_id: '20',
+    })).texts);
+    expect(dry.dry_run).toBe(true);
+    expect(dry.deleted).toBe(false);
+    expect(dry.recurring.txn_type).toBe('Bill');
+    expect(postSpy).not.toHaveBeenCalled();
+
+    const { texts, isError } = await callTool('delete_recurring_transaction', {
+      client_name: CLIENT,
+      recurring_transaction_id: '20',
+      confirm: true,
+    });
+    expect(isError).toBe(false);
+    const body = lastJson(texts);
+    expect(body.deleted).toBe(true);
+    expect(postSpy).toHaveBeenCalledWith(REALM, 'recurringtransaction?operation=delete', expect.objectContaining({
+      Bill: expect.objectContaining({ Id: '20', SyncToken: '3' }),
+    }));
   });
 });

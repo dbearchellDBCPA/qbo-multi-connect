@@ -23,6 +23,7 @@ import { registerDocumentTools } from './document-tools.js';
 import { registerReportTools } from './report-tools.js';
 import { registerPaymentTools } from './payment-tools.js';
 import { registerTimeActivityTools } from './time-activity-tools.js';
+import { registerRecurringTools } from './recurring-tools.js';
 import { applyCustomFields, shapeCustomFields } from '../api/custom-fields.js';
 import { PdfDownloadStore } from './pdf-store.js';
 import { createBillPaymentValidated } from './bill-payment-credits.js';
@@ -343,6 +344,7 @@ const DESTRUCTIVE_TOOLS = new Set<string>([
   'delete_bill_payment',
   'delete_payment',
   'delete_time_activity',
+  'delete_recurring_transaction',
   'void_payment',
   'delete_imported_transactions',
   'delete_transfer',
@@ -515,6 +517,7 @@ export async function registerMcpRoutes(
     registerReportTools(server, qboManager, (name) => findRealmId(qboManager, name));
     registerPaymentTools(server, qboManager, (name) => findRealmId(qboManager, name));
     registerTimeActivityTools(server, qboManager, (name) => findRealmId(qboManager, name));
+    registerRecurringTools(server, qboManager, (name) => findRealmId(qboManager, name));
     registerDocumentTools(server, qboManager, (name) => findRealmId(qboManager, name), { pdfStore, publicBaseUrl: baseUrl });
     registerBulkTxnTools(server, qboManager, (name) => findRealmId(qboManager, name), resolveVendorByName);
 
