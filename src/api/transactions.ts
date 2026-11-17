@@ -301,6 +301,22 @@ export class TransactionsAPI {
   }
 
   /**
+   * Void a payment (operation=void) with Id + SyncToken.
+   * https://developer.intuit.com/app/developer/qbo/docs/api/accounting/all-entities/payment
+   */
+  async voidPayment(realmId: string, paymentId: string, syncToken: string): Promise<unknown> {
+    return this.client.post(realmId, 'payment?operation=void', { Id: paymentId, SyncToken: syncToken, sparse: true });
+  }
+
+  /**
+   * Delete a payment (operation=delete) with Id + SyncToken. Intuit documents
+   * delete on Payment; this reopens applied invoice balances.
+   */
+  async deletePayment(realmId: string, paymentId: string, syncToken: string): Promise<unknown> {
+    return this.client.post(realmId, 'payment?operation=delete', { Id: paymentId, SyncToken: syncToken });
+  }
+
+  /**
    * Create a bill payment
    */
   async createBillPayment(realmId: string, billPayment: any): Promise<unknown> {

@@ -21,6 +21,7 @@ import { registerTransferTools } from './transfer-tools.js';
 import { registerCdcTools } from './cdc-tools.js';
 import { registerDocumentTools } from './document-tools.js';
 import { registerReportTools } from './report-tools.js';
+import { registerPaymentTools } from './payment-tools.js';
 import { PdfDownloadStore } from './pdf-store.js';
 import { createBillPaymentValidated } from './bill-payment-credits.js';
 import { registerBulkTxnTools } from './bulk-txn-tools.js';
@@ -338,6 +339,8 @@ const DESTRUCTIVE_TOOLS = new Set<string>([
   'delete_deposit',
   'delete_expense',
   'delete_bill_payment',
+  'delete_payment',
+  'void_payment',
   'delete_imported_transactions',
   'delete_transfer',
   'convert_to_transfer',
@@ -498,6 +501,7 @@ export async function registerMcpRoutes(
     registerTransferTools(server, qboManager, (name) => findRealmId(qboManager, name));
     registerCdcTools(server, qboManager, (name) => findRealmId(qboManager, name));
     registerReportTools(server, qboManager, (name) => findRealmId(qboManager, name));
+    registerPaymentTools(server, qboManager, (name) => findRealmId(qboManager, name));
     registerDocumentTools(server, qboManager, (name) => findRealmId(qboManager, name), { pdfStore, publicBaseUrl: baseUrl });
     registerBulkTxnTools(server, qboManager, (name) => findRealmId(qboManager, name), resolveVendorByName);
 
