@@ -5,6 +5,18 @@ import {
   formatBankRegister,
   resolveRegisterAccount,
 } from './bank-register.js';
+import {
+  END_DATE_SEMANTICS,
+  RecurringRequestError,
+  buildRecurringUpdatePayload,
+  lineFingerprint,
+  linesUnchanged,
+  scheduleDiff,
+  shapeRecurringInfo,
+  summarizeRecurring,
+  unwrapRecurring,
+  validateScheduleChange,
+} from './recurring-transaction.js';
 import { registerTransferTools } from './transfer-tools.js';
 import { createBillPaymentValidated } from './bill-payment-credits.js';
 import { registerBulkTxnTools } from './bulk-txn-tools.js';
@@ -1196,7 +1208,7 @@ export async function registerMcpRoutes(
     // ── query_transactions ────────────────────────────────────────────────────
     server.tool(
       'query_transactions',
-      'Execute a raw QBO SQL query for a client. Queryable entities include Invoice, Bill, Payment, BillPayment, Purchase, SalesReceipt, CreditMemo, RefundReceipt, JournalEntry, Deposit, Estimate, PurchaseOrder, Transfer, Customer, Vendor, Employee, Account, Class, Department, Item, Budget, CompanyInfo, Preferences, TaxCode, TaxRate, PaymentMethod, Term, Attachable. Column projection (SELECT Id, DisplayName FROM …) is supported for scalar fields; QBO itself may reject complex-typed fields (e.g. BillAddr) in a projection list — use SELECT *, or get_customers/get_vendors with detail:"full", when you need addresses. Some fields are not queryable at all (e.g. TotalAmt on Deposit; TotalAmt does not exist on JournalEntry; Line-level fields) — QBO\'s validation error is surfaced verbatim. Results are cleaned of QBO wire noise (PurchaseEx-style JAXB blobs, empty CustomExtensions, domain, sparse) by default — MetaData create/update times are kept; pass raw=true for the untouched response.',
+      'Execute a raw QBO SQL query for a client. Queryable entities include Invoice, Bill, Payment, BillPayment, Purchase, SalesReceipt, CreditMemo, RefundReceipt, JournalEntry, Deposit, Estimate, PurchaseOrder, Transfer, RecurringTransaction, Customer, Vendor, Employee, Account, Class, Department, Item, Budget, CompanyInfo, Preferences, TaxCode, TaxRate, PaymentMethod, Term, Attachable. Column projection (SELECT Id, DisplayName FROM …) is supported for scalar fields; QBO itself may reject complex-typed fields (e.g. BillAddr) in a projection list — use SELECT *, or get_customers/get_vendors with detail:"full", when you need addresses. Some fields are not queryable at all (e.g. TotalAmt on Deposit; TotalAmt does not exist on JournalEntry; Line-level fields) — QBO\'s validation error is surfaced verbatim. Results are cleaned of QBO wire noise (PurchaseEx-style JAXB blobs, empty CustomExtensions, domain, sparse) by default — MetaData create/update times are kept; pass raw=true for the untouched response.',
       {
         client_name: z.string().describe('The name of the client company'),
         query: z.string().describe('QBO SQL query, e.g. "SELECT * FROM Invoice WHERE TxnDate > \'2026-01-01\'" or "SELECT * FROM Budget"'),
@@ -4009,6 +4021,110 @@ export async function registerMcpRoutes(
           return { content: [{ type: 'text', text: formatted }] };
         } catch (err: any) {
           return { content: [{ type: 'text', text: `Error fetching uncleared transactions: ${err?.message ?? err}` }] };
+        }
+      }
+    );
+
+
+    // ── get_recurring_transaction ─────────────────────────────────────────────
+    // There is no existing list/create RecurringTransaction tool in this
+    // server; query_transactions can list them (SELECT * FROM RecurringTransaction).
+    server.tool(
+      'get_recurring_transaction',
+      'Fetch a QBO RecurringTransaction template by Id (the wrapped template\'s Id, as used by GET /v3/company/{realmId}/recurringtransaction/{id}) or by RecurDataRef.value (the id stamped on generated transactions). Returns the full RecurringInfo (Name, RecurType, Active, ScheduleInfo: IntervalType, NumInterval, DayOfMonth, DaysBefore, StartDate, EndDate, MaxOccurrences, NextDate, PreviousDate) plus the wrapped txn type and total. Does not write.',
+      {
+        client_name: z.string().describe('The name of the client company'),
+        recurring_transaction_id: z.string().describe('RecurringTransaction Id (wrapped template Id) or RecurDataRef.value. Direct GET first; if that 404s, templates are queried and matched on either id.'),
+      },
+      async ({ client_name, recurring_transaction_id }) => {
+        const realmId = await findRealmId(qboManager, client_name);
+        if (!realmId) return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
+        try {
+          const found = await qboManager.recurring.resolve(realmId, recurring_transaction_id);
+          const summary = summarizeRecurring(found.unwrapped);
+          return { content: [{ type: 'text', text: JSON.stringify({ ...summary, matched_by: found.matched_by }, null, 2) }] };
+        } catch (err: any) {
+          return { content: [{ type: 'text', text: `Error fetching recurring transaction: ${err?.message ?? err}` }] };
+        }
+      }
+    );
+
+    // ── update_recurring_transaction ──────────────────────────────────────────
+    server.tool(
+      'update_recurring_transaction',
+      'Set ScheduleInfo.EndDate or MaxOccurrences (exactly one) on an existing RecurringTransaction template and keep Active=true. Reads the full type-wrapped object (Bill, JournalEntry, Invoice, …), changes only the requested schedule field, and writes the complete object back with SyncToken and every other field preserved — especially Line arrays — with sparse:false. Intuit does not document a sparse update for RecurringTransaction, so a partial patch is never sent. dry_run defaults to true and returns the before/after ScheduleInfo diff and the exact POST payload without writing. EndDate is the last scheduled date on which an occurrence is created (inclusive of that date): EndDate 2026-12-01 on a monthly day-1 template still runs 12/1/2026 and does not run 1/1/2027. DaysBefore only changes when the txn is generated, not the scheduled date. After a live write the template is re-read; if lines or the schedule do not match, the original object is posted back (rollback).',
+      {
+        client_name: z.string().describe('The name of the client company'),
+        recurring_transaction_id: z.string().describe('RecurringTransaction Id (wrapped template Id) or RecurDataRef.value'),
+        end_date: z.string().optional().describe('ScheduleInfo.EndDate YYYY-MM-DD. Mutually exclusive with max_occurrences. Inclusive of the last scheduled date (see tool description).'),
+        max_occurrences: z.number().int().optional().describe('ScheduleInfo.MaxOccurrences (positive integer). Mutually exclusive with end_date.'),
+        dry_run: z.boolean().optional().default(true).describe('true (default) = return the before/after ScheduleInfo diff and the exact update payload; nothing is written. Pass false to apply the update.'),
+      },
+      async ({ client_name, recurring_transaction_id, end_date, max_occurrences, dry_run }) => {
+        const realmId = await findRealmId(qboManager, client_name);
+        if (!realmId) return { content: [{ type: 'text', text: `Client not found: "${client_name}". Use list_clients to see available companies.` }] };
+        try {
+          const change = validateScheduleChange({ end_date, max_occurrences });
+          const found = await qboManager.recurring.resolve(realmId, recurring_transaction_id);
+          const built = buildRecurringUpdatePayload(found.unwrapped, change);
+          const beforeSummary = summarizeRecurring(found.unwrapped);
+          const diff = scheduleDiff(built.before, built.after);
+          const report: Record<string, unknown> = {
+            dry_run: dry_run !== false,
+            id: beforeSummary.id,
+            recur_data_ref: beforeSummary.recur_data_ref,
+            txn_type: beforeSummary.txn_type,
+            total_amt: beforeSummary.total_amt,
+            line_count: beforeSummary.line_count,
+            active: true,
+            schedule_before: built.before,
+            schedule_after: built.after,
+            schedule_diff: diff,
+            end_date_semantics: END_DATE_SEMANTICS,
+            payload: built.wrapper,
+          };
+          if (dry_run !== false) {
+            return { content: [{ type: 'text', text: JSON.stringify({ ...report, written: false }, null, 2) }] };
+          }
+
+          const writtenRaw = await qboManager.recurring.update(realmId, built.wrapper);
+          let rereadTxn = unwrapRecurring(writtenRaw)?.txn ?? unwrapRecurring({ RecurringTransaction: writtenRaw })?.txn;
+          try {
+            const again = await qboManager.recurring.get(realmId, String(found.unwrapped.txn.Id));
+            const againUnwrapped = unwrapRecurring(again);
+            if (againUnwrapped) rereadTxn = againUnwrapped.txn;
+          } catch {
+            // verification uses the write response if the re-read fails
+          }
+          const actualSched = shapeRecurringInfo(rereadTxn?.RecurringInfo).ScheduleInfo;
+          const scheduleOk = change.end_date
+            ? String(actualSched.EndDate ?? '') === change.end_date
+            : Number(actualSched.MaxOccurrences) === change.max_occurrences;
+          const linesOk = linesUnchanged(found.unwrapped.txn, rereadTxn);
+          if (!scheduleOk || !linesOk) {
+            const rollbackTxn = structuredClone(found.unwrapped.txn);
+            rollbackTxn.SyncToken = rereadTxn?.SyncToken ?? rollbackTxn.SyncToken;
+            rollbackTxn.sparse = false;
+            let undo = 'rollback not attempted';
+            try {
+              await qboManager.recurring.update(realmId, { [found.unwrapped.txnType]: rollbackTxn });
+              undo = 'original template posted back (rollback)';
+            } catch (e: any) {
+              undo = `rollback failed: ${e?.message ?? e}`;
+            }
+            const problems = [
+              !scheduleOk ? `schedule did not stick (wanted ${JSON.stringify(change)}, got ${JSON.stringify(actualSched)})` : null,
+              !linesOk ? `Line array or total changed (before ${JSON.stringify(lineFingerprint(found.unwrapped.txn))}, after ${JSON.stringify(lineFingerprint(rereadTxn))})` : null,
+            ].filter(Boolean);
+            return { content: [{ type: 'text', text: `Update verification failed: ${problems.join('; ')}. ${undo}.` }] };
+          }
+          const afterSummary = summarizeRecurring({ txnType: found.unwrapped.txnType, txn: rereadTxn });
+          return { content: [{ type: 'text', text: JSON.stringify({ ...report, written: true, dry_run: false, result: afterSummary }, null, 2) }] };
+        } catch (err: any) {
+          if (err instanceof RecurringRequestError) {
+            return { content: [{ type: 'text', text: err.message }] };
+          }
+          return { content: [{ type: 'text', text: `Error updating recurring transaction: ${err?.message ?? err}` }] };
         }
       }
     );
