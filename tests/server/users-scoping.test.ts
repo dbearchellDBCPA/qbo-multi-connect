@@ -832,7 +832,7 @@ describe('access level over HTTP and MCP', () => {
     const readerTools = await mcpToolNames(readerKey);
 
     const isRead = (name: string) =>
-      name.startsWith('get_') || name.startsWith('list_') || name === 'query_transactions' || name === 'import_status';
+      name.startsWith('get_') || name.startsWith('list_') || name === 'query_transactions' || name === 'import_status' || name === 'run_report';
 
     // Writer sees both kinds.
     expect(writerTools).toContain('create_journal_entry');
@@ -848,6 +848,7 @@ describe('access level over HTTP and MCP', () => {
     expect(readerTools).toContain('query_transactions');
     // Bulk import: the store query is a read; loading / deleting are writes.
     expect(readerTools).toContain('import_status');
+    expect(readerTools).toContain('run_report');
     expect(readerTools).not.toContain('import_transactions');
     expect(readerTools).not.toContain('delete_imported_transactions');
   });
