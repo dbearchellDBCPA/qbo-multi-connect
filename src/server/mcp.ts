@@ -3243,6 +3243,7 @@ export async function registerMcpRoutes(
         sales_term_id: z.string().optional().describe('Default payment terms (Term ID → SalesTermRef)'),
         resale_num: z.string().optional().describe('Resale number'),
         taxable: z.boolean().optional().describe('Is this customer taxable?'),
+        custom_fields: customFieldsArg,
       },
       async (args) => {
         const { client_name, customer_id } = args;
@@ -3310,6 +3311,7 @@ export async function registerMcpRoutes(
         account_number: z.string().optional().describe('Account number with this vendor (QBO AcctNum)'),
         bill_rate: z.number().optional().describe('Default billable rate (QBO BillRate)'),
         term_id: z.string().optional().describe('Default payment terms (Term ID → TermRef)'),
+        custom_fields: customFieldsArg,
       },
       async (args) => {
         const { client_name, vendor_id } = args;
