@@ -39,6 +39,12 @@ export interface ReportOptions {
   customerId?: string;
   vendorId?: string;
   accountIds?: string; // single ID or comma-separated list of Account IDs
+  columns?: string;
+  cleared?: string;
+  sourceAccountType?: string;
+  transactionType?: string;
+  docnum?: string;
+  paymentMethod?: string;
 }
 
 export interface BudgetVsActualsOptions extends ReportOptions {
@@ -75,6 +81,74 @@ export class BudgetRequestError extends Error {
   }
 }
 
+/** A run_report request that cannot run (unknown name, etc.). */
+export class ReportRequestError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ReportRequestError';
+  }
+}
+
+export type ReportQueryKey =
+  | 'start_date'
+  | 'end_date'
+  | 'report_date'
+  | 'date_macro'
+  | 'accounting_method'
+  | 'summarize_column_by'
+  | 'class'
+  | 'department'
+  | 'customer'
+  | 'vendor'
+  | 'account'
+  | 'columns'
+  | 'cleared'
+  | 'source_account_type'
+  | 'transaction_type'
+  | 'docnum'
+  | 'payment_method';
+
+const PERIOD_FILTERS: ReportQueryKey[] = [
+  'start_date', 'end_date', 'date_macro', 'accounting_method',
+  'summarize_column_by', 'class', 'department', 'customer', 'vendor',
+];
+
+const AS_OF_FILTERS: ReportQueryKey[] = ['report_date', 'accounting_method', 'customer', 'vendor'];
+
+const TXN_LIST_FILTERS: ReportQueryKey[] = [
+  'start_date', 'end_date', 'date_macro', 'accounting_method',
+  'class', 'department', 'customer', 'vendor',
+  'columns', 'cleared', 'source_account_type', 'transaction_type', 'docnum', 'payment_method',
+];
+
+/**
+ * Reports not already wrapped by a dedicated MCP tool. Names are the official
+ * Reports API path segments (GET /v3/company/{realmId}/reports/{Name}).
+ * Only listed query params are sent — QBO silently ignores unknown params.
+ */
+export const ALLOWED_RUN_REPORTS: Record<string, {
+  supports: readonly ReportQueryKey[];
+  agingAsOf?: boolean;
+  defaultAccrual?: boolean;
+}> = {
+  ProfitAndLossDetail: { supports: PERIOD_FILTERS, defaultAccrual: true },
+  JournalReport: { supports: ['start_date', 'end_date', 'date_macro', 'accounting_method', 'columns'], defaultAccrual: true },
+  TaxSummary: { supports: ['start_date', 'end_date', 'date_macro', 'accounting_method'], defaultAccrual: true },
+  AgedReceivableDetail: { supports: AS_OF_FILTERS, agingAsOf: true, defaultAccrual: true },
+  AgedPayableDetail: { supports: AS_OF_FILTERS, agingAsOf: true, defaultAccrual: true },
+  CustomerBalanceDetail: { supports: AS_OF_FILTERS, defaultAccrual: true },
+  VendorBalanceDetail: { supports: AS_OF_FILTERS, defaultAccrual: true },
+  TransactionList: { supports: TXN_LIST_FILTERS },
+  TransactionListByCustomer: { supports: TXN_LIST_FILTERS },
+  TransactionListByVendor: { supports: TXN_LIST_FILTERS },
+  SalesByClass: { supports: PERIOD_FILTERS, defaultAccrual: true },
+  SalesByCustomer: { supports: PERIOD_FILTERS, defaultAccrual: true },
+  SalesByDepartment: { supports: PERIOD_FILTERS, defaultAccrual: true },
+  SalesByProduct: { supports: PERIOD_FILTERS, defaultAccrual: true },
+};
+
+export const ALLOWED_RUN_REPORT_NAMES = Object.keys(ALLOWED_RUN_REPORTS);
+
 /** Metadata-only Budget query (no BudgetDetail — a few hundred bytes per budget). */
 export const BUDGET_META_QUERY =
   'SELECT Id, Name, StartDate, EndDate, BudgetType, BudgetEntryType, Active FROM Budget MAXRESULTS 1000';
@@ -107,6 +181,12 @@ function buildReportQuery(
     | 'customer'
     | 'vendor'
     | 'account'
+    | 'columns'
+    | 'cleared'
+    | 'source_account_type'
+    | 'transaction_type'
+    | 'docnum'
+    | 'payment_method'
   >
 ): Record<string, string> {
   const q: Record<string, string> = {};
@@ -122,6 +202,12 @@ function buildReportQuery(
     customer: options.customerId,
     vendor: options.vendorId,
     account: options.accountIds,
+    columns: options.columns,
+    cleared: options.cleared,
+    source_account_type: options.sourceAccountType,
+    transaction_type: options.transactionType,
+    docnum: options.docnum,
+    payment_method: options.paymentMethod,
   };
   for (const key of supports) {
     const value = map[key];
@@ -373,5 +459,23 @@ export class ReportsAPI {
       partialPeriods: options.partialPeriods,
       includeZeroRows: options.includeZeroRows,
     });
+  }
+
+  /**
+   * Fetch an allowlisted report by official name and return the current
+   * Reports API JSON (post 31 Aug 2026 cutover). Unknown query params are
+   * not sent.
+   */
+  async run(realmId: string, reportName: string, options: ReportOptions = {}): Promise<unknown> {
+    const spec = ALLOWED_RUN_REPORTS[reportName];
+    if (!spec) {
+      throw new ReportRequestError(
+        `Unknown report "${reportName}". Allowed: ${ALLOWED_RUN_REPORT_NAMES.join(', ')}.`,
+      );
+    }
+    const opts = spec.defaultAccrual ? withAccrualDefault(options) : options;
+    const query = buildReportQuery(opts, spec.supports);
+    if (spec.agingAsOf && query.report_date) query.aging_method = 'Report_Date';
+    return this.fetchReport(realmId, `reports/${reportName}`, query);
   }
 }

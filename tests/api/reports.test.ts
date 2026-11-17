@@ -296,3 +296,66 @@ describe('ReportsAPI — as-of dates, date_macro, and Fault bodies (2026-09-05)'
     expect(qboFaultMessage(null)).toBeNull();
   });
 });
+
+describe('ReportsAPI.run allowlist', () => {
+  let client: any;
+  let reports: ReportsAPI;
+
+  beforeEach(() => {
+    client = makeClient();
+    reports = new ReportsAPI(client);
+  });
+
+  it('ProfitAndLossDetail defaults to Accrual and threads period filters', async () => {
+    await reports.run('r', 'ProfitAndLossDetail', {
+      startDate: '2026-10-01',
+      endDate: '2026-10-31',
+      classId: '5',
+    });
+    expect(client.get).toHaveBeenCalledWith('r', 'reports/ProfitAndLossDetail', {
+      start_date: '2026-10-01',
+      end_date: '2026-10-31',
+      accounting_method: 'Accrual',
+      class: '5',
+    });
+  });
+
+  it('AgedReceivableDetail sends report_date plus aging_method=Report_Date', async () => {
+    await reports.run('r', 'AgedReceivableDetail', { asOfDate: '2026-10-31' });
+    expect(client.get).toHaveBeenCalledWith('r', 'reports/AgedReceivableDetail', {
+      report_date: '2026-10-31',
+      accounting_method: 'Accrual',
+      aging_method: 'Report_Date',
+    });
+  });
+
+  it('TransactionList does not default Accrual and omits unsupported params', async () => {
+    await reports.run('r', 'TransactionList', {
+      startDate: '2026-10-01',
+      endDate: '2026-10-31',
+      cleared: 'Uncleared',
+      sourceAccountType: 'Bank',
+      columns: 'tx_date,txn_type,amount',
+      accountIds: '1150040001',
+    });
+    expect(client.get).toHaveBeenCalledWith('r', 'reports/TransactionList', {
+      start_date: '2026-10-01',
+      end_date: '2026-10-31',
+      cleared: 'Uncleared',
+      source_account_type: 'Bank',
+      columns: 'tx_date,txn_type,amount',
+    });
+    const query = client.get.mock.calls[0][2];
+    expect(query).not.toHaveProperty('account');
+  });
+
+  it('rejects an unknown report name without calling QBO', async () => {
+    await expect(reports.run('r', 'NotAReport', { startDate: '2026-10-01' })).rejects.toThrow(/Unknown report/);
+    expect(client.get).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a Fault body as an error (even on HTTP 200)', async () => {
+    client.get.mockResolvedValue({ Fault: { Error: [{ Message: 'boom', code: '10000' }], type: 'SystemFault' } });
+    await expect(reports.run('r', 'TaxSummary', { startDate: '2026-10-01', endDate: '2026-10-31' })).rejects.toThrow(/QBO SystemFault/);
+  });
+});

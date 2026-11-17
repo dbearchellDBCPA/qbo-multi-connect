@@ -21,6 +21,6 @@ export {
 } from './attachments.js';
 export type { AttachmentUploadItem, AttachmentUploadResult } from './attachments.js';
 export type { ReportOptions, BudgetVsActualsOptions, ComputedBudgetVsActualsOptions, SummarizeColumnBy } from './reports.js';
-export { BudgetRequestError } from './reports.js';
+export { BudgetRequestError, ReportRequestError, ALLOWED_RUN_REPORT_NAMES } from './reports.js';
 export type { JournalEntryCreate, JournalEntryLine } from './journal-entries.js';
 export type { QueryOptions } from './transactions.js';

@@ -20,6 +20,7 @@ import {
 import { registerTransferTools } from './transfer-tools.js';
 import { registerCdcTools } from './cdc-tools.js';
 import { registerDocumentTools } from './document-tools.js';
+import { registerReportTools } from './report-tools.js';
 import { PdfDownloadStore } from './pdf-store.js';
 import { createBillPaymentValidated } from './bill-payment-credits.js';
 import { registerBulkTxnTools } from './bulk-txn-tools.js';
@@ -345,7 +346,7 @@ const DESTRUCTIVE_TOOLS = new Set<string>([
 // Read-only tools never mutate QBO state. All get_*/list_* tools plus the query tool.
 // import_status only reads the server's import store.
 function isReadOnlyTool(name: string): boolean {
-  return name.startsWith('get_') || name.startsWith('list_') || name === 'query_transactions' || name === 'import_status';
+  return name.startsWith('get_') || name.startsWith('list_') || name === 'query_transactions' || name === 'import_status' || name === 'run_report';
 }
 
 function annotationsForTool(name: string): ToolAnnotations {
@@ -496,6 +497,7 @@ export async function registerMcpRoutes(
     // ── Transfer tools + Expense/Deposit → Transfer (src/server/transfer-tools.ts)
     registerTransferTools(server, qboManager, (name) => findRealmId(qboManager, name));
     registerCdcTools(server, qboManager, (name) => findRealmId(qboManager, name));
+    registerReportTools(server, qboManager, (name) => findRealmId(qboManager, name));
     registerDocumentTools(server, qboManager, (name) => findRealmId(qboManager, name), { pdfStore, publicBaseUrl: baseUrl });
     registerBulkTxnTools(server, qboManager, (name) => findRealmId(qboManager, name), resolveVendorByName);
 
