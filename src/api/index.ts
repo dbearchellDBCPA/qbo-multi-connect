@@ -8,6 +8,8 @@ export { BankingAPI } from './banking.js';
 export { RecurringAPI } from './recurring.js';
 export { CdcAPI, CdcRequestError, CDC_MAX_LOOKBACK_DAYS } from './cdc.js';
 export { DocumentsAPI, DOCUMENT_TYPES } from './documents.js';
+export { TimeActivityAPI } from './time-activity.js';
+export { ENHANCED_CUSTOM_FIELDS_QUERY, shapeCustomFields, applyCustomFields } from './custom-fields.js';
 export { ListsAPI } from './lists.js';
 export { BatchAPI } from './batch.js';
 export {

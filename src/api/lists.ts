@@ -1,4 +1,5 @@
 import { QBOClient } from './client.js';
+import { ENHANCED_CUSTOM_FIELDS_QUERY } from './custom-fields.js';
 
 /**
  * QBO Lists / Dimensions API
@@ -22,7 +23,7 @@ export class ListsAPI {
   }
 
   async getItem(realmId: string, itemId: string): Promise<unknown> {
-    return this.client.get(realmId, `item/${itemId}`, {});
+    return this.client.get(realmId, `item/${itemId}`, ENHANCED_CUSTOM_FIELDS_QUERY);
   }
 
   async createItem(realmId: string, item: any): Promise<unknown> {

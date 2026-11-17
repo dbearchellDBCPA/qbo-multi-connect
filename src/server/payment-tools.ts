@@ -11,6 +11,7 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ScopedQBOManager } from './auth.js';
 import { formatCurrency } from './report-shaping.js';
+import { applyCustomFields, shapeCustomFields, type CustomFieldValue } from '../api/custom-fields.js';
 
 export function paymentToUpdateShape(p: any) {
   const lines = Array.isArray(p?.Line)
@@ -34,6 +35,7 @@ export function paymentToUpdateShape(p: any) {
     payment_method_id: p?.PaymentMethodRef?.value,
     deposit_to_account_id: p?.DepositToAccountRef?.value,
     lines,
+    custom_fields: shapeCustomFields(p),
   };
 }
 
@@ -87,6 +89,14 @@ export function registerPaymentTools(
         txn_type: z.enum(['Invoice', 'CreditMemo', 'JournalEntry']).describe('LinkedTxn type'),
         amount: z.number().describe('Amount applied on this line'),
       })).optional().describe('Replacement application lines (replaces ALL existing lines if provided).'),
+      custom_fields: z.array(z.object({
+        definition_id: z.string().optional(),
+        name: z.string().optional(),
+        type: z.enum(['StringType', 'BooleanType', 'NumberType']).optional(),
+        string_value: z.string().optional(),
+        boolean_value: z.boolean().optional(),
+        number_value: z.number().optional(),
+      })).optional().describe('Custom field values (QBO CustomField).'),
     },
     async (args: Record<string, any>) => {
       const realmId = await findRealmId(args.client_name);
@@ -115,6 +125,7 @@ export function registerPaymentTools(
           }
         }
         if (args.total_amt !== undefined) payload.TotalAmt = args.total_amt;
+        applyCustomFields(payload, args.custom_fields as CustomFieldValue[] | undefined);
         const result = await qboManager.transactions.updatePayment(realmId, payload);
         const updated = unwrapPayment(result);
         return { content: [{ type: 'text', text: updated ? JSON.stringify(paymentToUpdateShape(updated), null, 2) : JSON.stringify(result, null, 2) }] };

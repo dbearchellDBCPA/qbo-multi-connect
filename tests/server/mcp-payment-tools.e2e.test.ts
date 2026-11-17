@@ -133,7 +133,7 @@ describe('MCP payment get/update/void/delete (mocked QBO only)', () => {
     const { texts, isError } = await callTool('get_payment', { client_name: CLIENT, payment_id: '55' });
     expect(isError).toBe(false);
     expect(lastJson(texts)).toMatchObject({ id: '55', sync_token: '2', total_amt: 100, lines: [{ txn_id: '20', txn_type: 'Invoice' }] });
-    expect(getSpy).toHaveBeenCalledWith(REALM, 'payment/55', {});
+    expect(getSpy).toHaveBeenCalledWith(REALM, 'payment/55', { include: 'enhancedAllCustomFields' });
   });
 
   it('update_payment merges header fields and syncs a single invoice line when total_amt changes', async () => {

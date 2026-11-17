@@ -1,4 +1,5 @@
 import { QBOClient } from './client.js';
+import { ENHANCED_CUSTOM_FIELDS_QUERY } from './custom-fields.js';
 
 export interface QueryOptions {
   maxResults?: number;
@@ -58,42 +59,42 @@ export class TransactionsAPI {
    * Get invoice by ID
    */
   async getInvoice(realmId: string, invoiceId: string): Promise<unknown> {
-    return this.client.get(realmId, `invoice/${invoiceId}`, {});
+    return this.client.get(realmId, `invoice/${invoiceId}`, ENHANCED_CUSTOM_FIELDS_QUERY);
   }
 
   /**
    * Get bill by ID
    */
   async getBill(realmId: string, billId: string): Promise<unknown> {
-    return this.client.get(realmId, `bill/${billId}`, {});
+    return this.client.get(realmId, `bill/${billId}`, ENHANCED_CUSTOM_FIELDS_QUERY);
   }
 
   /**
    * Get payment by ID
    */
   async getPayment(realmId: string, paymentId: string): Promise<unknown> {
-    return this.client.get(realmId, `payment/${paymentId}`, {});
+    return this.client.get(realmId, `payment/${paymentId}`, ENHANCED_CUSTOM_FIELDS_QUERY);
   }
 
   /**
    * Get sales receipt by ID
    */
   async getSalesReceipt(realmId: string, salesReceiptId: string): Promise<unknown> {
-    return this.client.get(realmId, `salesreceipt/${salesReceiptId}`, {});
+    return this.client.get(realmId, `salesreceipt/${salesReceiptId}`, ENHANCED_CUSTOM_FIELDS_QUERY);
   }
 
   /**
    * Get credit memo by ID
    */
   async getCreditMemo(realmId: string, creditMemoId: string): Promise<unknown> {
-    return this.client.get(realmId, `creditmemo/${creditMemoId}`, {});
+    return this.client.get(realmId, `creditmemo/${creditMemoId}`, ENHANCED_CUSTOM_FIELDS_QUERY);
   }
 
   /**
    * Get expense by ID
    */
   async getExpense(realmId: string, expenseId: string): Promise<unknown> {
-    return this.client.get(realmId, `purchase/${expenseId}`, {});
+    return this.client.get(realmId, `purchase/${expenseId}`, ENHANCED_CUSTOM_FIELDS_QUERY);
   }
 
   /**
@@ -142,14 +143,14 @@ export class TransactionsAPI {
    * Get vendor by ID
    */
   async getVendor(realmId: string, vendorId: string): Promise<unknown> {
-    return this.client.get(realmId, `vendor/${vendorId}`, {});
+    return this.client.get(realmId, `vendor/${vendorId}`, ENHANCED_CUSTOM_FIELDS_QUERY);
   }
 
   /**
    * Get customer by ID
    */
   async getCustomer(realmId: string, customerId: string): Promise<unknown> {
-    return this.client.get(realmId, `customer/${customerId}`, {});
+    return this.client.get(realmId, `customer/${customerId}`, ENHANCED_CUSTOM_FIELDS_QUERY);
   }
 
   /**
@@ -249,7 +250,7 @@ export class TransactionsAPI {
    * Get vendor credit by ID
    */
   async getVendorCredit(realmId: string, vendorCreditId: string): Promise<unknown> {
-    return this.client.get(realmId, `vendorcredit/${vendorCreditId}`, {});
+    return this.client.get(realmId, `vendorcredit/${vendorCreditId}`, ENHANCED_CUSTOM_FIELDS_QUERY);
   }
 
   /**
@@ -452,7 +453,7 @@ export class TransactionsAPI {
    * Get refund receipt by ID
    */
   async getRefundReceipt(realmId: string, refundReceiptId: string): Promise<unknown> {
-    return this.client.get(realmId, `refundreceipt/${refundReceiptId}`, {});
+    return this.client.get(realmId, `refundreceipt/${refundReceiptId}`, ENHANCED_CUSTOM_FIELDS_QUERY);
   }
 
   /**
@@ -513,7 +514,7 @@ export class TransactionsAPI {
    * Get estimate by ID
    */
   async getEstimate(realmId: string, estimateId: string): Promise<unknown> {
-    return this.client.get(realmId, `estimate/${estimateId}`, {});
+    return this.client.get(realmId, `estimate/${estimateId}`, ENHANCED_CUSTOM_FIELDS_QUERY);
   }
 
   /**
@@ -537,7 +538,7 @@ export class TransactionsAPI {
    * Get purchase order by ID
    */
   async getPurchaseOrder(realmId: string, poId: string): Promise<unknown> {
-    return this.client.get(realmId, `purchaseorder/${poId}`, {});
+    return this.client.get(realmId, `purchaseorder/${poId}`, ENHANCED_CUSTOM_FIELDS_QUERY);
   }
 
   /**

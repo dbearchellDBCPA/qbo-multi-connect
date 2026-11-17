@@ -1,4 +1,5 @@
 import { QBOClient } from './client.js';
+import { ENHANCED_CUSTOM_FIELDS_QUERY } from './custom-fields.js';
 
 export interface JournalEntryLine {
   Description?: string;
@@ -47,7 +48,7 @@ export class JournalEntriesAPI {
    * Get journal entry by ID
    */
   async get(realmId: string, journalEntryId: string): Promise<unknown> {
-    return this.client.get(realmId, `journalentry/${journalEntryId}`, {});
+    return this.client.get(realmId, `journalentry/${journalEntryId}`, ENHANCED_CUSTOM_FIELDS_QUERY);
   }
 
   /**
