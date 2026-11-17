@@ -1,7 +1,9 @@
 import { describe, it, expect } from 'vitest';
+import { QBOError } from '../../src/api/client.js';
 import {
   RecurringRequestError,
   buildRecurringUpdatePayload,
+  isNotFoundError,
   lineFingerprint,
   linesUnchanged,
   matchesRecurringId,
@@ -142,6 +144,46 @@ describe('unwrapRecurring / summarize', () => {
     expect(matchesRecurringId(wrapper, '20')).toBe(true);
     expect(matchesRecurringId(wrapper, '2')).toBe(true);
     expect(matchesRecurringId(wrapper, '99')).toBe(false);
+  });
+});
+
+describe('isNotFoundError', () => {
+  function faultError(status: number, error: Record<string, unknown>) {
+    const body = JSON.stringify({ Fault: { Error: [error], type: 'ValidationFault' } });
+    const message = `QBO API error: ${error.Message ?? ''} — ${error.Detail ?? ''} (QBO code ${error.code ?? ''})`;
+    return new QBOError(message, status, body);
+  }
+
+  it('treats HTTP 404 as not found', () => {
+    expect(isNotFoundError(new QBOError('not found', 404))).toBe(true);
+  });
+
+  it('treats Fault 610 (HTTP 400 Object Not Found) as not found', () => {
+    expect(isNotFoundError(faultError(400, {
+      Message: 'Object Not Found',
+      Detail: 'Object Not Found : RecurringTransaction with specified id was not found.',
+      code: '610',
+    }))).toBe(true);
+  });
+
+  it('treats a not-found Fault even when the code is not 610', () => {
+    expect(isNotFoundError(faultError(400, {
+      Message: 'Object Not Found',
+      Detail: 'No matching RecurringTransaction.',
+      code: '400',
+    }))).toBe(true);
+  });
+
+  it('does not treat a business-validation Fault as not found', () => {
+    expect(isNotFoundError(faultError(400, {
+      Message: 'A business validation error has occurred while processing your request',
+      Detail: 'Stale SyncToken. Please refresh and try again.',
+      code: '5010',
+    }))).toBe(false);
+  });
+
+  it('does not treat a connection-missing QBOError as not found', () => {
+    expect(isNotFoundError(new QBOError('Connection not found: 9341454121860748'))).toBe(false);
   });
 });
 

@@ -289,9 +289,33 @@ export function linesUnchanged(beforeTxn: any, afterTxn: any): boolean {
   return JSON.stringify(lineFingerprint(beforeTxn)) === JSON.stringify(lineFingerprint(afterTxn));
 }
 
+function qboFaultErrors(err: unknown): Array<{ Message?: string; Detail?: string; code?: string | number }> {
+  const raw = (err as QBOError)?.response;
+  if (raw == null) return [];
+  let body: unknown = raw;
+  if (typeof raw === 'string') {
+    try { body = JSON.parse(raw); } catch { return []; }
+  }
+  const errors = (body as { Fault?: { Error?: unknown } })?.Fault?.Error;
+  if (Array.isArray(errors)) return errors;
+  if (errors && typeof errors === 'object') return [errors as { Message?: string; Detail?: string; code?: string | number }];
+  return [];
+}
+
+/**
+ * Direct GET /recurringtransaction/{id} returns HTTP 404 in some cases, but
+ * a lookup by RecurDataRef (or a missing object) often comes back as HTTP 400
+ * with Fault code 610 ("Object Not Found"). Treat both — and any other
+ * not-found Fault — as a miss so resolve() can fall back to the query list.
+ */
 export function isNotFoundError(err: unknown): boolean {
-  const status = (err as QBOError)?.statusCode;
-  return status === 404;
+  if ((err as QBOError)?.statusCode === 404) return true;
+  for (const e of qboFaultErrors(err)) {
+    if (String(e?.code ?? '') === '610') return true;
+    const text = [e?.Message, e?.Detail].filter(Boolean).join(' ');
+    if (/\b(?:object\s+)?not found\b/i.test(text)) return true;
+  }
+  return false;
 }
 
 /**
