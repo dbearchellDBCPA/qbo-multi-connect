@@ -9,6 +9,8 @@ export interface OutboundEmail {
   subject: string;
   text: string;
   html?: string;
+  /** Where a reply goes, when the sender address itself isn't monitored. */
+  replyTo?: string;
   /**
    * Resend honours an Idempotency-Key for 24 hours: retrying the same
    * logical send (same key) can't deliver the message twice.
@@ -58,6 +60,7 @@ export class ResendEmailSender implements EmailSender {
           subject: email.subject,
           text: email.text,
           ...(email.html ? { html: email.html } : {}),
+          ...(email.replyTo ? { reply_to: email.replyTo } : {}),
         }),
         signal: controller.signal,
       });

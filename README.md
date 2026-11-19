@@ -15,7 +15,9 @@ makes this a ~30-minute, no-code setup — walkthrough below). It gives you:
   the files they work in, read-only on the ones they only need to look at.
 - **Client logins** — give a client a read-only login to their own company so
   their AI assistant can answer questions from their books. Always read-only,
-  never an admin, no API key. See [docs/CLIENT-ACCESS.md](docs/CLIENT-ACCESS.md).
+  never an admin, no API key. The server can email them an invitation with
+  setup steps and, separately, a generated password.
+  See [docs/CLIENT-ACCESS.md](docs/CLIENT-ACCESS.md).
 - **An activity log** — every tool call and sign-in: who, which tool, which
   company, and whether it was blocked.
 - **A Claude connector** — add one URL in Claude's settings and Claude can
@@ -359,6 +361,13 @@ assignments.
 | `PATCH` | `/api/users/:id` | Update name/email/role/status/`accessLevel` and/or `clients` |
 | `PUT` | `/api/connections/:realmId/users` | Replace who can access one company (`{users: [{userId, accessLevel}]}`) |
 | `GET` | `/api/activity` | Activity log, newest first. Filters: `userId`, `realmId`, `accountType`; page with `before` (entry id) and `limit` (max 200) |
+| `POST` | `/api/users/:id/invite` | Email a client login a new invitation and a new password (two messages). Changes nothing if the emails can't be sent |
+| `GET` | `/api/invites` | Whether invitation emails are configured, and the sender |
+
+`POST /api/users` with `"sendInvite": true` (client logins only, with an
+`email` and no `password`) generates the password and sends the two emails;
+the response carries an `invite` object saying whether both were accepted.
+The generated password is never returned.
 | `POST` | `/api/users/:id/rotate-key` | Invalidate old key, return new key once |
 | `DELETE` | `/api/users/:id` | Remove member and revoke key |
 
@@ -755,6 +764,9 @@ curl -H "Authorization: Bearer YOUR_API_KEY" \
 | `RESEND_API_KEY` | No | — | Resend API key for email alerts ("sending access" is enough) |
 | `QBO_ALERT_EMAIL` | No | — | Who to email when a connection breaks; comma-separated for several |
 | `QBO_ALERT_FROM` | No | — | Sender for alert emails, on a domain verified in Resend |
+| `QBO_INVITE_FROM` | No | — | Sender clients see on invitation emails, e.g. `Your Firm <hello@yourfirm.com>`. Invitations are off until it is set |
+| `QBO_INVITE_REPLY_TO` | No | — | Where a client's reply to an invitation goes |
+| `QBO_FIRM_NAME` | No | sender's display name | How invitation emails name the firm |
 
 ### Public URL & custom domains
 

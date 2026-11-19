@@ -8,6 +8,8 @@ import { OAuthServerService } from './oauth-server.js';
 import { ConnectionAlerts } from './alerts/connection-alerts.js';
 import { disabledAlertsConfig, type AlertsConfig } from './alerts/config.js';
 import { ResendEmailSender, type EmailSender } from './alerts/email.js';
+import { ClientInvites } from './invites/client-invites.js';
+import { disabledInvitesConfig, type InvitesConfig } from './invites/config.js';
 import type { OAuthConfig, Connection } from './db/models.js';
 
 export interface QBOManagerConfig {
@@ -19,7 +21,9 @@ export interface QBOManagerConfig {
   environment?: 'sandbox' | 'production';
   /** Email alerts when a connection breaks. Omit, or pass a disabled config, to turn them off. */
   alerts?: AlertsConfig;
-  /** Email transport override (tests). Defaults to Resend with alerts.resendApiKey. */
+  /** Invitation emails for client logins. Omit, or pass a disabled config, to turn them off. */
+  invites?: InvitesConfig;
+  /** Email transport override (tests). Defaults to Resend with the configured API key. */
   emailSender?: EmailSender;
   /** The dashboard's public address, for links in alert emails. */
   dashboardUrl?: () => string | null;
@@ -53,6 +57,7 @@ export class QBOManager {
   public readonly users: UserService;
   public readonly activity: ActivityLog;
   public readonly alerts: ConnectionAlerts;
+  public readonly invites: ClientInvites;
 
   constructor(config: QBOManagerConfig) {
     // Validate config
@@ -97,9 +102,17 @@ export class QBOManager {
     // Email alerts for broken connections: off unless configured. The
     // transport is injectable so tests never reach the network.
     const alertsConfig = config.alerts ?? disabledAlertsConfig();
-    const emailSender =
-      config.emailSender ?? (alertsConfig.enabled ? new ResendEmailSender(alertsConfig.resendApiKey) : null);
+    const invitesConfig = config.invites ?? disabledInvitesConfig();
+    // Alerts and invitations are separate features sharing one Resend key;
+    // either being configured is enough to need the transport.
+    const resendApiKey = alertsConfig.enabled
+      ? alertsConfig.resendApiKey
+      : invitesConfig.enabled
+        ? invitesConfig.resendApiKey
+        : null;
+    const emailSender = config.emailSender ?? (resendApiKey ? new ResendEmailSender(resendApiKey) : null);
     this.alerts = new ConnectionAlerts(this.db, alertsConfig, emailSender, config.dashboardUrl);
+    this.invites = new ClientInvites(invitesConfig, emailSender);
   }
 
   /**
@@ -226,5 +239,7 @@ export { QBOError } from './api/index.js';
 export { UserService, generateApiKey, hashApiKey } from './users.js';
 export { ActivityLog } from './activity.js';
 export { parseAlertsConfig } from './alerts/config.js';
+export { parseInvitesConfig } from './invites/config.js';
+export type { InvitesConfig } from './invites/config.js';
 export type { AlertsConfig } from './alerts/config.js';
 export type { EmailSender, OutboundEmail } from './alerts/email.js';

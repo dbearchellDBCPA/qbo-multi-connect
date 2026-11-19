@@ -43,6 +43,8 @@ async function startServer() {
     // address the server can work out without a request (QBO_PUBLIC_URL,
     // QBO_ALLOWED_HOSTS, or Railway's public domain).
     alerts: appConfig.alerts,
+    // Invitation + password emails for client logins.
+    invites: appConfig.invites,
     dashboardUrl: () => resolvePublicUrl().baseUrl,
   });
 
@@ -247,6 +249,14 @@ async function startServer() {
     } else {
       const why = [...alerts.problems, ...alerts.missing.map((name) => `${name} is not set`)].join('; ');
       console.log(`⚠️  Alerts:     off — ${why}`);
+    }
+    const invites = appConfig.invites;
+    if (invites.enabled) {
+      console.log(`✉️  Invites:    on — client invitations go out from ${invites.from}`);
+    } else if (invites.problems.length > 0) {
+      console.log(`⚠️  Invites:    off — ${invites.problems.join('; ')}`);
+    } else {
+      console.log(`✉️  Invites:    off — set RESEND_API_KEY and QBO_INVITE_FROM to email client logins their invitation and password`);
     }
     if (publicUrl.source === 'QBO_PUBLIC_URL') {
       console.log(`🌐 Public URL:  ${publicUrl.baseUrl} (pinned by QBO_PUBLIC_URL)`);

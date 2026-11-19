@@ -124,6 +124,7 @@ export interface UserRecord {
   created_at: string;
   updated_at: string;
   last_used_at: string | null;
+  invite_sent_at: string | null;
 }
 
 /**
@@ -144,6 +145,8 @@ export interface User {
   createdAt: Date;
   updatedAt: Date;
   lastUsedAt: Date | null;
+  /** When the invitation and password emails were last sent (client logins). */
+  inviteSentAt: Date | null;
   realmIds: string[];
   /**
    * Access level per assigned company, as stored. The user-level accessLevel

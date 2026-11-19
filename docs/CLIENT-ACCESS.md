@@ -32,19 +32,86 @@ list; a test fails until that decision is made.
 
 ## Set up a client
 
+With [email invitations](#email-invitations) turned on, the server sends the
+client everything they need:
+
 1. On the dashboard, open **Team**. Under **Client logins**, click **+ Add**.
-2. Enter their name, a **username**, and a **password**. Both are required —
-   a client login has no API key to fall back on, so the server refuses to
+2. Enter their name, their **email address**, and a **username**.
+3. Leave **Email them an invitation and a generated password** checked.
+4. Check **their company**. Usually exactly one — an invitation is not sent
+   for a login with no company assigned.
+5. Click **Create and send invitation**. They receive two emails; there is
+   nothing else for you to send.
+
+Without email invitations — or if you untick that box — you choose the
+password yourself:
+
+1. Enter their name, a **username**, and a **password**. Both are required: a
+   client login has no API key to fall back on, so the server refuses to
    create one that couldn't sign in.
-3. Check **their company**. Usually exactly one.
-4. Click **Create client login**. The confirmation shows the connector
-   address to send them.
-5. Send the client the handout, the connector address, and their username.
+2. Check their company and click **Create client login**. The confirmation
+   shows the connector address.
+3. Send the client the handout, the connector address, and their username.
    Send the password separately.
 
 Create one login per person. If two people at the client need access, give
 each their own, so you can switch one off without affecting the other and the
 activity log shows who did what.
+
+## Email invitations
+
+When a client login is created with the invitation box checked, the server
+generates a strong random password and sends the client two emails through
+[Resend](https://resend.com):
+
+1. **The invitation** — the connector address, their username, step-by-step
+   setup for Claude and for ChatGPT, things to try asking, and what read-only
+   means. No password.
+2. **The password** — and nothing that says where to use it: no address, no
+   username.
+
+They are separate on purpose, so neither message is enough to sign in by
+itself if it is forwarded or seen on a screen. The password is never shown in
+the dashboard, returned by the API, or written to a log; only its hash is
+stored.
+
+**Send a new invitation** on a client login emails both messages again with a
+**new** password. The old password stops working and any assistant they had
+connected is signed out — so it is also the fix for "I lost the email" and
+"I'm locked out". If the emails cannot be sent, nothing changes and the login
+keeps working as it was.
+
+### Turning it on
+
+Set these on the server (the same place as the other settings), then restart:
+
+| Variable | Required | What it is |
+|---|---|---|
+| `RESEND_API_KEY` | Yes | A Resend API key with *Sending access*. The same key the connection alerts use. |
+| `QBO_INVITE_FROM` | Yes | What clients see in their inbox: `Your Firm <hello@yourfirm.com>`, on a domain you have verified in Resend. The alert sender is never used in its place — client email only goes out once you have chosen who it comes from. |
+| `QBO_INVITE_REPLY_TO` | No | Where a client's reply goes — your real inbox — when the sender address isn't one you read. |
+| `QBO_FIRM_NAME` | No | How the emails name the firm. Defaults to the display name in the sender. |
+
+The startup log and the **Add a client login** form both say whether
+invitations are on and, if not, which setting is missing.
+
+### Things to know
+
+- **A password in an email is only as private as the inbox — and the outbox.**
+  Splitting the two messages helps, but both go to the same address, and
+  Resend keeps a copy of what it sent, readable by anyone with access to your
+  Resend account. The emails ask the client to change the password, but
+  nothing forces them to. If a client's mailbox is shared, choose the password
+  yourself and give it to them another way.
+- **Check the address before you send.** The invitation goes to whatever is in
+  the email field, and it names their company. A typo sends a working login
+  to a stranger. If that happens, **Disable** the login at once.
+- **The ChatGPT steps are the least certain part.** OpenAI limits custom
+  connections to certain plans (Business and Enterprise/Edu at the time of
+  writing, set up by a workspace admin) and changes its menus often. Try it
+  once with your own ChatGPT account before telling a client it will work.
+- **Deliverability is Resend's and your domain's.** A first email from a new
+  sending domain can land in spam; ask the client to look there.
 
 ## Before you hand one out
 
@@ -77,6 +144,7 @@ activity, and logging whatever strangers type would let them fill the log.
 - **Clients** shows recent activity across everyone.
 - `GET /api/activity?accountType=client` returns everything client logins
   have done, for export or review. Entries are kept for 180 days.
+- Each client login shows when its invitation was last sent.
 
 Things worth a look: a login that has never connected (they may be stuck), a
 burst of activity at odd hours, blocked or "not found" calls, or a "Locked out
