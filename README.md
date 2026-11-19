@@ -17,7 +17,9 @@ makes this a ~30-minute, no-code setup — walkthrough below). It gives you:
   their AI assistant can answer questions from their books. Always read-only,
   never an admin, no API key. Inviting one takes a name and an email
   address: they get a link, choose their own password, and are shown how to
-  connect.
+  connect. Or give every client one link to **ask** for access, and approve
+  the requests in the dashboard. Clients accept a short list of risks —
+  including their AI provider's use of their data — before connecting.
   See [docs/CLIENT-ACCESS.md](docs/CLIENT-ACCESS.md).
 - **An activity log** — every tool call and sign-in: who, which tool, which
   company, and whether it was blocked.
@@ -363,7 +365,18 @@ assignments.
 | `PUT` | `/api/connections/:realmId/users` | Replace who can access one company (`{users: [{userId, accessLevel}]}`) |
 | `GET` | `/api/activity` | Activity log, newest first. Filters: `userId`, `realmId`, `accountType`; page with `before` (entry id) and `limit` (max 200) |
 | `POST` | `/api/users/:id/invite` | Send a client login a new invitation link. The earlier link stops working; the current password keeps working until the new invitation is accepted |
-| `GET` | `/api/invites` | Whether invitation emails are configured, and the sender |
+| `GET` | `/api/invites` | Whether invitation emails are configured, and the sender; the firm name, logo and video clients see |
+| `PUT` | `/api/branding` | Set what clients see: `{firmName?, setupVideoUrl?}` |
+| `PUT` / `DELETE` | `/api/branding/logo` | Upload (`{dataUrl}`: PNG, JPEG, GIF or WebP up to 256 KB) or remove the firm's logo |
+| `GET` | `/api/access-requests` | Requests from the public request page: waiting, recently handled, and settings |
+| `PUT` | `/api/access-requests/settings` | Open or close the request page and set who is emailed: `{enabled?, notifyEmail?}` |
+| `POST` | `/api/access-requests/:id/approve` | Approve with `{realmId}`: creates the read-only client login (or adds the company to an existing one) and sends the invitation |
+| `POST` | `/api/access-requests/:id/decline` | Close a request without giving access. `…/decline-all` closes every waiting one |
+
+Public pages (no sign-in): `/request-access` (the request form; off until
+enabled, `/invite` forwards to it), `/invite/<token>` (accept an invitation),
+`/security` (how client access is protected and what clients should keep in
+mind), `/brand/logo` (the firm's logo).
 
 `POST /api/users` with `"sendInvite": true` invites a client login: it needs
 a `name`, an `email`, `accountType: "client"` and a company, and no
@@ -896,6 +909,16 @@ and [Docker](#running-it-elsewhere-docker)). Details worth knowing:
   days and stored only as a hash, leads to a page where the client chooses
   their own. The pages are script-free, uncached and send no referrer, and
   the token is redacted from the request log
+- The public request page is off by default and grants nothing: access only
+  follows an admin's approval, and the invitation goes to the address on the
+  request. It answers every submission the same way, keeps one waiting
+  request per address, refuses links and markup in names, and is bounded per
+  source, per hour and by queue size; notices to the firm are spaced out
+- Client logins accept a short statement of risks (AI-provider data use,
+  whole-file visibility, AI errors, login custody) before their first
+  connection; the acceptance is recorded with its date and version
+- An uploaded logo is accepted only as PNG/JPEG/GIF/WebP recognised by its
+  bytes, and served with `nosniff` and a locked-down content policy
 - Resetting or changing a password, accepting a new invitation, or disabling
   a login revokes its connector tokens — an assistant connected with the old
   password is cut off

@@ -141,6 +141,19 @@ Make sure the video's sharing is set so anyone with the link can watch, and
 don't show a real client's books or a real password while recording — use a
 sample company. Clear the box to remove it.
 
+### Your logo
+
+Upload it under **Settings → What clients see → Logo**. It replaces the
+app's mark at the top of the request page, the page where a client chooses a
+password, the confirmation page and the connector sign-in page, and heads the
+invitation email. A wide logo that already spells your name is shown on its
+own; a square one sits beside the name.
+
+PNG or JPEG (GIF and WebP also work), up to 256 KB. SVG is not accepted —
+save it as PNG first. Use a version drawn for a light background; on a
+dark-mode page it is placed on a white plate. Mail clients often hide images
+until the reader allows them, so the email also carries your name as text.
+
 ### Choosing the password yourself
 
 If you'd rather not invite — a client without email, say — untick **Invite
@@ -159,6 +172,114 @@ both, since it has no API key to fall back on.
 - **Passwords are the client's own.** The minimum is 8 characters; the page
   encourages a longer phrase. You can't see or recover it — only replace it,
   with a new invitation or **Reset password**.
+
+## Letting clients ask for access
+
+Instead of inviting clients one at a time, you can give all of them one
+address and let each ask. A request does nothing by itself: you approve it,
+and approval sends the ordinary invitation.
+
+1. Open **Settings**, and under **Requests for access** tick **Let clients
+   ask for access on a public page**. Enter the address that should be
+   emailed about new requests, and save.
+2. Copy the link from **Team → Access requests** — it ends in
+   `/request-access` (`/invite` forwards to it) — and put it in your email to
+   clients. A sample is at the end of this section.
+3. A client enters their **name**, **email address** and **business name**.
+   They are told the request is with you and that an invitation will follow.
+4. You get an email, and **Team** shows a count. Under **Team → Access
+   requests**, each request has **Approve…** and **Decline**.
+5. **Approve…** asks which company to give them. It is preselected only when
+   exactly one connected company matches the business name they typed —
+   check it. Approving creates their read-only client login and sends the
+   invitation. If that address already has a client login, the company is
+   added to it instead.
+6. **Decline** closes the request. Nothing is sent to them.
+
+### What keeps a public form from being a way in
+
+- **It is off until you turn it on**, and you can turn it off again after
+  your campaign. While off, the page tells visitors to contact you.
+- **A request grants nothing.** No login exists, and nothing is sent to the
+  address typed, until you approve. The invitation then goes to that address,
+  so the person has to control it to get in.
+- **You are the check.** Anyone can fill in the form, including someone
+  pretending to be a client. Approve only when the email address is one you
+  know belongs to that client. If you don't recognise it, call the client
+  before approving — or decline and invite them yourself at the address you
+  have on file.
+- **The company is your choice.** What the requester typed is a hint for you;
+  it never decides which books they see.
+- **It gives nothing away.** Everyone who submits gets the same answer,
+  whether or not the address is already a client's, and one address can only
+  have one request waiting.
+- **It can't be flooded without limit.** Names can't carry links or markup.
+  A hidden field and a timed form turn away simple scripts. Submissions are
+  limited per network address (20 an hour), overall (100 an hour) and by how
+  many can wait (300); past that the page asks people to contact you.
+  **Decline all** clears junk in one step.
+- **Your inbox can't be either.** The first request is emailed at once; after
+  that there is at most one email every 15 minutes, covering everything that
+  arrived since. The email carries only what was typed, marked as unverified.
+- **A record is kept** of who approved or declined each request, for a year.
+
+Notices are sent from `QBO_ALERT_FROM` (or `QBO_INVITE_FROM`) and need
+`RESEND_API_KEY`. With no address set in Settings they go to the
+connection-alert recipients (`QBO_ALERT_EMAIL`). Without email set up,
+requests still arrive and show under **Team**.
+
+### A sample announcement
+
+> **Subject: Ask your AI assistant about your books**
+>
+> We can now connect your AI assistant — Claude or ChatGPT — to your
+> QuickBooks Online books. Ask it things like "Who owes me money?" or "How
+> did last month compare to last year?" and it answers from your actual
+> numbers.
+>
+> It is **read-only**: your assistant can look things up and run reports,
+> and cannot change anything in QuickBooks.
+>
+> To ask for access, go to **[your request link]** and enter your name, the
+> email address we have on file for you, and your business name. We review
+> each request and then email you an invitation with setup steps. It takes
+> about five minutes from there.
+>
+> Before you connect, please read **[your address]/security** — in
+> particular the part about your AI provider's privacy settings.
+
+## What clients agree to before connecting
+
+Before a client's assistant is connected they accept a short list — four
+points, not a contract — of what is theirs to manage:
+
+1. **Their AI provider sees what they ask and what comes back**, and on free
+   and some personal plans may train on it unless they switch that off.
+2. **Their assistant can read the whole QuickBooks file.**
+3. **AI can be wrong** — check with you before relying on a number.
+4. **Their login is theirs alone.**
+
+They tick a box to continue. Where it happens:
+
+- **Invited clients** see it on the page where they choose their password.
+  The password is not set without it.
+- **A client login you gave a password to directly** is asked the first time
+  it signs in through the connector.
+
+The date is recorded on the login (**Team → the client → Accepted the
+risks**). If the wording is ever changed in a way that matters
+(`CLIENT_TERMS_VERSION` in `src/client-terms.ts`), every client is asked
+again at their next sign-in. Your own team is never asked.
+
+The fuller explanation is a public page on your server, **`/security`**, in
+your firm's name: how the connection is protected, AI providers and training
+on data, and good habits. It is linked from the request page, the invitation
+email, the accept page and the client's dashboard. Send clients there when
+they ask "is this safe?".
+
+This is practical wording, not legal advice. If your engagement letters
+should cover AI access, have your own counsel add it there; the list above
+tells you what clients have already been shown.
 
 ## Before you hand one out
 
