@@ -1239,3 +1239,32 @@ pre.json-view {
   .detail-cards { grid-template-columns: 1fr; }
   .detail-header { flex-direction: column; }
 }
+
+/* ── Requests for access ─────────────────────────────────────────────────── */
+.seg-badge {
+  display: inline-block; min-width: 17px; padding: 0 5px; margin-left: 4px; border-radius: 9px;
+  background: var(--rail-warn); color: var(--color-navy-950, #0b1e30); font-size: 10.5px; font-weight: 700; line-height: 17px; text-align: center;
+}
+.avatar-requests { background: var(--rail-sel-bg); color: var(--rail-accent); border: 1px solid var(--rail-sel-border); font-size: 11px; }
+.request-card-label { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.request-card-label .btn-link { letter-spacing: 0; text-transform: none; font-size: 12px; }
+.request-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.request-row {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 14px;
+  padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel);
+}
+.request-row-done { padding: 9px 14px; }
+.request-main { min-width: 0; flex: 1; }
+.request-who { font-size: 13.5px; overflow-wrap: anywhere; }
+.request-email { color: var(--text-3); font-size: 12.5px; }
+.request-meta { margin-top: 2px; font-size: 12px; color: var(--muted-2); overflow-wrap: anywhere; }
+.request-meta strong { color: var(--text-2); font-weight: 600; }
+.request-flag {
+  margin-top: 8px; padding: 7px 10px; border-radius: 8px; font-size: 12px; line-height: 1.5;
+  background: var(--badge-muted-bg); color: var(--badge-muted-text);
+}
+.request-flag.bad { background: var(--danger-bg); color: var(--danger-text); }
+.request-actions { display: flex; gap: 6px; flex-shrink: 0; }
+@media (max-width: 720px) {
+  .request-row { flex-direction: column; }
+}
