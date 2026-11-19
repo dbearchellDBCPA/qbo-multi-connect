@@ -11,6 +11,7 @@ import { usersRoutes } from './routes/users.js';
 import { authRoutes } from './routes/auth.js';
 import { oauthRoutes } from './routes/oauth.js';
 import { alertsRoutes } from './routes/alerts.js';
+import { activityRoutes } from './routes/activity.js';
 import { registerMcpRoutes } from './mcp.js';
 import { renderCallbackPage } from './callback-page.js';
 import { exchangeCodeForTokens } from '../auth/oauth.js';
@@ -212,6 +213,7 @@ async function startServer() {
   await usersRoutes(fastify, qboManager, apiKey);
   await authRoutes(fastify, qboManager, apiKey);
   await alertsRoutes(fastify, qboManager, apiKey);
+  await activityRoutes(fastify, qboManager, apiKey);
   // OAuth 2.1 authorization server: lets one shared workspace connector
   // authenticate each team member individually.
   await oauthRoutes(fastify, qboManager);

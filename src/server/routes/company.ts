@@ -1,4 +1,4 @@
-import type { FastifyInstance, FastifyReply } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import fastifyMultipart from '@fastify/multipart';
 import type { QBOManager } from '../../index.js';
 import { authenticateRequest } from '../middleware.js';
@@ -17,6 +17,22 @@ export async function companyRoutes(
   await fastify.register(fastifyMultipart, {
     limits: { fileSize: MAX_ATTACHMENT_BYTES, files: 1, fields: 10 },
   });
+
+  // The REST data API is for the firm: scripts, integrations, the dashboard.
+  // A client login reads its books through the connector, where the tool
+  // allow-list and the activity log apply; it gets nothing here, so there is
+  // no second, unlogged way in.
+  async function authenticate(request: FastifyRequest, reply: FastifyReply): Promise<AuthScope | null> {
+    const scope = await authenticateRequest(request, reply, qboManager, masterApiKey);
+    if (scope && scope.accountType === 'client') {
+      await reply.code(403).send({
+        error: 'Forbidden',
+        message: 'Client logins read their books through the AI connector; the REST API is not available to them',
+      });
+      return null;
+    }
+    return scope;
+  }
 
   // Look up a connection only if the caller's scope may access it. Unassigned
   // companies 404 exactly like nonexistent ones, so member keys can't probe
@@ -73,7 +89,7 @@ export async function companyRoutes(
           return;
         }
       } else {
-        const scope = await authenticateRequest(request, reply, qboManager, masterApiKey);
+        const scope = await authenticate(request, reply);
         if (!scope) return;
         const connection = await getScopedConnection(scope, realmId);
         if (!connection) {
@@ -168,7 +184,7 @@ export async function companyRoutes(
   fastify.get<{
     Params: { realmId: string };
   }>('/api/company/:realmId/info', async (request, reply) => {
-    const scope = await authenticateRequest(request, reply, qboManager, masterApiKey);
+    const scope = await authenticate(request, reply);
     if (!scope) return;
 
     try {
@@ -198,7 +214,7 @@ export async function companyRoutes(
     Params: { realmId: string };
     Querystring: { startDate: string; endDate: string };
   }>('/api/company/:realmId/reports/pnl', async (request, reply) => {
-    const scope = await authenticateRequest(request, reply, qboManager, masterApiKey);
+    const scope = await authenticate(request, reply);
     if (!scope) return;
 
     try {
@@ -237,7 +253,7 @@ export async function companyRoutes(
     Params: { realmId: string };
     Querystring: { asOfDate: string };
   }>('/api/company/:realmId/reports/balance-sheet', async (request, reply) => {
-    const scope = await authenticateRequest(request, reply, qboManager, masterApiKey);
+    const scope = await authenticate(request, reply);
     if (!scope) return;
 
     try {
@@ -275,7 +291,7 @@ export async function companyRoutes(
   fastify.get<{
     Params: { realmId: string };
   }>('/api/company/:realmId/reports/trial-balance', async (request, reply) => {
-    const scope = await authenticateRequest(request, reply, qboManager, masterApiKey);
+    const scope = await authenticate(request, reply);
     if (!scope) return;
 
     try {
@@ -304,7 +320,7 @@ export async function companyRoutes(
   fastify.get<{
     Params: { realmId: string };
   }>('/api/company/:realmId/accounts', async (request, reply) => {
-    const scope = await authenticateRequest(request, reply, qboManager, masterApiKey);
+    const scope = await authenticate(request, reply);
     if (!scope) return;
 
     try {
@@ -334,7 +350,7 @@ export async function companyRoutes(
     Params: { realmId: string };
     Querystring: { q: string };
   }>('/api/company/:realmId/query', async (request, reply) => {
-    const scope = await authenticateRequest(request, reply, qboManager, masterApiKey);
+    const scope = await authenticate(request, reply);
     if (!scope) return;
 
     try {
@@ -374,7 +390,7 @@ export async function companyRoutes(
     Params: { realmId: string };
     Body: unknown;
   }>('/api/company/:realmId/journal-entries', async (request, reply) => {
-    const scope = await authenticateRequest(request, reply, qboManager, masterApiKey);
+    const scope = await authenticate(request, reply);
     if (!scope) return;
 
     try {
@@ -410,7 +426,7 @@ export async function companyRoutes(
     Params: { realmId: string };
     Body: unknown;
   }>('/api/company/:realmId/journal-entries', async (request, reply) => {
-    const scope = await authenticateRequest(request, reply, qboManager, masterApiKey);
+    const scope = await authenticate(request, reply);
     if (!scope) return;
 
     try {
@@ -451,7 +467,7 @@ export async function companyRoutes(
     Params: { realmId: string };
     Body: unknown;
   }>('/api/company/:realmId/bills', async (request, reply) => {
-    const scope = await authenticateRequest(request, reply, qboManager, masterApiKey);
+    const scope = await authenticate(request, reply);
     if (!scope) return;
 
     try {
@@ -495,7 +511,7 @@ export async function companyRoutes(
     Params: { realmId: string };
     Querystring: { asOfDate?: string };
   }>('/api/company/:realmId/reports/ar-aging', async (request, reply) => {
-    const scope = await authenticateRequest(request, reply, qboManager, masterApiKey);
+    const scope = await authenticate(request, reply);
     if (!scope) return;
 
     try {
@@ -526,7 +542,7 @@ export async function companyRoutes(
     Params: { realmId: string };
     Querystring: { asOfDate?: string };
   }>('/api/company/:realmId/reports/ap-aging', async (request, reply) => {
-    const scope = await authenticateRequest(request, reply, qboManager, masterApiKey);
+    const scope = await authenticate(request, reply);
     if (!scope) return;
 
     try {
@@ -557,7 +573,7 @@ export async function companyRoutes(
     Params: { realmId: string };
     Querystring: { startDate?: string; endDate?: string };
   }>('/api/company/:realmId/reports/general-ledger', async (request, reply) => {
-    const scope = await authenticateRequest(request, reply, qboManager, masterApiKey);
+    const scope = await authenticate(request, reply);
     if (!scope) return;
 
     try {
@@ -588,7 +604,7 @@ export async function companyRoutes(
     Params: { realmId: string };
     Querystring: { query?: string; maxResults?: number };
   }>('/api/company/:realmId/invoices', async (request, reply) => {
-    const scope = await authenticateRequest(request, reply, qboManager, masterApiKey);
+    const scope = await authenticate(request, reply);
     if (!scope) return;
 
     try {
@@ -620,7 +636,7 @@ export async function companyRoutes(
     Params: { realmId: string };
     Querystring: { query?: string; maxResults?: number };
   }>('/api/company/:realmId/bills', async (request, reply) => {
-    const scope = await authenticateRequest(request, reply, qboManager, masterApiKey);
+    const scope = await authenticate(request, reply);
     if (!scope) return;
 
     try {
@@ -652,7 +668,7 @@ export async function companyRoutes(
     Params: { realmId: string };
     Querystring: { query?: string; maxResults?: number };
   }>('/api/company/:realmId/vendors', async (request, reply) => {
-    const scope = await authenticateRequest(request, reply, qboManager, masterApiKey);
+    const scope = await authenticate(request, reply);
     if (!scope) return;
 
     try {
@@ -684,7 +700,7 @@ export async function companyRoutes(
     Params: { realmId: string };
     Querystring: { query?: string; maxResults?: number };
   }>('/api/company/:realmId/customers', async (request, reply) => {
-    const scope = await authenticateRequest(request, reply, qboManager, masterApiKey);
+    const scope = await authenticate(request, reply);
     if (!scope) return;
 
     try {

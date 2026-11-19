@@ -4,10 +4,11 @@ import { authenticateRequest } from '../middleware.js';
 import { extractApiKeyCandidates } from '../auth.js';
 import { MIN_PASSWORD_LENGTH } from '../../users.js';
 
-/** Lock a username after this many consecutive failures… */
-const MAX_LOGIN_FAILURES = 5;
-/** …for this long. */
-const LOCKOUT_MS = 60_000;
+/** "a minute" / "5 minutes" — how long a lock has left, for people. */
+export function waitText(ms: number): string {
+  const minutes = Math.max(1, Math.ceil(ms / 60_000));
+  return minutes === 1 ? 'a minute' : `${minutes} minutes`;
+}
 
 function credentials(request: FastifyRequest): string[] {
   const queryKey = (request.query as Record<string, string> | undefined)?.key;
@@ -19,10 +20,6 @@ export async function authRoutes(
   qboManager: QBOManager,
   masterApiKey: string
 ): Promise<void> {
-  // In-memory brute-force throttle, keyed by normalized username. Resets on
-  // success or process restart — a speed bump, not a bank vault.
-  const loginFailures = new Map<string, { fails: number; lockedUntil: number }>();
-
   // ── POST /api/auth/login — username/password → session token ──────────────
   fastify.post<{ Body: { username?: string; password?: string } }>(
     '/api/auth/login',
@@ -34,27 +31,30 @@ export async function authRoutes(
         return;
       }
 
-      const entry = loginFailures.get(username);
-      if (entry && entry.lockedUntil > Date.now()) {
-        await reply.code(429).send({
-          error: 'Too Many Requests',
-          message: 'Too many failed sign-ins — wait a minute and try again',
-        });
+      // The lock lives in UserService and is shared with the connector
+      // sign-in page, so failures on either count against the same username.
+      const result = await qboManager.users.login(username, password);
+      if (result.status !== 'ok') await qboManager.activity.recordSignInFailure(result, 'dashboard');
+      if (result.status === 'locked') {
+        await reply
+          .code(429)
+          .header('Retry-After', String(Math.ceil(result.retryAfterMs / 1000)))
+          .send({
+            error: 'Too Many Requests',
+            message: `Too many failed sign-ins — wait ${waitText(result.retryAfterMs)} and try again`,
+          });
         return;
       }
-
-      const user = await qboManager.users.verifyLogin(username, password);
-      if (!user) {
-        const fails = (entry?.fails ?? 0) + 1;
-        loginFailures.set(username, {
-          fails,
-          lockedUntil: fails >= MAX_LOGIN_FAILURES ? Date.now() + LOCKOUT_MS : 0,
-        });
+      if (result.status === 'invalid') {
         await reply.code(401).send({ error: 'Unauthorized', message: 'Invalid username or password' });
         return;
       }
 
-      loginFailures.delete(username);
+      const user = result.user;
+      await qboManager.activity.record({
+        userId: user.id, userName: user.name, accountType: user.accountType,
+        event: 'sign_in', tool: 'dashboard', outcome: 'ok',
+      });
       const { token, expiresAt } = await qboManager.users.createSession(user.id);
       await reply.send({ token, expiresAt: expiresAt.toISOString() });
     }
@@ -81,6 +81,11 @@ export async function authRoutes(
     }
 
     const user = await qboManager.users.get(scope.userId!);
+    if (user?.accountType === 'client') {
+      // Client logins connect by signing in; they have no key to show.
+      await reply.send({ apiKey: null, keyPrefix: null, retrievable: false });
+      return;
+    }
     let apiKey = await qboManager.users.getApiKey(scope.userId!);
     if (!apiKey) {
       // Legacy key with no encrypted copy — but if the caller authenticated
@@ -133,9 +138,12 @@ export async function authRoutes(
 
       await qboManager.users.setPassword(scope.userId, newPassword);
       // Changing the password ends every other session for this user; the
-      // session that made the change (if any) stays signed in.
+      // session that made the change (if any) stays signed in. Connected AI
+      // assistants are signed out too — a password is changed because the old
+      // one may be known, and whoever knew it may have connected one.
       const [presented] = credentials(request);
       await qboManager.users.deleteSessions(scope.userId, presented);
+      await qboManager.oauth.revokeAllForUser(scope.userId);
       await reply.send({ success: true });
     }
   );

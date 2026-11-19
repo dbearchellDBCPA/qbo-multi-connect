@@ -1,7 +1,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import type { QBOManager } from '../index.js';
 import type { Connection, User } from '../db/models.js';
-import { effectiveAccessLevel } from '../users.js';
+import { effectiveAccessLevel, isAdminUser } from '../users.js';
 import { ReadOnlyAccessError, runWithAccess } from '../access-context.js';
 
 /**
@@ -14,6 +14,11 @@ export interface AuthScope {
   userId: number | null;
   userName: string;
   role: 'admin' | 'member';
+  /**
+   * 'master' for the master key, otherwise the kind of login. A 'client'
+   * scope is a client reading their own books: read-only, never admin.
+   */
+  accountType: 'master' | 'staff' | 'client';
   allRealms: boolean;
   realmIds: Set<string>;
   /**
@@ -44,7 +49,7 @@ export function canWriteRealm(scope: AuthScope, realmId: string): boolean {
 
 /** Build the scope for a signed-in user from their role and assignments. */
 export function scopeForUser(user: User): AuthScope {
-  const isAdmin = user.role === 'admin';
+  const isAdmin = isAdminUser(user);
   const writeRealmIds = new Set(
     user.realmIds.filter((realmId) => effectiveAccessLevel(user, realmId) === 'read_write')
   );
@@ -52,7 +57,8 @@ export function scopeForUser(user: User): AuthScope {
     kind: 'user',
     userId: user.id,
     userName: user.name,
-    role: user.role,
+    role: isAdmin ? 'admin' : 'member',
+    accountType: user.accountType,
     allRealms: isAdmin,
     realmIds: new Set(user.realmIds),
     canWrite: isAdmin || writeRealmIds.size > 0,
@@ -104,6 +110,7 @@ export async function resolveAuth(
         userId: null,
         userName: 'Master key',
         role: 'admin',
+        accountType: 'master',
         allRealms: true,
         realmIds: new Set(),
         canWrite: true,
@@ -117,6 +124,7 @@ export async function resolveAuth(
     const oauthUserId = (await qboManager.oauth.verifyAccessToken(presented))?.userId;
     const oauthUser = oauthUserId != null ? await qboManager.users.get(oauthUserId) : null;
     if (oauthUser && oauthUser.status === 'active') {
+      await qboManager.users.touchLastUsed(oauthUser);
       return scopeForUser(oauthUser);
     }
 

@@ -13,6 +13,11 @@ makes this a ~30-minute, no-code setup — walkthrough below). It gives you:
 - **Team accounts** — each staff member gets their own username/password and
   sees only their assigned clients. Access is set per client: read & write on
   the files they work in, read-only on the ones they only need to look at.
+- **Client logins** — give a client a read-only login to their own company so
+  their AI assistant can answer questions from their books. Always read-only,
+  never an admin, no API key. See [docs/CLIENT-ACCESS.md](docs/CLIENT-ACCESS.md).
+- **An activity log** — every tool call and sign-in: who, which tool, which
+  company, and whether it was blocked.
 - **A Claude connector** — add one URL in Claude's settings and Claude can
   pull reports, look up transactions, post journal entries, fix coding, and
   attach documents across every company a person is allowed to touch. Each
@@ -329,6 +334,15 @@ on every MCP tool call and REST request.
   read-only companies so the model doesn't plan a write it can't make.
 - **Admin-role members** — behave like the master key (all companies + team
   management) but with their own revocable key.
+- **Client logins** (`accountType: "client"`) — for someone outside the firm
+  reading their own books through their own AI assistant. Always read-only
+  (checked before any other field on the account), never an admin, and with
+  no usable API key: they sign in through the connector with a username and
+  password. They get an explicit allow-list of read-only tools
+  (`src/server/client-tools.ts`), so a tool added later is not exposed to
+  clients until it is listed there. Setup and cautions:
+  [docs/CLIENT-ACCESS.md](docs/CLIENT-ACCESS.md); the handout to send:
+  [docs/CLIENT-CONNECTOR-SETUP.md](docs/CLIENT-CONNECTOR-SETUP.md).
 
 Keys are stored as SHA-256 hashes — the plaintext is shown exactly once at
 creation (with a ready-made Claude connector URL) and can be rotated at any
@@ -341,9 +355,10 @@ assignments.
 |--------|----------|-------------|
 | `GET` | `/api/me` | Who am I — role and visible companies for the presented key |
 | `GET` | `/api/users` | List team members and their assignments |
-| `POST` | `/api/users` | Create member (`{name, email?, role?, accessLevel?, clients?}`); returns key once |
+| `POST` | `/api/users` | Create member (`{name, email?, role?, accountType?, accessLevel?, clients?}`); returns key once (never for a client login) |
 | `PATCH` | `/api/users/:id` | Update name/email/role/status/`accessLevel` and/or `clients` |
 | `PUT` | `/api/connections/:realmId/users` | Replace who can access one company (`{users: [{userId, accessLevel}]}`) |
+| `GET` | `/api/activity` | Activity log, newest first. Filters: `userId`, `realmId`, `accountType`; page with `before` (entry id) and `limit` (max 200) |
 | `POST` | `/api/users/:id/rotate-key` | Invalidate old key, return new key once |
 | `DELETE` | `/api/users/:id` | Remove member and revoke key |
 
@@ -852,6 +867,18 @@ and [Docker](#running-it-elsewhere-docker)). Details worth knowing:
   list, at each write tool call, on the REST write routes, and again at the
   QuickBooks request layer, which refuses any non-read request made for a
   read-only caller
+- Client logins are read-only by account type, cannot hold the admin role,
+  cannot authenticate with an API key, and see an explicit tool allow-list
+- Client logins have no REST data API: `/api/company/*` answers `403`, so the
+  connector — with its tool list and activity log — is the only way in
+- Sign-in lockout shared by the dashboard and the connector sign-in page:
+  five failures lock a username for a minute, doubling to fifteen. Flooding
+  it with made-up usernames cannot reset the count on a real account
+- Resetting or changing a password, or disabling a login, revokes its
+  connector tokens — an assistant connected with the old password is cut off
+- Activity log of every tool call and sign-in (who, tool, company, outcome —
+  never arguments or results), including attempts on tools a login was not
+  offered; kept 180 days and capped by row count
 - Master key compared with a timing-safe equality check
 - No tokens in log output
 - Scopes limited to `com.intuit.quickbooks.accounting` (no payments, no payroll)

@@ -3,12 +3,15 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import type {
+  ActivityEntry,
   ConnectionAlertRecord,
   ConnectionRecord,
   ConnectionStatus,
+  NewActivityEntry,
   NewConnection,
   TokenUpdate,
   UserAccessLevel,
+  UserAccountType,
   UserRecord,
   UserRole,
   UserStatus,
@@ -59,6 +62,12 @@ export class ConnectionDatabase {
     if (!has('username')) this.db.exec('ALTER TABLE users ADD COLUMN username TEXT');
     if (!has('password_hash')) this.db.exec('ALTER TABLE users ADD COLUMN password_hash TEXT');
     if (!has('api_key_encrypted')) this.db.exec('ALTER TABLE users ADD COLUMN api_key_encrypted TEXT');
+    // Client logins. Everyone already in the table is firm staff.
+    if (!has('account_type')) {
+      this.db.exec(
+        "ALTER TABLE users ADD COLUMN account_type TEXT NOT NULL DEFAULT 'staff' CHECK(account_type IN ('staff', 'client'))"
+      );
+    }
 
     // Per-company access level. Existing assignments become 'read_write' —
     // members who were read-only stay read-only through users.access_level,
@@ -260,6 +269,7 @@ export class ConnectionDatabase {
     name: string;
     email: string | null;
     role: UserRole;
+    accountType?: UserAccountType;
     accessLevel: UserAccessLevel;
     username: string | null;
     passwordHash: string | null;
@@ -268,13 +278,14 @@ export class ConnectionDatabase {
     keyPrefix: string;
   }): Promise<number> {
     const stmt = this.db.prepare(`
-      INSERT INTO users (name, email, role, access_level, username, password_hash, api_key_hash, api_key_encrypted, key_prefix)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO users (name, email, role, account_type, access_level, username, password_hash, api_key_hash, api_key_encrypted, key_prefix)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const result = stmt.run(
       fields.name,
       fields.email,
       fields.role,
+      fields.accountType ?? 'staff',
       fields.accessLevel,
       fields.username,
       fields.passwordHash,
@@ -326,6 +337,7 @@ export class ConnectionDatabase {
       name?: string;
       email?: string | null;
       role?: UserRole;
+      accountType?: UserAccountType;
       accessLevel?: UserAccessLevel;
       username?: string | null;
       status?: UserStatus;
@@ -336,6 +348,7 @@ export class ConnectionDatabase {
     if (fields.name !== undefined) { sets.push('name = ?'); values.push(fields.name); }
     if (fields.email !== undefined) { sets.push('email = ?'); values.push(fields.email); }
     if (fields.role !== undefined) { sets.push('role = ?'); values.push(fields.role); }
+    if (fields.accountType !== undefined) { sets.push('account_type = ?'); values.push(fields.accountType); }
     if (fields.accessLevel !== undefined) { sets.push('access_level = ?'); values.push(fields.accessLevel); }
     if (fields.username !== undefined) { sets.push('username = ?'); values.push(fields.username); }
     if (fields.status !== undefined) { sets.push('status = ?'); values.push(fields.status); }
@@ -457,6 +470,77 @@ export class ConnectionDatabase {
    */
   async removeRealmAssignments(realmId: string): Promise<void> {
     this.db.prepare('DELETE FROM user_clients WHERE realm_id = ?').run(realmId);
+  }
+
+  // ── Activity log ─────────────────────────────────────────────────────────
+
+  async insertActivity(entry: NewActivityEntry): Promise<void> {
+    this.db
+      .prepare(
+        `INSERT INTO activity_log (user_id, user_name, account_type, event, tool, writes, realm_id, client_name, outcome)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        entry.userId,
+        entry.userName,
+        entry.accountType,
+        entry.event,
+        entry.tool ?? null,
+        entry.writes ? 1 : 0,
+        entry.realmId ?? null,
+        entry.clientName ?? null,
+        entry.outcome
+      );
+  }
+
+  /** Newest first. `beforeId` pages backwards; filters combine with AND. */
+  async listActivity(filter: {
+    userId?: number;
+    realmId?: string;
+    accountType?: 'master' | UserAccountType;
+    beforeId?: number;
+    limit: number;
+  }): Promise<ActivityEntry[]> {
+    const where: string[] = [];
+    const values: unknown[] = [];
+    if (filter.userId !== undefined) { where.push('user_id = ?'); values.push(filter.userId); }
+    if (filter.realmId !== undefined) { where.push('realm_id = ?'); values.push(filter.realmId); }
+    if (filter.accountType !== undefined) { where.push('account_type = ?'); values.push(filter.accountType); }
+    if (filter.beforeId !== undefined) { where.push('id < ?'); values.push(filter.beforeId); }
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM activity_log ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY id DESC LIMIT ?`
+      )
+      .all(...values, filter.limit) as Array<{
+        id: number; at: string; user_id: number | null; user_name: string; account_type: 'master' | UserAccountType;
+        event: ActivityEntry['event']; tool: string | null; writes: number; realm_id: string | null;
+        client_name: string | null; outcome: ActivityEntry['outcome'];
+      }>;
+    return rows.map((r) => ({
+      id: r.id,
+      at: new Date(`${r.at.replace(' ', 'T')}Z`),
+      userId: r.user_id,
+      userName: r.user_name,
+      accountType: r.account_type,
+      event: r.event,
+      tool: r.tool,
+      writes: r.writes === 1,
+      realmId: r.realm_id,
+      clientName: r.client_name,
+      outcome: r.outcome,
+    }));
+  }
+
+  /** Drop entries older than the retention window. Returns how many went. */
+  async purgeActivityOlderThan(days: number): Promise<number> {
+    return this.db.prepare("DELETE FROM activity_log WHERE at < datetime('now', ?)").run(`-${Math.floor(days)} days`).changes;
+  }
+
+  /** Keep only the newest `maxRows` entries. Returns how many went. */
+  async trimActivityTo(maxRows: number): Promise<number> {
+    return this.db
+      .prepare('DELETE FROM activity_log WHERE id <= (SELECT MAX(id) FROM activity_log) - ?')
+      .run(Math.floor(maxRows)).changes;
   }
 
   // ── Sessions (dashboard sign-in) ─────────────────────────────────────────

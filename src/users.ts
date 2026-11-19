@@ -1,7 +1,7 @@
 import { randomBytes, createHash, scryptSync, timingSafeEqual } from 'node:crypto';
 import { encrypt, decrypt } from './crypto/encrypt.js';
 import type { ConnectionDatabase } from './db/index.js';
-import type { ClientAssignment, NewUser, User, UserAccessLevel, UserRecord, UserUpdate } from './db/models.js';
+import type { ClientAssignment, NewUser, User, UserAccessLevel, UserAccountType, UserRecord, UserUpdate } from './db/models.js';
 
 /** Length of the plaintext prefix stored for display (e.g. "qbo_1a2b3c4d") */
 const KEY_PREFIX_LENGTH = 12;
@@ -19,6 +19,47 @@ const SESSION_TOKEN_PREFIX = 'qbos_';
 const USERNAME_RE = /^[a-z0-9@._-]{3,64}$/;
 
 export const MIN_PASSWORD_LENGTH = 8;
+
+/** Consecutive failed sign-ins before a username is locked… */
+export const MAX_LOGIN_FAILURES = 5;
+/** …for this long at first, doubling with each further failure… */
+export const LOGIN_LOCKOUT_MS = 60_000;
+/** …up to this ceiling, so a determined guesser gets a handful of tries an hour. */
+export const MAX_LOGIN_LOCKOUT_MS = 15 * 60_000;
+
+/** A failure count that has seen no new failure for this long starts over. */
+export const LOGIN_FAILURE_MEMORY_MS = 24 * 60 * 60_000;
+
+/** Most usernames-that-don't-exist the lock will remember at once. */
+const MAX_UNKNOWN_LOGIN_ENTRIES = 5_000;
+
+/** The real account a sign-in attempt named, for attributing it in the activity log. */
+export interface LoginAccount {
+  id: number;
+  name: string;
+  accountType: UserAccountType;
+}
+
+/**
+ * The result of a password sign-in attempt. `account` is set when the
+ * username belongs to a real login (whatever the password was). `firstNotice`
+ * is true for the first refused attempt of each lock, so callers can log a
+ * lockout once rather than once per attempt.
+ */
+export type LoginResult =
+  | { status: 'ok'; user: User }
+  | { status: 'invalid'; account: LoginAccount | null }
+  | { status: 'locked'; retryAfterMs: number; account: LoginAccount | null; firstNotice: boolean };
+
+interface LoginFailureEntry {
+  fails: number;
+  lockedUntil: number;
+  lastFailure: number;
+  /** Whether the username belongs to a real login (those entries are never evicted). */
+  known: boolean;
+  /** Whether a refused attempt has already been reported for the current lock. */
+  noticed: boolean;
+}
 
 export function hashApiKey(apiKey: string): string {
   return createHash('sha256').update(apiKey, 'utf8').digest('hex');
@@ -90,16 +131,24 @@ function defaultLevelFor(memberLevel: UserAccessLevel | undefined): UserAccessLe
 /**
  * What a user may actually do in one company: null when it isn't assigned to
  * them, otherwise the per-company level capped by the user-level ceiling.
- * Admins reach every company with full access.
+ * Admins reach every company with full access. A client login is read-only
+ * on its assigned companies no matter what else is stored on it — that rule
+ * is checked first so no combination of other fields can widen it.
  */
 export function effectiveAccessLevel(
-  user: Pick<User, 'role' | 'accessLevel' | 'assignments'>,
+  user: Pick<User, 'role' | 'accessLevel' | 'assignments'> & { accountType?: UserAccountType },
   realmId: string
 ): UserAccessLevel | null {
-  if (user.role === 'admin') return 'read_write';
   const assignment = user.assignments.find((a) => a.realmId === realmId);
+  if (user.accountType === 'client') return assignment ? 'read' : null;
+  if (user.role === 'admin') return 'read_write';
   if (!assignment) return null;
   return user.accessLevel === 'read' ? 'read' : assignment.accessLevel;
+}
+
+/** Whether the user has the admin role AND is a kind of account that may hold it. */
+export function isAdminUser(user: Pick<User, 'role'> & { accountType?: UserAccountType }): boolean {
+  return user.role === 'admin' && user.accountType !== 'client';
 }
 
 function toUser(record: UserRecord, assignments: ClientAssignment[]): User {
@@ -109,6 +158,7 @@ function toUser(record: UserRecord, assignments: ClientAssignment[]): User {
     name: record.name,
     email: record.email,
     role: record.role,
+    accountType: record.account_type ?? 'staff',
     accessLevel: record.access_level,
     username: record.username,
     hasPassword: record.password_hash != null,
@@ -129,6 +179,9 @@ function toUser(record: UserRecord, assignments: ClientAssignment[]): User {
  * access; member-role users see only their assignments.
  */
 export class UserService {
+  /** Failed sign-ins per username. In memory: a restart clears every lock. */
+  private loginFailures = new Map<string, LoginFailureEntry>();
+
   constructor(
     private db: ConnectionDatabase,
     private encryptionKey: string
@@ -158,12 +211,34 @@ export class UserService {
     if (input.password && input.password.length < MIN_PASSWORD_LENGTH) {
       throw new Error(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`);
     }
+    const isClient = input.accountType === 'client';
+    if (isClient && input.role === 'admin') {
+      throw new Error('A client login cannot be an admin');
+    }
+    if (isClient && input.accessLevel === 'read_write') {
+      throw new Error('A client login is always read-only');
+    }
+    if (isClient && (!input.username?.trim() || !input.password)) {
+      // Its API key is never accepted, so without these it could never sign in.
+      throw new Error('A client login requires a username and password');
+    }
+    if (isClient) {
+      // Stored read-only as well as enforced read-only, so the data itself
+      // says the same thing the account type does.
+      input = {
+        ...input,
+        accessLevel: 'read',
+        assignments: (input.assignments ?? (input.realmIds ?? []).map((realmId) => ({ realmId, accessLevel: 'read' as const })))
+          .map((a) => ({ realmId: a.realmId, accessLevel: 'read' as const })),
+      };
+    }
 
     const apiKey = generateApiKey();
     const id = await this.db.insertUser({
       name,
       email: input.email?.trim() || null,
       role: input.role ?? 'member',
+      accountType: input.accountType ?? 'staff',
       accessLevel: input.accessLevel ?? 'read_write',
       username: input.username ? await this.prepareUsername(input.username) : null,
       passwordHash: input.password ? hashPassword(input.password) : null,
@@ -192,9 +267,26 @@ export class UserService {
   }
 
   async update(id: number, fields: UserUpdate): Promise<User | null> {
-    if (!(await this.db.getUserById(id))) return null;
+    const existing = await this.db.getUserById(id);
+    if (!existing) return null;
     if (fields.name !== undefined && !fields.name.trim()) {
       throw new Error('User name cannot be empty');
+    }
+    // A client login stays a read-only member whatever else is being edited,
+    // and turning a staff account into one drops it to read-only.
+    const becomesClient = (fields.accountType ?? existing.account_type) === 'client';
+    if (becomesClient) {
+      if ((fields.role ?? existing.role) === 'admin') {
+        throw new Error('A client login cannot be an admin');
+      }
+      if (fields.accessLevel === 'read_write') {
+        throw new Error('A client login is always read-only');
+      }
+      const keepsUsername = fields.username === undefined ? existing.username != null : Boolean(fields.username?.trim());
+      if (!keepsUsername || existing.password_hash == null) {
+        throw new Error('A client login requires a username and password');
+      }
+      fields = { ...fields, accessLevel: 'read' };
     }
     let username: string | null | undefined = fields.username;
     if (typeof username === 'string' && username.trim()) {
@@ -231,8 +323,14 @@ export class UserService {
 
   /** Replace the user's assigned companies, each with an explicit access level. */
   async setAssignments(id: number, assignments: ClientAssignment[]): Promise<User | null> {
-    if (!(await this.db.getUserById(id))) return null;
-    await this.db.setUserAssignments(id, assignments);
+    const record = await this.db.getUserById(id);
+    if (!record) return null;
+    await this.db.setUserAssignments(
+      id,
+      record.account_type === 'client'
+        ? assignments.map((a) => ({ realmId: a.realmId, accessLevel: 'read' as const }))
+        : assignments
+    );
     return this.get(id);
   }
 
@@ -258,7 +356,12 @@ export class UserService {
     realmId: string,
     assignments: Array<{ userId: number; accessLevel: UserAccessLevel }>
   ): Promise<void> {
-    await this.db.setRealmAssignments(realmId, assignments);
+    const stored = [];
+    for (const a of assignments) {
+      const isClient = (await this.db.getUserById(a.userId))?.account_type === 'client';
+      stored.push({ userId: a.userId, accessLevel: isClient ? ('read' as const) : a.accessLevel });
+    }
+    await this.db.setRealmAssignments(realmId, stored);
   }
 
   /**
@@ -283,6 +386,7 @@ export class UserService {
    */
   async getApiKey(id: number): Promise<string | null> {
     const record = await this.db.getUserById(id);
+    if (record?.account_type === 'client') return null; // client logins have no usable key
     if (!record?.api_key_encrypted) return null;
     try {
       return decrypt(record.api_key_encrypted, this.encryptionKey);
@@ -295,7 +399,11 @@ export class UserService {
 
   /** Set (or clear, with null) a user's dashboard password. */
   async setPassword(id: number, password: string | null): Promise<boolean> {
-    if (!(await this.db.getUserById(id))) return false;
+    const record = await this.db.getUserById(id);
+    if (!record) return false;
+    if (password == null && record.account_type === 'client') {
+      throw new Error('A client login requires a username and password');
+    }
     if (password != null && password.length < MIN_PASSWORD_LENGTH) {
       throw new Error(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`);
     }
@@ -323,6 +431,104 @@ export class UserService {
     }
     if (!verifyPassword(password, record.password_hash)) return null;
     return toUser(record, await this.db.getUserAssignments(record.id));
+  }
+
+  /**
+   * verifyLogin behind a brute-force lock, shared by every place a password
+   * can be tried (the dashboard and the connector sign-in page), so guesses
+   * against one don't get a fresh allowance on the other.
+   *
+   * After MAX_LOGIN_FAILURES consecutive failures the username is locked for
+   * LOGIN_LOCKOUT_MS, doubling with each further failure up to
+   * MAX_LOGIN_LOCKOUT_MS. A locked username is refused without checking the
+   * password — even the right one — and a successful sign-in clears the count.
+   *
+   * The lock is per username, not per network address: addresses are easy to
+   * forge behind a proxy, and a forgeable key would be no lock at all. The
+   * cost is that someone who knows a username can keep it locked by failing
+   * on purpose. The remedies are an admin's "Reset password" (clears the lock
+   * at once) and, for an admin's own account, the master key, which never
+   * goes through this path.
+   */
+  async login(username: string, password: string): Promise<LoginResult> {
+    const key = normalizeUsername(username);
+    // Nothing shaped unlike a username can be a login, so it is refused
+    // without being remembered — the failure table only ever holds strings
+    // that could name an account.
+    if (!isValidUsername(key)) {
+      verifyPassword(password, DUMMY_PASSWORD_HASH); // same cost as a real miss
+      return { status: 'invalid', account: null };
+    }
+
+    const now = Date.now();
+    let entry = this.loginFailures.get(key);
+    if (entry && entry.lockedUntil <= now && now - entry.lastFailure > LOGIN_FAILURE_MEMORY_MS) {
+      this.loginFailures.delete(key); // stale: start over rather than escalate forever
+      entry = undefined;
+    }
+
+    const record = await this.db.getUserByUsername(key);
+    const account: LoginAccount | null = record
+      ? { id: record.id, name: record.name, accountType: record.account_type ?? 'staff' }
+      : null;
+
+    if (entry && entry.lockedUntil > now) {
+      const firstNotice = !entry.noticed;
+      entry.noticed = true;
+      return { status: 'locked', retryAfterMs: entry.lockedUntil - now, account, firstNotice };
+    }
+
+    const user = await this.verifyLogin(key, password);
+    if (user) {
+      this.loginFailures.delete(key);
+      return { status: 'ok', user };
+    }
+
+    const fails = (entry?.fails ?? 0) + 1;
+    const overBy = fails - MAX_LOGIN_FAILURES;
+    const lockMs = overBy < 0 ? 0 : Math.min(LOGIN_LOCKOUT_MS * 2 ** overBy, MAX_LOGIN_LOCKOUT_MS);
+    // Unknown usernames are counted exactly like real ones, so the lock never
+    // reveals which usernames exist.
+    this.loginFailures.delete(key); // re-insert at the end: Map order = recency
+    this.loginFailures.set(key, {
+      fails,
+      lockedUntil: lockMs ? now + lockMs : 0,
+      lastFailure: now,
+      known: record != null,
+      noticed: false,
+    });
+    this.pruneLoginFailures();
+    // The attempt that trips the lock is still just "wrong password"; the
+    // lock is what the NEXT attempt meets.
+    return { status: 'invalid', account };
+  }
+
+  /**
+   * Keep the failure table bounded without ever forgetting a real account.
+   * Usernames are attacker-chosen, so someone can pour made-up names in; only
+   * those made-up entries are evicted (oldest first). Entries for real logins
+   * — at most one per user — stay, so flooding the table cannot reset the
+   * count on an account being guessed at.
+   */
+  private pruneLoginFailures(): void {
+    let unknown = 0;
+    for (const e of this.loginFailures.values()) if (!e.known) unknown++;
+    if (unknown <= MAX_UNKNOWN_LOGIN_ENTRIES) return;
+    // Map iteration is insertion order, and an entry is re-inserted on each
+    // failure, so the first unknown entries met are the oldest.
+    let toDrop = unknown - Math.floor(MAX_UNKNOWN_LOGIN_ENTRIES / 2);
+    for (const [name, e] of this.loginFailures) {
+      if (toDrop <= 0) break;
+      if (!e.known) {
+        this.loginFailures.delete(name);
+        toDrop--;
+      }
+    }
+  }
+
+  /** Clear a username's failed sign-in count (an admin resetting the password). */
+  clearLoginFailures(username: string | null | undefined): void {
+    if (username) this.loginFailures.delete(normalizeUsername(username));
   }
 
   /** Issue a dashboard session for a user. The token is stored hashed. */
@@ -375,6 +581,10 @@ export class UserService {
     if (!apiKey || typeof apiKey !== 'string') return null;
     const record = await this.db.getUserByKeyHash(hashApiKey(apiKey));
     if (!record || record.status !== 'active') return null;
+    // Client logins sign in through the connector with a username and
+    // password. Their row has a key only because the column requires one; it
+    // is never accepted, so there is no long-lived secret to leak in a URL.
+    if (record.account_type === 'client') return null;
     // Keys created before retrievable storage have no encrypted copy; the
     // key itself just authenticated (hash matched), so store one now — after
     // this, the member can view their key from the dashboard too.
@@ -386,6 +596,18 @@ export class UserService {
       await this.db.touchUserLastUsed(record.id);
     }
     return toUser(record, await this.db.getUserAssignments(record.id));
+  }
+
+  /**
+   * Note that a user just reached the server through the connector sign-in.
+   * API keys do this inside findByApiKey; this is the same throttled write
+   * for OAuth access tokens, so "last used" is true for people (and client
+   * logins) who never touch a key.
+   */
+  async touchLastUsed(user: User): Promise<void> {
+    if (Date.now() - (user.lastUsedAt?.getTime() ?? 0) > LAST_USED_THROTTLE_MS) {
+      await this.db.touchUserLastUsed(user.id);
+    }
   }
 
   /** Remove a disconnected company from every user's assignments. */

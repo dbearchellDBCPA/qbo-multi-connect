@@ -98,6 +98,12 @@ the start of a bookkeeping session.
 | Claude says a client is read-only | Your access to that client is set to Read-only. Ask the admin to change it to Read & write on the Team tab if you need to post or correct entries there. |
 | A client company errors out | Its QuickBooks authorization may have expired — the admin can reconnect it from the dashboard. |
 
+## Giving a client access to their own books
+
+Clients get a different kind of account — a **client login** — that is always
+read-only, can never be an admin, and has no API key. See
+[CLIENT-ACCESS.md](CLIENT-ACCESS.md).
+
 ## Questions
 
 Contact your administrator.

@@ -35,6 +35,10 @@ CREATE TABLE IF NOT EXISTS users (
   name TEXT NOT NULL,
   email TEXT,
   role TEXT NOT NULL DEFAULT 'member' CHECK(role IN ('admin', 'member')),
+  -- 'staff' is a firm team member. 'client' is a login handed to a client so
+  -- their own AI assistant can read their own books: always read-only, never
+  -- an admin, connector sign-in only (its API key is never accepted).
+  account_type TEXT NOT NULL DEFAULT 'staff' CHECK(account_type IN ('staff', 'client')),
   -- Ceiling on what the key may do in QuickBooks: 'read' makes the member
   -- read-only on every company; 'read_write' defers to the per-company level
   -- in user_clients. Admin-role users always act as read_write regardless.
@@ -60,7 +64,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username) WHERE us
 -- initialized with an earlier trigger definition consistent.
 DROP TRIGGER IF EXISTS update_users_timestamp;
 CREATE TRIGGER update_users_timestamp
-AFTER UPDATE OF name, email, role, access_level, username, password_hash, status, api_key_hash ON users
+AFTER UPDATE OF name, email, role, account_type, access_level, username, password_hash, status, api_key_hash ON users
 BEGIN
   UPDATE users SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
 END;
@@ -154,6 +158,29 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
 
 CREATE INDEX IF NOT EXISTS idx_oauth_tokens_user ON oauth_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_oauth_codes_user ON oauth_auth_codes(user_id);
+
+-- ── Activity log ─────────────────────────────────────────────────────────────
+-- One row per MCP tool call and per sign-in: who, which tool, which company,
+-- whether it could change data, and how it ended. Arguments and results are
+-- deliberately NOT recorded — they are client financial data. user_id has no
+-- foreign key so history survives a login being removed.
+CREATE TABLE IF NOT EXISTS activity_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  user_id INTEGER,
+  user_name TEXT NOT NULL,
+  account_type TEXT NOT NULL CHECK(account_type IN ('master', 'staff', 'client')),
+  event TEXT NOT NULL CHECK(event IN ('tool_call', 'sign_in', 'sign_in_failed', 'locked_out')),
+  tool TEXT,
+  writes INTEGER NOT NULL DEFAULT 0,
+  realm_id TEXT,
+  client_name TEXT,
+  outcome TEXT NOT NULL CHECK(outcome IN ('ok', 'denied', 'error'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_activity_log_at ON activity_log(at);
+CREATE INDEX IF NOT EXISTS idx_activity_log_user ON activity_log(user_id, id);
+CREATE INDEX IF NOT EXISTS idx_activity_log_realm ON activity_log(realm_id, id);
 
 -- ── Email alerts for broken connections ──────────────────────────────────────
 -- One row per alert email the provider accepted. dedupe_key is the
