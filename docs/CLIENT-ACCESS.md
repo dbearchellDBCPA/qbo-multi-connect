@@ -268,12 +268,13 @@ They tick a box to continue. Where it happens:
   it signs in through the connector.
 
 The date is recorded on the login (**Team → the client → Accepted the
-risks**). An assistant that was connected before a client accepted is
-disconnected the next time it renews its access (within the hour) and asks
-them to sign in again, which is where they accept. The same happens to every
-client if the wording is ever changed in a way that matters
-(`CLIENT_TERMS_VERSION` in `src/client-terms.ts`). Your own team is never
-asked.
+risks**). It is enforced where the data flows, not only on the sign-in
+page: a client login that has not accepted gets nothing from the connector,
+whatever token it holds. An assistant that was connected before the client
+accepted is asked to sign in again the next time it is used, which is where
+they accept. The same happens to every client if the wording is ever changed
+in a way that matters (`CLIENT_TERMS_VERSION` in `src/client-terms.ts`).
+Your own team is never asked.
 
 The fuller explanation is a public page on your server, **`/security`**, in
 your firm's name: how the connection is protected, AI providers and training

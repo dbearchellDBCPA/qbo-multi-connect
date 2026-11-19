@@ -61,6 +61,9 @@ describe('what a requester may type', () => {
       company: 'Rivera Landscaping LLC',
     });
     expect(cleanRequestInput({ name: "Zoë O'Brien-Smith Jr.", email: 'z@x.example', company: 'A/C & Heating (East) #2' }).company).toBe('A/C & Heating (East) #2');
+    expect(cleanRequestInput({ name: 'J.R. St. John, Jr.', email: 'z@x.example', company: 'Shop.example LLC' }).name).toBe('J.R. St. John, Jr.');
+    // Invisible and direction-changing characters are dropped, so what a reviewer reads is what is stored.
+    expect(cleanRequestInput({ name: 'Jor\u200bdan \u202eRivera\u202c', email: 'z@x.example', company: 'Rivera\ufeff Co' })).toMatchObject({ name: 'Jordan Rivera', company: 'Rivera Co' });
   });
 
   it('refuses anything that could carry a link or markup to the person reviewing it', () => {
@@ -70,6 +73,9 @@ describe('what a requester may type', () => {
       [{ name: 'see www.evil.example' }, 'name'],
       [{ name: '<b>Jordan</b>' }, 'name'],
       [{ name: 'jordan@evil.example' }, 'name'],
+      [{ name: 'see evil.example/pay' }, 'name'],
+      [{ name: 'Jordan evil.com' }, 'name'],
+      [{ name: 'Jordan / Rivera' }, 'name'],
       [{ name: 'J' }, 'name'],
       [{ name: 'x'.repeat(81) }, 'name'],
       [{ name: 42 }, 'name'],
@@ -388,8 +394,8 @@ describe('asking for access', () => {
     const submit = (i: number) => qbo.accessRequests.submit({ name: 'Some Person', email: `p${i}@client.example`, company: 'Some Company' }, `10.1.${Math.floor(i / 250)}.${i % 250}`);
     for (let i = 0; i < MAX_REQUESTS_PER_HOUR; i++) expect(await submit(i)).toBe('received');
     expect(await submit(MAX_REQUESTS_PER_HOUR)).toBe('busy');
-    // Someone already waiting is still answered the same way.
-    expect(await qbo.accessRequests.submit({ name: 'Renamed Person', email: 'p0@client.example', company: 'Some Company' }, '10.9.9.9')).toBe('received');
+    // …and it says so to everyone alike, whether or not their address is already waiting.
+    expect(await qbo.accessRequests.submit({ name: 'Renamed Person', email: 'p0@client.example', company: 'Some Company' }, '10.9.9.9')).toBe('busy');
     expect(await qbo.accessRequests.pendingCount()).toBe(MAX_REQUESTS_PER_HOUR);
 
     // Hour by hour the queue can fill, but only so far.

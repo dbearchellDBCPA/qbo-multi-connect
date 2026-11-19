@@ -74,10 +74,19 @@ export interface AccessRequestInput {
   company: string;
 }
 
-/** One line of ordinary text: no control characters, runs of space collapsed. */
+/**
+ * One line of ordinary text: no control characters, runs of space collapsed,
+ * and none of the invisible or direction-changing characters that could make
+ * what a reviewer reads differ from what is stored.
+ */
 function oneLine(raw: unknown): string {
-  // eslint-disable-next-line no-control-regex
-  return typeof raw === 'string' ? raw.replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, ' ').replace(/\s+/g, ' ').trim() : '';
+  if (typeof raw !== 'string') return '';
+  return raw
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, ' ')
+    .replace(/[\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 /**
@@ -93,7 +102,9 @@ export function cleanRequestInput(raw: { name?: unknown; email?: unknown; compan
   const name = oneLine(raw.name);
   if (name.length < 2) throw new AccessRequestInputError('name', 'Please enter your name.');
   if (name.length > MAX_REQUEST_NAME_LENGTH) throw new AccessRequestInputError('name', `Please keep your name under ${MAX_REQUEST_NAME_LENGTH} characters.`);
-  if (looksLikeLinkOrMarkup(name) || name.includes('@')) throw new AccessRequestInputError('name', 'Please enter just your name.');
+  // A person's name has no slash and no "word.word": that shape is a web
+  // address, which a mail client would turn into a link in the firm's inbox.
+  if (looksLikeLinkOrMarkup(name) || /[@/\\]|\.[a-z]{2,}/i.test(name)) throw new AccessRequestInputError('name', 'Please enter just your name.');
 
   const email = oneLine(raw.email);
   if (!email) throw new AccessRequestInputError('email', 'Please enter your email address.');
@@ -297,15 +308,18 @@ export class AccessRequests {
     const input = cleanRequestInput(raw);
     if (!this.allowSource(source || 'unknown')) return 'busy';
 
+    // The limits come before the look-up below, so that when the page is
+    // full it says so to everyone alike — never "received" to an address
+    // that is already waiting and "busy" to one that is not.
+    const nowMs = this.now().getTime();
+    if ((await this.db.countAccessRequests({ status: 'pending' })) >= MAX_PENDING_REQUESTS) return 'busy';
+    if ((await this.db.countAccessRequests({ createdSince: new Date(nowMs - HOUR_MS).toISOString() })) >= MAX_REQUESTS_PER_HOUR) return 'busy';
+
     // One waiting request per address, and the first one stands. A later
     // submission with the same address is answered the same way but changes
     // nothing: the form is open to anyone, so it must not let a stranger
     // rewrite the name or business a reviewer sees on someone else's request.
     if (await this.db.getPendingAccessRequestByEmail(input.emailKey)) return 'received';
-
-    const nowMs = this.now().getTime();
-    if ((await this.db.countAccessRequests({ status: 'pending' })) >= MAX_PENDING_REQUESTS) return 'busy';
-    if ((await this.db.countAccessRequests({ createdSince: new Date(nowMs - HOUR_MS).toISOString() })) >= MAX_REQUESTS_PER_HOUR) return 'busy';
 
     await this.db.insertAccessRequest({ ...input, at: new Date(nowMs).toISOString() });
     await this.db.purgeAccessRequests(

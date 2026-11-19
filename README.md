@@ -916,7 +916,8 @@ and [Docker](#running-it-elsewhere-docker)). Details worth knowing:
   source, per hour and by queue size; notices to the firm are spaced out
 - Client logins accept a short statement of risks (AI-provider data use,
   whole-file visibility, AI errors, login custody) before their first
-  connection; the acceptance is recorded with its date and version
+  connection; the acceptance is recorded with its date and version, and the
+  connector serves a client login no data until it is on record
 - An uploaded logo is accepted only as PNG/JPEG/GIF/WebP recognised by its
   bytes, and served with `nosniff` and a locked-down content policy
 - Resetting or changing a password, accepting a new invitation, or disabling

@@ -462,6 +462,25 @@ describe('inviting a client by link', () => {
     expect(await tokenWorks(token!)).toBe(true);
   });
 
+  it('gives a client login no data until it has accepted, whatever token it holds', async () => {
+    await app.inject({ method: 'POST', url: '/api/users', headers: asMaster, payload: { name: 'Typed In', email: 'typed@client.example', username: 'typed@client.example', password: 'admin-chose-this-1', accountType: 'client', clients: [{ realmId: 'realm-1' }] } });
+    // A dashboard session is a real token for this login — and still not a way round the points.
+    const session = (await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'typed@client.example', password: 'admin-chose-this-1' } })).json().token;
+    const callConnector = () =>
+      app.inject({
+        method: 'POST',
+        url: '/mcp',
+        headers: { ...HOST, authorization: `Bearer ${session}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
+        payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      });
+    const before = await callConnector();
+    expect(before.statusCode).toBe(401);
+    expect(before.headers['www-authenticate']).toContain('resource_metadata'); // "sign in", which is where they accept
+
+    expect(await connectorSignIn('typed@client.example', 'admin-chose-this-1', { agree: 'on' })).toBeTruthy();
+    expect((await callConnector()).statusCode).not.toBe(401);
+  });
+
   it('renewing is untouched for a client who has accepted', async () => {
     await invite();
     await accept(sender.lastLinkPath());
