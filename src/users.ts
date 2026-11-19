@@ -20,7 +20,15 @@ const SESSION_TOKEN_PREFIX = 'qbos_';
  * username, including plus-addressed ones. 254 is the longest an address can be.
  */
 const USERNAME_RE = /^[a-z0-9@._+-]{3,254}$/;
-export const USERNAME_RULE = 'Username must be 3–254 characters: letters, digits, @ . _ + -';
+/**
+ * …and any well-formed email address at all, whatever legal characters it
+ * holds (o'brien@…, a&b@…): a person's email is their username when they are
+ * invited, so an address that can receive the invitation must be able to
+ * sign in with it. No whitespace or angle brackets, one @, a dotted domain.
+ */
+const EMAIL_USERNAME_RE = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
+const MAX_USERNAME_LENGTH = 254;
+export const USERNAME_RULE = 'Username must be an email address, or 3–254 characters: letters, digits, @ . _ + -';
 
 /** An invitation link works for this long, then a new one has to be sent. */
 export const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -87,7 +95,8 @@ export function normalizeUsername(username: string): string {
 }
 
 export function isValidUsername(username: string): boolean {
-  return USERNAME_RE.test(username);
+  if (USERNAME_RE.test(username)) return true;
+  return username.length <= MAX_USERNAME_LENGTH && username === username.toLowerCase() && EMAIL_USERNAME_RE.test(username);
 }
 
 // ── Passwords (scrypt, node built-in — no external hashing dependency) ──────

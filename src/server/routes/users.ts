@@ -341,8 +341,13 @@ export async function usersRoutes(
     } catch (error) {
       // "already taken" and validation messages from the service are client
       // errors, not server faults.
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      const clientError = /already taken|must be at least|must be 3|required|client login/i.test(message);
+      let message = error instanceof Error ? error.message : 'Unknown error';
+      // The admin gave an email, not a username — say it in those terms.
+      if (/already taken/i.test(message) && body.sendInvite && !body.username?.trim()) {
+        message =
+          'A login with this email address already exists. To give that person another company, add it to their existing login under Team; to let them choose a new password, send a new invitation from there.';
+      }
+      const clientError = /already taken|already exists|must be at least|must be an email|must be 3|required|client login/i.test(message);
       await reply.code(clientError ? 400 : 500).send({
         error: clientError ? 'Bad Request' : 'Internal Server Error',
         message,

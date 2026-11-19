@@ -1011,11 +1011,17 @@ async function sendTestAlert(button) {
 // Where a client login stands with its invitation.
 //   'waiting'  — a link is out and still good
 //   'expired'  — a link went out and lapsed without being used
-//   'accepted' — they chose their password from a link
-//   'none'     — never invited (the password was typed in by an admin, or not set)
+//   'accepted'  — they chose their password from a link
+//   'withdrawn' — a link went out, then was cancelled before being used
+//                 (their email or username changed, an admin set the
+//                 password, or the login was disabled)
+//   'none'      — never invited (the password was typed in by an admin, or not set)
 function inviteState(user) {
   if (user.inviteExpiresAt) return new Date(user.inviteExpiresAt).getTime() > Date.now() ? 'waiting' : 'expired';
-  if (user.inviteAcceptedAt) return 'accepted';
+  const sent = user.inviteSentAt ? new Date(user.inviteSentAt).getTime() : 0;
+  const accepted = user.inviteAcceptedAt ? new Date(user.inviteAcceptedAt).getTime() : 0;
+  if (sent > accepted) return 'withdrawn';
+  if (accepted) return 'accepted';
   return 'none';
 }
 
@@ -1027,6 +1033,8 @@ function inviteStatusText(user) {
       return 'Expired without being accepted';
     case 'accepted':
       return `Accepted ${relativeTime(user.inviteAcceptedAt)}`;
+    case 'withdrawn':
+      return 'Withdrawn — send a new one';
     default:
       return null;
   }
@@ -1687,7 +1695,13 @@ function userFormHtml(user, presetType) {
       </label>
       <label class="field">
         <span class="field-label">Email <span class="field-hint" data-email-optional>(optional)</span></span>
-        <input type="email" name="email" value="${user?.email ? escapeHtml(user.email) : ''}" placeholder="jane@example.com">
+        <input type="email" name="email" value="${user?.email ? escapeHtml(user.email) : ''}" placeholder="jane@example.com"${
+          // A client login whose username IS its email address: correcting
+          // one corrects the other (see the input handler below).
+          user?.accountType === 'client' && user.username && user.username === (user.email || '').toLowerCase()
+            ? ' data-username-follows'
+            : ''
+        }>
       </label>
       <label class="field" data-hidden-when-inviting>
         <span class="field-label">Username <span class="field-hint">(for signing in)</span></span>
@@ -2036,13 +2050,51 @@ function showInviteClientModal(realmId, clientName) {
     event.preventDefault();
     const data = new FormData(body);
     const submit = body.querySelector('button[type="submit"]');
+    const email = data.get('email')?.trim() || '';
+
+    // Someone who owns several companies gets ONE login with all of them.
+    // If this email already has a client login, add this company to it
+    // rather than failing on a second login with the same address.
+    const existing = users.find(
+      (u) => u.username === email.toLowerCase() || (u.email || '').toLowerCase() === email.toLowerCase()
+    );
+    if (existing) {
+      if (existing.accountType !== 'client') {
+        toast(`${email} belongs to ${existing.name}, a team member — team logins are managed under Team.`, 'error');
+        return;
+      }
+      if (existing.realmIds.includes(realmId)) {
+        toast(`${existing.name} already has access to ${clientName}. To let them choose a new password, send a new invitation from Team.`, 'error');
+        return;
+      }
+      confirmModal(
+        'Add to their existing login',
+        `${existing.name} (${email}) already has a client login${
+          existing.clients.length ? ` for ${existing.clients.map((c) => c.clientName).join(', ')}` : ''
+        }. Give that login read-only access to ${clientName} as well? They keep the same password and sign-in; the company simply appears for their assistant.`,
+        'Add company',
+        async () => {
+          await api(`/api/users/${existing.id}`, {
+            method: 'PATCH',
+            body: JSON.stringify({
+              clients: [...existing.clients.map((c) => ({ realmId: c.realmId, accessLevel: c.accessLevel })), { realmId, accessLevel: 'read' }],
+            }),
+          });
+          await loadUsers();
+          toast(`${clientName} added to ${existing.name}'s login`);
+        },
+        { variant: 'primary' }
+      );
+      return;
+    }
+
     submit.disabled = true;
     try {
       const { user, invite } = await api('/api/users', {
         method: 'POST',
         body: JSON.stringify({
           name: data.get('name')?.trim(),
-          email: data.get('email')?.trim(),
+          email,
           accountType: 'client',
           clients: [{ realmId }],
           sendInvite: true,
@@ -2309,6 +2361,14 @@ document.addEventListener('DOMContentLoaded', () => {
   // right away rather than waiting out the 60s poll.
   window.addEventListener('focus', () => {
     if (authToken && me) loadData(true).catch(() => {});
+  });
+
+  // A client login whose username is its email address: fixing a typo in the
+  // email fixes the username too, so the next invitation names the right one.
+  document.addEventListener('input', (event) => {
+    if (!event.target.matches?.('#user-form input[name="email"][data-username-follows]')) return;
+    const usernameInput = event.target.form?.querySelector('input[name="username"]');
+    if (usernameInput) usernameInput.value = event.target.value.trim().toLowerCase();
   });
 
   // Access lists: a row's level picker follows its checkbox, and every picker

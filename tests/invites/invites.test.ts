@@ -71,7 +71,11 @@ describe('an email address as a username', () => {
     for (const ok of ['jordan@rivera-landscaping.example', 'jordan+qbo@example.com', 'a.b_c-d@sub.example.co', `${'x'.repeat(200)}@example.com`]) {
       expect(isValidUsername(ok), ok).toBe(true);
     }
-    for (const bad of ['a b@example.com', "o'brien@example.com", 'ab', `${'x'.repeat(250)}@example.com`, '<x>@example.com']) {
+    // Anything a mail server would deliver to is fine, odd characters included.
+    for (const ok of ["o'brien@example.com", 'a&b@example.com', 'first.last!#$%@example.co.uk']) {
+      expect(isValidUsername(ok), ok).toBe(true);
+    }
+    for (const bad of ['a b@example.com', 'ab', `${'x'.repeat(250)}@example.com`, '<x>@example.com', 'Upper@example.com', "o'brien", "o'brien@localhost"]) {
       expect(isValidUsername(bad), bad).toBe(false);
     }
   });

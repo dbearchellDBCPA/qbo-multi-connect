@@ -71,6 +71,13 @@ activity log shows who did what.
   kills the old link.
 - A login's row under **Team** shows where things stand: *waiting for them to
   accept*, *accepted*, or *expired*.
+- The link points at the address you are using the dashboard on. So that it
+  can only ever be yours, set `QBO_ALLOWED_HOSTS` to your domain(s) — or pin
+  one with `QBO_PUBLIC_URL` — on the server. See
+  [CUSTOM-DOMAIN.md](CUSTOM-DOMAIN.md).
+- Someone who owns several companies gets **one** login. Invite them from the
+  first company; from the others, entering the same email offers to add that
+  company to their existing login instead.
 
 ### Sending a new invitation
 

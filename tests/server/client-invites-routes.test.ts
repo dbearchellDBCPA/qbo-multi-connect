@@ -162,13 +162,29 @@ describe('inviting a client by link', () => {
     expect(plus.username).toBe('pat+books@rivera-landscaping.example');
   });
 
+  it('any address that can receive the invitation can sign in with it', async () => {
+    const odd = "Sean.O'Brien&Sons@rivera-landscaping.example";
+    const user = (await invite({ email: odd })).json().user;
+    expect(user.username).toBe(odd.toLowerCase());
+    expect((await openLink(sender.lastLinkPath())).body).toContain('sean.o&#39;brien&amp;sons@'); // shown escaped
+    await accept(sender.lastLinkPath());
+    expect(await connectorSignIn(odd, CHOSEN)).toBeTruthy(); // case-insensitive, as typed
+  });
+
+  it('failed sign-ins against an email before it was invited do not lock the new login', async () => {
+    for (let i = 0; i <= MAX_LOGIN_FAILURES; i++) await connectorSignIn(EMAIL, 'guess');
+    await invite();
+    await accept(sender.lastLinkPath());
+    expect(await connectorSignIn(EMAIL, CHOSEN)).toBeTruthy();
+  });
+
   it('refuses an invitation that makes no sense, before creating anything', async () => {
     const cases: Array<[Record<string, unknown>, RegExp]> = [
       [{ accountType: 'staff' }, /client logins/],
       [{ accountType: undefined }, /client logins/],
       [{ email: null }, /valid email address/],
       [{ email: 'not-an-address' }, /valid email address/],
-      [{ email: "o'brien@example.com" }, /can't be used as a username/],
+      [{ email: 'two words@example.com' }, /valid email address/],
       [{ password: 'they-typed-one-too' }, /leave password out/],
       [{ clients: [] }, /Assign a company/],
       [{ clients: undefined }, /Assign a company/],
@@ -185,9 +201,28 @@ describe('inviting a client by link', () => {
 
   it('says so when that email already has a login', async () => {
     await invite();
-    const again = await invite();
+    const again = await invite({ clients: [{ realmId: 'realm-2' }] });
     expect(again.statusCode).toBe(400);
-    expect(again.json().message).toMatch(/already taken/);
+    // In the admin's terms — they gave an email, not a username — and with the way forward.
+    expect(again.json().message).toMatch(/login with this email address already exists/);
+    expect(again.json().message).toMatch(/add it to their existing login/);
+    expect(sender.sent).toHaveLength(1);
+  });
+
+  it('one person, several companies: adding a company to their login needs no new invitation', async () => {
+    const id = (await invite()).json().user.id;
+    await accept(sender.lastLinkPath());
+    const added = await app.inject({
+      method: 'PATCH',
+      url: `/api/users/${id}`,
+      headers: asMaster,
+      payload: { clients: [{ realmId: 'realm-1', accessLevel: 'read' }, { realmId: 'realm-2', accessLevel: 'read' }] },
+    });
+    expect(added.json().user.clients.map((c: any) => [c.clientName, c.effectiveAccessLevel])).toEqual([
+      ['Rivera Landscaping LLC', 'read'],
+      ['Other Client Inc', 'read'],
+    ]);
+    expect(await connectorSignIn(EMAIL, CHOSEN)).toBeTruthy(); // same password, nothing re-sent
     expect(sender.sent).toHaveLength(1);
   });
 
