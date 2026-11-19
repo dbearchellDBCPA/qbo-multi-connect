@@ -8,6 +8,7 @@ import type { RequestField } from '../access-requests/service.js';
 import { MAX_REQUEST_COMPANY_LENGTH, MAX_REQUEST_NAME_LENGTH } from '../access-requests/service.js';
 import { clientPage } from './invite-pages.js';
 import { escapeHtml } from '../invites/setup-steps.js';
+import { SECURITY_PAGE_PATH } from '../client-terms.js';
 
 export interface RequestFormDetails {
   firm: FirmBrand;
@@ -44,7 +45,7 @@ export function requestAccessPage(details: RequestFormDetails): string {
       <input type="hidden" name="t" value="${escapeHtml(token)}">
       <button type="submit">Request access</button>
     </form>
-    <p class="note">We review every request before anything is sent. Access is read-only: your assistant can look things up and run reports, and cannot create, change, or delete anything in QuickBooks.</p>`,
+    <p class="note">We review every request before anything is sent. Access is read-only: your assistant can look things up and run reports, and cannot create, change, or delete anything in QuickBooks. <a href="${SECURITY_PAGE_PATH}" target="_blank" rel="noopener">How it is protected, and what to keep in mind</a>.</p>`,
     firm
   );
 }

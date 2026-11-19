@@ -24,6 +24,8 @@ export interface InviteContext {
   videoUrl?: string | null;
   /** The full address of the firm's logo, when it has one. */
   logoUrl?: string | null;
+  /** The full address of the security page. */
+  securityUrl?: string | null;
 }
 
 /** What happened when an invitation email was sent. Never contains the link. */
@@ -107,6 +109,7 @@ export class ClientInvites {
         canReply: this.config.replyTo !== null,
         videoUrl: context.videoUrl ?? null,
         logoUrl: context.logoUrl ?? null,
+        securityUrl: context.securityUrl ?? null,
       });
       await this.sender.send({
         from: senderWithFirmName(this.config.from, context.firm),

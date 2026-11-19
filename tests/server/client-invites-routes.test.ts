@@ -89,19 +89,23 @@ describe('inviting a client by link', () => {
   const reinvite = (id: number | string, headers: Record<string, string> = asMaster) =>
     app.inject({ method: 'POST', url: `/api/users/${id}/invite`, headers });
   const openLink = (path: string) => app.inject({ method: 'GET', url: path, headers: HOST });
-  const accept = (path: string, password = CHOSEN, confirm = password) =>
-    app.inject({ method: 'POST', url: path, headers: { ...HOST, 'content-type': 'application/x-www-form-urlencoded' }, payload: new URLSearchParams({ password, confirm }).toString() });
+  /** Submit the accept form the way a person would: both password boxes, and the box that accepts the points. */
+  const accept = (path: string, password = CHOSEN, confirm = password, extra: Record<string, string> = { agree: 'on' }) =>
+    app.inject({ method: 'POST', url: path, headers: { ...HOST, 'content-type': 'application/x-www-form-urlencoded' }, payload: new URLSearchParams({ password, confirm, ...extra }).toString() });
 
+  /** The response to the most recent connector sign-in, for looking at the page it showed. */
+  let lastSignInPage: Awaited<ReturnType<FastifyInstance['inject']>>;
   /** Sign in through the connector the way an AI assistant would. Returns the access token, or null. */
-  async function connectorSignIn(username: string, password: string): Promise<string | null> {
+  async function connectorSignIn(username: string, password: string, extra: Record<string, string> = {}): Promise<string | null> {
     const client = (await app.inject({ method: 'POST', url: '/oauth/register', headers: HOST, payload: { client_name: 'Claude', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'none' } })).json();
     const verifier = randomBytes(32).toString('base64url');
     const authorize = await app.inject({
       method: 'POST',
       url: '/oauth/authorize',
       headers: HOST,
-      payload: { client_id: client.client_id, redirect_uri: REDIRECT, response_type: 'code', code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256', state: 's', username, password },
+      payload: { client_id: client.client_id, redirect_uri: REDIRECT, response_type: 'code', code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256', state: 's', username, password, ...extra },
     });
+    lastSignInPage = authorize;
     if (authorize.statusCode !== 302) return null;
     const code = new URL(authorize.headers.location as string).searchParams.get('code')!;
     const token = await app.inject({ method: 'POST', url: '/oauth/token', headers: HOST, payload: { grant_type: 'authorization_code', client_id: client.client_id, code, code_verifier: verifier, redirect_uri: REDIRECT } });
@@ -367,7 +371,91 @@ describe('inviting a client by link', () => {
     const link = sender.lastLinkPath();
     await app.inject({ method: 'POST', url: `/api/users/${id}/password`, headers: asMaster, payload: { password: 'admin-chose-this-1' } });
     expect((await accept(link)).statusCode).toBe(410);
-    expect(await connectorSignIn(EMAIL, 'admin-chose-this-1')).toBeTruthy();
+    // They never went through the link, so the connector asks them to accept the points first.
+    expect(await connectorSignIn(EMAIL, 'admin-chose-this-1', { agree: 'on' })).toBeTruthy();
+  });
+
+  // ── Before you connect ─────────────────────────────────────────────────────
+
+  it('asks the client to accept a short list of what is theirs to manage, and records that they did', async () => {
+    const id = (await invite()).json().user.id;
+    const link = sender.lastLinkPath();
+    const form = await openLink(link);
+    expect(form.body).toContain('Before you connect');
+    expect(form.body).toContain('may be used to train its AI'); // the point about AI providers
+    expect(form.body).toContain('read the whole QuickBooks file');
+    expect(form.body).toContain('AI can be wrong');
+    expect(form.body).toContain('<input type="checkbox" name="agree" value="on" required>');
+    expect(form.body).toContain('href="/security"');
+
+    // Without the box: no password, and the link is still good.
+    for (const extra of [{}, { agree: '' }, { agree: 'no' }]) {
+      const refused = await accept(link, CHOSEN, CHOSEN, extra);
+      expect(refused.statusCode).toBe(400);
+      expect(refused.body).toContain('tick the box');
+    }
+    expect(await connectorSignIn(EMAIL, CHOSEN)).toBeNull();
+    expect((await qbo.users.get(id))!).toMatchObject({ hasPassword: false, acknowledgedAt: null, acknowledgedVersion: null });
+
+    expect((await accept(link)).statusCode).toBe(200);
+    const accepted = (await qbo.users.get(id))!;
+    expect(accepted.acknowledgedVersion).toBe('1');
+    expect(accepted.acknowledgedAt).toBeInstanceOf(Date);
+    // The admin can see it.
+    const listed = (await app.inject({ method: 'GET', url: '/api/users', headers: asMaster })).json().find((u: any) => u.id === id);
+    expect(listed.acknowledgedVersion).toBe('1');
+    // And having accepted, they connect without being asked again.
+    expect(await connectorSignIn(EMAIL, CHOSEN)).toBeTruthy();
+  });
+
+  it('a client login given a password directly accepts the same points the first time it connects', async () => {
+    const created = (await app.inject({ method: 'POST', url: '/api/users', headers: asMaster, payload: { name: 'Typed In', email: 'typed@client.example', username: 'typed@client.example', password: 'admin-chose-this-1', accountType: 'client', clients: [{ realmId: 'realm-1' }] } })).json();
+    const id = created.user.id;
+
+    // The right password alone is not enough: the page comes back with the points.
+    expect(await connectorSignIn('typed@client.example', 'admin-chose-this-1')).toBeNull();
+    expect(lastSignInPage.statusCode).toBe(200);
+    expect(lastSignInPage.headers.location).toBeUndefined(); // nothing was issued
+    expect(lastSignInPage.body).toContain('One more step before you connect');
+    expect(lastSignInPage.body).toContain('Before you connect');
+    expect(lastSignInPage.body).toContain('name="agree"');
+    expect(lastSignInPage.body).toContain('value="typed@client.example"'); // their username is kept; the password is not
+    expect(lastSignInPage.body).not.toContain('admin-chose-this-1');
+    expect((await qbo.users.get(id))!.acknowledgedAt).toBeNull();
+
+    // Ticking the box does not get anyone past a wrong password.
+    expect(await connectorSignIn('typed@client.example', 'wrong-password-1', { agree: 'on' })).toBeNull();
+    expect(lastSignInPage.statusCode).toBe(401);
+    expect((await qbo.users.get(id))!.acknowledgedAt).toBeNull();
+
+    // Both together: connected, and recorded.
+    expect(await connectorSignIn('typed@client.example', 'admin-chose-this-1', { agree: 'on' })).toBeTruthy();
+    expect((await qbo.users.get(id))!.acknowledgedVersion).toBe('1');
+    // Not asked again…
+    expect(await connectorSignIn('typed@client.example', 'admin-chose-this-1')).toBeTruthy();
+    // …until the points themselves change.
+    await (qbo as any).db.setUserAcknowledgment(id, '0');
+    expect(await connectorSignIn('typed@client.example', 'admin-chose-this-1')).toBeNull();
+    expect(lastSignInPage.body).toContain('One more step before you connect');
+  });
+
+  it('never asks the firm\'s own team', async () => {
+    await app.inject({ method: 'POST', url: '/api/users', headers: asMaster, payload: { name: 'Staff Person', username: 'staff.person', password: 'a-staff-password-1', realmIds: ['realm-1'] } });
+    expect(await connectorSignIn('staff.person', 'a-staff-password-1')).toBeTruthy();
+    expect(lastSignInPage.statusCode).toBe(302);
+  });
+
+  it('explains security and risks on a public page in the firm\'s name', async () => {
+    const res = await app.inject({ method: 'GET', url: '/security', headers: HOST });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('Example CPA');
+    expect(res.body).toContain('How the connection is protected');
+    expect(res.body).toContain('Read-only.');
+    expect(res.body).toContain('AI providers and training on your data');
+    expect(res.body).toContain('may be used to train its AI');
+    expect(res.body).not.toMatch(/<script/i);
+    expect(res.body).not.toMatch(/(src|href)="https?:\/\//i);
+    expect(res.headers['x-frame-options']).toBe('DENY');
   });
 
   // ── Inviting again (also: "I forgot my password") ──────────────────────────

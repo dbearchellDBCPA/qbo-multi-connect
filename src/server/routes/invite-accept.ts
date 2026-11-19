@@ -4,6 +4,8 @@ import type { QBOManager } from '../../index.js';
 import { MIN_PASSWORD_LENGTH } from '../../users.js';
 import { publicBaseUrl } from '../public-url.js';
 import { acceptInvitePage, inviteAcceptedPage, inviteInvalidPage } from '../invite-pages.js';
+import { securityPage } from '../security-page.js';
+import { CLIENT_TERMS_VERSION, SECURITY_PAGE_PATH, agreed } from '../../client-terms.js';
 
 /**
  * Where an invitation link leads. These two routes are public — the token in
@@ -56,7 +58,18 @@ export async function inviteAcceptRoutes(fastify: FastifyInstance, qboManager: Q
     );
   });
 
-  fastify.post<{ Params: { token: string }; Body: { password?: unknown; confirm?: unknown } }>(
+  // How the connection is protected and what is the client's to manage.
+  // Public and the same for everyone; safe to cache briefly.
+  fastify.get(SECURITY_PAGE_PATH, async (_request, reply) =>
+    reply
+      .header('Cache-Control', 'public, max-age=300')
+      .header('Referrer-Policy', 'no-referrer')
+      .header('X-Frame-Options', 'DENY')
+      .type('text/html')
+      .send(securityPage(await qboManager.branding.firm()))
+  );
+
+  fastify.post<{ Params: { token: string }; Body: { password?: unknown; confirm?: unknown; agree?: unknown } }>(
     '/invite/:token',
     async (request, reply) => {
       const firm = await qboManager.branding.firm();
@@ -84,6 +97,9 @@ export async function inviteAcceptRoutes(fastify: FastifyInstance, qboManager: Q
         return retry('Enter a password, and type it a second time to confirm.');
       }
       if (password !== confirm) return retry('Those two passwords are not the same. Type the same one in both boxes.');
+      // Checked here as well as by the browser: nobody gets a password
+      // without having accepted the points above the button.
+      if (!agreed(request.body?.agree)) return retry('Please read the points under “Before you connect” and tick the box to continue.');
 
       let accepted;
       try {
@@ -92,6 +108,7 @@ export async function inviteAcceptRoutes(fastify: FastifyInstance, qboManager: Q
         return retry(error instanceof Error ? `${error.message}.` : 'That password cannot be used.');
       }
       if (!accepted) return html(reply, 410, inviteInvalidPage(firm));
+      await qboManager.users.recordAcknowledgment(accepted.id, CLIENT_TERMS_VERSION);
 
       // A new password ends whatever was open under the old one. For a first
       // invitation there is nothing; for a later one, this is the point.

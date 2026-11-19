@@ -7,6 +7,7 @@ import type { FastifyRequest } from 'fastify';
 import type { QBOManager } from '../index.js';
 import type { User } from '../db/models.js';
 import { publicBaseUrl, resolvePublicUrl } from './public-url.js';
+import { SECURITY_PAGE_PATH } from '../client-terms.js';
 
 /** What the admin is told about an invitation. */
 export interface InviteResult {
@@ -74,6 +75,7 @@ export function createInviteIssuer(qboManager: QBOManager) {
           videoUrl: (await qboManager.branding.setupVideo())?.url ?? null,
           // An email needs the logo's full address; a page can use the path.
           logoUrl: firm.logo ? `${base}${firm.logo.path}` : null,
+          securityUrl: `${base}${SECURITY_PAGE_PATH}`,
         }
       );
       result.sent = delivery.sent;

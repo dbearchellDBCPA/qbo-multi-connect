@@ -1059,6 +1059,7 @@ function clientAccountDetailHtml(conn) {
           : ''
       }
       <div class="connector-caption">Using a different assistant? Look for “add custom connector” or “add MCP server” and use the same address and sign-in. To change your password, open Settings (the gear, bottom left).</div>
+      <div class="connector-caption"><a href="/security" target="_blank" rel="noopener">How this is protected, and what to keep in mind</a> — including your AI provider's privacy settings.</div>
     </div>`;
 }
 
@@ -1400,6 +1401,7 @@ function teamDetailHtml() {
           <div class="stat-row"><span class="stat-label">Last used</span><span class="stat-value">${escapeHtml(lastUsed)}</span></div>
           <div class="stat-row"><span class="stat-label">Status</span><span class="stat-value ${isDisabled ? 'status-bad' : 'status-ok'}"><span class="status-dot"></span>${isDisabled ? 'Disabled' : 'Active'}</span></div>
           <div class="stat-row"><span class="stat-label">QuickBooks access</span><span class="stat-value">${escapeHtml(accessSummary)}</span></div>
+          ${isClientLogin ? `<div class="stat-row"><span class="stat-label" title="The short list a client accepts before connecting: AI provider privacy, whole-file visibility, AI errors, keeping the login private">Accepted the risks</span><span class="stat-value">${user.acknowledgedAt ? escapeHtml(dayText(user.acknowledgedAt)) : '<span class="team-meta">not yet — asked when they connect</span>'}</span></div>` : ''}
           ${isClientLogin ? `<div class="stat-row"><span class="stat-label">Invitation</span><span class="stat-value">${inviteStatusText(user) ? escapeHtml(inviteStatusText(user)) : '<span class="team-meta">not sent</span>'}</span></div>` : ''}
           <button type="button" class="btn btn-ghost btn-card" data-action="set-password" data-id="${idAttr}">${user.hasPassword ? 'Reset password' : 'Set up sign-in'}</button>
           ${isClientLogin ? clientInviteControlsHtml(user, idAttr) : `<button type="button" class="btn btn-ghost btn-card" data-action="rotate-key" data-id="${idAttr}">Rotate key</button>`}

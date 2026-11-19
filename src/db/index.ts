@@ -68,6 +68,8 @@ export class ConnectionDatabase {
     if (!has('invite_token_hash')) this.db.exec('ALTER TABLE users ADD COLUMN invite_token_hash TEXT');
     if (!has('invite_expires_at')) this.db.exec('ALTER TABLE users ADD COLUMN invite_expires_at DATETIME');
     if (!has('invite_accepted_at')) this.db.exec('ALTER TABLE users ADD COLUMN invite_accepted_at DATETIME');
+    if (!has('risks_ack_at')) this.db.exec('ALTER TABLE users ADD COLUMN risks_ack_at DATETIME');
+    if (!has('risks_ack_version')) this.db.exec('ALTER TABLE users ADD COLUMN risks_ack_version TEXT');
     // Client logins. Everyone already in the table is firm staff.
     if (!has('account_type')) {
       this.db.exec(
@@ -397,6 +399,11 @@ export class ConnectionDatabase {
   }
 
   /** The login an unexpired invitation token belongs to, if any. */
+  /** Record that a login accepted the "before you connect" points. */
+  async setUserAcknowledgment(id: number, version: string): Promise<void> {
+    this.db.prepare("UPDATE users SET risks_ack_at = datetime('now'), risks_ack_version = ? WHERE id = ?").run(version, id);
+  }
+
   async getUserByInviteHash(tokenHash: string): Promise<UserRecord | null> {
     const row = this.db
       .prepare("SELECT * FROM users WHERE invite_token_hash = ? AND invite_expires_at > datetime('now')")

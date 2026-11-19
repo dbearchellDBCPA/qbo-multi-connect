@@ -10,6 +10,7 @@
  */
 import { BRAND_BASE, BRAND_FONT_FACES, BRAND_TOKENS, brandLine } from './brand-css.js';
 import { APP_NAME, type FirmBrand, type SetupVideo } from '../branding.js';
+import { CLIENT_TERMS_CONSENT, CLIENT_TERMS_POINTS, SECURITY_PAGE_PATH } from '../client-terms.js';
 import {
   CHATGPT_NOTE,
   CHATGPT_STEPS,
@@ -78,6 +79,14 @@ ${BRAND_BASE}
     color:var(--on-primary); font-size:14px; font-weight:600; text-decoration:none;
   }
   a { color:var(--primary); }
+  /* The points a client accepts before connecting, and the box that says so. */
+  .terms { margin:4px 0 16px; padding:14px 16px 6px; border:1px solid var(--border); border-radius:10px; background:var(--surface-2); }
+  .terms h2 { margin:0 0 8px; font-size:14px; }
+  .terms ul { margin-bottom:8px; }
+  .terms li { font-size:13px; line-height:1.55; }
+  .terms .more { font-size:12.5px; margin:0 0 8px; }
+  .agree { display:flex; gap:10px; align-items:flex-start; margin:0 0 16px; font-weight:500; font-size:13.5px; color:var(--text); cursor:pointer; }
+  .agree input { margin-top:3px; width:16px; height:16px; flex-shrink:0; accent-color:var(--primary); }
   /* A field people never see; anything typed in it marks an automated submission. */
   .extra { position:absolute; left:-9999px; top:auto; width:1px; height:1px; overflow:hidden; }
 `;
@@ -97,6 +106,22 @@ function videoSection(video: SetupVideo | null | undefined): string {
   return `<h2>Watch how to connect</h2>
     <div class="video"><iframe src="${escapeHtml(video.embedUrl)}" title="How to connect your AI assistant" loading="lazy" allowfullscreen referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-presentation allow-popups"></iframe></div>
     <p class="hint" style="margin:0 0 4px">Video not showing? ${link}Open it in a new tab</a>.</p>`;
+}
+
+/**
+ * The "before you connect" points and the box that accepts them — the same
+ * markup on the page where a client chooses a password and on the connector
+ * sign-in page, so they read the same thing wherever they are asked.
+ */
+export function termsBlock(): string {
+  return `<div class="terms">
+      <h2>Before you connect</h2>
+      <ul>
+        ${CLIENT_TERMS_POINTS.map((point) => `<li><strong>${escapeHtml(point.title)}</strong> ${escapeHtml(point.text)}</li>`).join('\n        ')}
+      </ul>
+      <p class="more"><a href="${SECURITY_PAGE_PATH}" target="_blank" rel="noopener">More about security and what to keep in mind</a></p>
+    </div>
+    <label class="agree"><input type="checkbox" name="agree" value="on" required><span>${escapeHtml(CLIENT_TERMS_CONSENT)}</span></label>`;
 }
 
 /**
@@ -154,6 +179,7 @@ export function acceptInvitePage(details: AcceptPageDetails): string {
       <p class="hint">At least ${minPasswordLength} characters. A few unrelated words make a strong password that is easy to remember. Don't reuse one from somewhere else.</p>
       <label for="confirm">Type it again</label>
       <input type="password" id="confirm" name="confirm" autocomplete="new-password" minlength="${minPasswordLength}" required>
+      ${termsBlock()}
       <button type="submit">Set password and continue</button>
     </form>
     <p class="note">Only you will know this password. You'll type it once, on a sign-in page like this one, when you add the connector to your assistant.</p>`,
@@ -193,7 +219,7 @@ export function inviteAcceptedPage(details: AcceptedPageDetails): string {
     <p>${escapeHtml(CHATGPT_NOTE)}</p>
     <h2>Then try asking</h2>
     <ul>${TRY_ASKING.map((q) => `<li>${escapeHtml(q)}</li>`).join('')}</ul>
-    <p class="note">These steps are also in your invitation email. To change your password later, sign in at ${escapeHtml(signInUrl)} and open Settings. Questions? Contact ${escapeHtml(firmName)}.</p>`,
+    <p class="note">These steps are also in your invitation email. To change your password later, sign in at ${escapeHtml(signInUrl)} and open Settings. <a href="${SECURITY_PAGE_PATH}" target="_blank" rel="noopener">Security and what to keep in mind</a>. Questions? Contact ${escapeHtml(firmName)}.</p>`,
     firm
   );
 }

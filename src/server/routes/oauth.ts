@@ -20,6 +20,8 @@ import { BRAND_BASE, BRAND_FONT_FACES, BRAND_TOKENS, brandLine } from '../brand-
 import { publicBaseUrl } from '../public-url.js';
 import { waitText } from './auth.js';
 import { APP_NAME, type FirmBrand } from '../../branding.js';
+import { CLIENT_TERMS_VERSION, agreed, needsAcknowledgment } from '../../client-terms.js';
+import { termsBlock } from '../invite-pages.js';
 export { publicBaseUrl };
 
 const SIGN_IN_STYLES = `
@@ -57,6 +59,19 @@ ${BRAND_BASE}
   }
   .note { margin-top:18px; font-size:12.5px; color:var(--text-faint); line-height:1.6; }
   .powered { max-width:420px; margin:14px auto 0; text-align:center; font-size:11.5px; color:var(--text-faint); }
+  .info {
+    background:var(--primary-soft); border:1px solid var(--primary); color:var(--text);
+    border-radius:8px; padding:10px 12px; font-size:13.5px; font-weight:500; margin-bottom:16px;
+  }
+  .terms { margin:0 0 16px; padding:14px 16px 6px; border:1px solid var(--border); border-radius:10px; background:var(--surface-2); }
+  .terms h2 { margin:0 0 8px; font-size:14px; }
+  .terms ul { padding-left:20px; margin-bottom:8px; }
+  .terms li { font-size:13px; line-height:1.55; color:var(--text-secondary); margin-bottom:6px; }
+  .terms li strong { color:var(--text); }
+  .terms .more { font-size:12.5px; margin:0 0 8px; }
+  .terms a { color:var(--primary); }
+  .agree { display:flex; gap:10px; align-items:flex-start; margin:0 0 16px; font-weight:500; font-size:13.5px; color:var(--text); cursor:pointer; }
+  .agree input { margin-top:3px; width:16px; height:16px; flex-shrink:0; accent-color:var(--primary); }
 `;
 
 /** Small print under the card: the firm is the brand, the app gets the credit line. */
@@ -71,6 +86,10 @@ function signInPage(opts: {
   params: Record<string, string>;
   firm: FirmBrand;
   error?: string;
+  /** Show the "before you connect" points and their checkbox: this client login has not accepted them yet. */
+  terms?: boolean;
+  /** The username to keep in the box when the page is shown again. */
+  username?: string;
 }): string {
   const hidden = Object.entries(opts.params)
     .map(([k, v]) => `<input type="hidden" name="${escapeHtml(k)}" value="${escapeHtml(v)}">`)
@@ -90,12 +109,14 @@ function signInPage(opts: {
     <h1>Sign in to connect</h1>
     <p class="lead"><strong>${escapeHtml(opts.clientName)}</strong> is requesting access to QuickBooks on your behalf. Sign in with your email or username and your password — you'll only reach the companies assigned to you.</p>
     ${opts.error ? `<div class="err">${escapeHtml(opts.error)}</div>` : ''}
+    ${opts.terms ? '<div class="info">One more step before you connect: read the points below, tick the box, and sign in again.</div>' : ''}
     <form method="POST" action="/oauth/authorize">
       ${hidden}
       <label for="username">Email or username</label>
-      <input type="text" id="username" name="username" autocomplete="username" autofocus required>
+      <input type="text" id="username" name="username" value="${escapeHtml(opts.username ?? '')}" autocomplete="username"${opts.username ? '' : ' autofocus'} required>
       <label for="password">Password</label>
-      <input type="password" id="password" name="password" autocomplete="current-password" required>
+      <input type="password" id="password" name="password" autocomplete="current-password"${opts.username ? ' autofocus' : ''} required>
+      ${opts.terms ? termsBlock() : ''}
       <button type="submit">Sign in and allow access</button>
     </form>
     <p class="note">Trouble signing in? Contact ${opts.firm.configured ? escapeHtml(opts.firm.name) : 'the person who set up your access'} — they can check your username or reset your password.</p>
@@ -281,6 +302,22 @@ export async function oauthRoutes(fastify: FastifyInstance, qboManager: QBOManag
       return;
     }
     const user = result.user;
+
+    // A client login connects an AI assistant to someone's books, so before
+    // the first connection they accept a short list of what is theirs to
+    // manage. Logins invited by link accepted it when they chose a password;
+    // one given a password directly is asked here, once. Nothing is issued
+    // until the box comes back ticked alongside the right password.
+    if (needsAcknowledgment(user)) {
+      if (!agreed(body.agree)) {
+        await reply.code(200).type('text/html').send(
+          signInPage({ clientName: client.clientName || 'An MCP client', params, firm: await qboManager.branding.firm(), terms: true, username })
+        );
+        return;
+      }
+      await qboManager.users.recordAcknowledgment(user.id, CLIENT_TERMS_VERSION);
+    }
+
     await qboManager.activity.record({
       userId: user.id,
       userName: user.name,

@@ -447,7 +447,7 @@ describe('asking for access', () => {
 
     // The link works like any invitation: they choose a password and can sign in.
     const path = new URL(invitation[0].text.match(/https:\/\/\S+\/invite\/qboi_[0-9a-f]{64}/)![0]).pathname;
-    const accepted = await app.inject({ method: 'POST', url: path, headers: { ...HOST, 'content-type': 'application/x-www-form-urlencoded' }, payload: new URLSearchParams({ password: 'correct horse battery staple', confirm: 'correct horse battery staple' }).toString() });
+    const accepted = await app.inject({ method: 'POST', url: path, headers: { ...HOST, 'content-type': 'application/x-www-form-urlencoded' }, payload: new URLSearchParams({ password: 'correct horse battery staple', confirm: 'correct horse battery staple', agree: 'on' }).toString() });
     expect(accepted.statusCode).toBe(200);
     expect((await app.inject({ method: 'POST', url: '/api/auth/login', headers: HOST, payload: { username: EMAIL, password: 'correct horse battery staple' } })).statusCode).toBe(200);
   });

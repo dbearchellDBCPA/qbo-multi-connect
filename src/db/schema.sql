@@ -58,7 +58,11 @@ CREATE TABLE IF NOT EXISTS users (
   invite_sent_at DATETIME,
   invite_token_hash TEXT,
   invite_expires_at DATETIME,
-  invite_accepted_at DATETIME
+  invite_accepted_at DATETIME,
+  -- When a client login accepted the "before you connect" points, and which
+  -- version of them. NULL until they have.
+  risks_ack_at DATETIME,
+  risks_ack_version TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_api_key_hash ON users(api_key_hash);

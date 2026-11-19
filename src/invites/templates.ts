@@ -45,6 +45,8 @@ export interface InvitationDetails {
   videoUrl?: string | null;
   /** The full address of the firm's logo, when it has uploaded one. */
   logoUrl?: string | null;
+  /** The full address of the page explaining security and what is theirs to manage. */
+  securityUrl?: string | null;
 }
 
 // These strings are dropped into style="…" attributes: no double quotes inside.
@@ -71,8 +73,9 @@ function formatDay(date: Date): string {
 }
 
 export function renderClientInvitationEmail(details: InvitationDetails): RenderedEmail {
-  const { firmName, name, username, acceptUrl, expiresAt, connectorUrl, companyNames, canReply, videoUrl, logoUrl } = details;
+  const { firmName, name, username, acceptUrl, expiresAt, connectorUrl, companyNames, canReply, videoUrl, logoUrl, securityUrl } = details;
   const videoLine = 'Prefer to watch? This short video walks through it:';
+  const securityLine = 'How this is protected, and what to check in your AI provider\'s privacy settings:';
   const company = companyPhrase(companyNames);
   const subject = `${firmName} invited you to connect your AI assistant to QuickBooks`;
   const intro =
@@ -115,6 +118,7 @@ export function renderClientInvitationEmail(details: InvitationDetails): Rendere
     '',
     'GOOD TO KNOW',
     ...GOOD_TO_KNOW.map((line) => `- ${line}`),
+    ...(securityUrl ? [`- ${securityLine} ${securityUrl}`] : []),
     '',
     contact,
     unexpected,
@@ -154,6 +158,7 @@ ${ol(CHATGPT_STEPS)}
 ${ul(TRY_ASKING)}
 <h2 style="${STYLE.h2}">Good to know</h2>
 ${ul(GOOD_TO_KNOW)}
+${securityUrl ? `<p style="${STYLE.p}">${escapeHtml(securityLine)} <a href="${escapeHtml(securityUrl)}" style="color:#117c75;font-weight:600;">Security and what to keep in mind</a></p>` : ''}
 <p style="${STYLE.muted}">${escapeHtml(contact)} ${escapeHtml(unexpected)} Sent by ${escapeHtml(firmName)}.</p>
 </div></body></html>`;
 
