@@ -412,6 +412,15 @@ describe('client logins — over the connector, REST, and the activity log', () 
     expect((await mcp(apiKey, 'tools/list', {}, true)).httpStatus).toBe(401);
   });
 
+  it('connector use shows up as "last used" — client logins never touch an API key', async () => {
+    expect((await qbo.users.get(clientId))?.lastUsedAt).toBeNull();
+    const { accessToken } = await connectorSignIn('acme.owner', PASSWORD);
+    await mcp(accessToken!, 'tools/list', {});
+    const lastUsed = (await qbo.users.get(clientId))?.lastUsedAt;
+    expect(lastUsed).toBeInstanceOf(Date);
+    expect(Date.now() - lastUsed!.getTime()).toBeLessThan(60_000);
+  });
+
   it('is cut off as soon as the login is disabled', async () => {
     const { accessToken } = await connectorSignIn('acme.owner', PASSWORD);
     expect((await mcp(accessToken!, 'tools/list', {})).result).toBeTruthy();

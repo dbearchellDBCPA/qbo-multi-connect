@@ -595,6 +595,30 @@ button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
 
 .rail-note { padding: 16px 10px; font-size: 12px; color: var(--muted-2); text-align: center; }
 .rail .rail-note { color: var(--rail-muted); }
+.rail-note-left { text-align: left; padding: 6px 10px 10px; line-height: 1.5; }
+
+/* Heading between the firm's team and logins held by people outside it. */
+.rail-divider {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 14px 10px 6px;
+  padding-top: 12px;
+  border-top: 1px solid var(--color-navy-700);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--rail-muted);
+}
+.rail-divider .btn-link { color: var(--rail-accent); font-size: 11.5px; letter-spacing: 0; text-transform: none; }
+
+/* A client login sees its company and how to connect — no activity column. */
+.client-account .shell { grid-template-columns: 280px 1fr; }
+.client-account .activity,
+.client-account .rail-toggle,
+.client-account .rail-search,
+.client-account .rail-list .row-meta { display: none; }
 
 .rail-add {
   margin: auto 14px 16px;
@@ -913,7 +937,8 @@ button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
 .act-dot.info { background: var(--color-navy-500); }
 .act-dot.warn { background: var(--warn); }
 
-.act-title { font-size: 12.5px; font-weight: 600; }
+.act-title { font-size: 12.5px; font-weight: 600; overflow-wrap: anywhere; }
+.act-title.mono { font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 11.5px; }
 .act-meta { font-size: 11.5px; color: var(--muted-2); overflow-wrap: anywhere; }
 
 /* ── Forms ──────────────────────────────────────────────────────────────── */
@@ -975,6 +1000,8 @@ button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
 .checkbox-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; margin-bottom: 8px; }
 .toolbar-sep { color: var(--muted-2); font-size: 12px; }
 .toolbar-label { color: var(--muted-2); font-size: 12px; }
+.toolbar-levels { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; }
+.toolbar-levels[hidden] { display: none; }
 
 /* Access list: one row per client (or member) — is it assigned, and at what
    level. Same bordered scroll box as .checkbox-grid, one row per line so the

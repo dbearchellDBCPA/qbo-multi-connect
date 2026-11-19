@@ -505,6 +505,18 @@ export class UserService {
     return toUser(record, await this.db.getUserAssignments(record.id));
   }
 
+  /**
+   * Note that a user just reached the server through the connector sign-in.
+   * API keys do this inside findByApiKey; this is the same throttled write
+   * for OAuth access tokens, so "last used" is true for people (and client
+   * logins) who never touch a key.
+   */
+  async touchLastUsed(user: User): Promise<void> {
+    if (Date.now() - (user.lastUsedAt?.getTime() ?? 0) > LAST_USED_THROTTLE_MS) {
+      await this.db.touchUserLastUsed(user.id);
+    }
+  }
+
   /** Remove a disconnected company from every user's assignments. */
   async removeRealmAssignments(realmId: string): Promise<void> {
     await this.db.removeRealmAssignments(realmId);

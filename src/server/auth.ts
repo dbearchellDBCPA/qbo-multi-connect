@@ -124,6 +124,7 @@ export async function resolveAuth(
     const oauthUserId = (await qboManager.oauth.verifyAccessToken(presented))?.userId;
     const oauthUser = oauthUserId != null ? await qboManager.users.get(oauthUserId) : null;
     if (oauthUser && oauthUser.status === 'active') {
+      await qboManager.users.touchLastUsed(oauthUser);
       return scopeForUser(oauthUser);
     }
 

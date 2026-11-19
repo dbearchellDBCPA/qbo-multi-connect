@@ -207,11 +207,19 @@ function showAuthScreen(errorMessage) {
   errorEl.textContent = errorMessage || '';
 }
 
+/** Signed in with a client login (someone outside the firm, read-only). */
+function isClientAccount() {
+  return me?.accountType === 'client';
+}
+
 function applyIdentity() {
   const isAdmin = me.role === 'admin';
   document.querySelectorAll('.admin-only').forEach((el) => {
     el.hidden = !isAdmin;
   });
+  // A client login gets a pared-down dashboard: their company and how to
+  // connect, without the firm-facing panels.
+  document.body.classList.toggle('client-account', isClientAccount());
   // If the caller just lost admin (demoted mid-session), leave the Team view.
   if (!isAdmin && view === 'team') view = 'clients';
 }
@@ -286,7 +294,10 @@ async function initApp() {
   ]);
 
   clearInterval(refreshTimer);
-  refreshTimer = setInterval(() => loadData(true).catch(() => {}), 60000);
+  refreshTimer = setInterval(() => {
+    loadData(true).catch(() => {});
+    refreshActivity(true); // keep the feed live while the page is open
+  }, 60000);
   // Token countdowns tick client-side between data polls.
   clearInterval(tickTimer);
   tickTimer = setInterval(() => {
@@ -385,6 +396,9 @@ function signOut(expired = false) {
   $('rail-list').innerHTML = '';
   $('detail').innerHTML = '';
   $('activity-list').innerHTML = '';
+  activityEntries = [];
+  activityKey = null;
+  document.body.classList.remove('client-account');
   $('whoami').textContent = '';
   $('search-input').value = '';
   closeModal();
@@ -498,7 +512,7 @@ function updateRailChrome() {
     add.hidden = false;
   }
   $('whoami').textContent =
-    me.kind === 'master' ? 'Master key' : `${me.name} · ${me.role}`;
+    me.kind === 'master' ? 'Master key' : isClientAccount() ? me.name : `${me.name} · ${me.role}`;
 }
 
 function renderRail() {
@@ -553,23 +567,34 @@ function renderRail() {
       return;
     }
     const selected = currentUser();
-    list.innerHTML = users
-      .map((user) => {
-        const isSelected = user.id === selected?.id;
-        const avatarClass =
-          user.status === 'disabled' ? 'avatar-disabled' : user.role === 'admin' ? 'avatar-admin' : 'avatar-member';
-        let meta;
-        if (user.status === 'disabled') meta = '<span class="row-meta bad">disabled</span>';
-        else if (user.role === 'admin') meta = '<span class="row-meta">admin</span>';
-        else meta = `<span class="row-meta">${user.realmIds.length} client${user.realmIds.length === 1 ? '' : 's'}</span>`;
-        return `
+    const rowHtml = (user) => {
+      const isSelected = user.id === selected?.id;
+      const avatarClass =
+        user.status === 'disabled' ? 'avatar-disabled' : user.role === 'admin' ? 'avatar-admin' : 'avatar-member';
+      let meta;
+      if (user.status === 'disabled') meta = '<span class="row-meta bad">disabled</span>';
+      else if (user.role === 'admin') meta = '<span class="row-meta">admin</span>';
+      else if (user.accountType === 'client') {
+        meta = `<span class="row-meta">${user.clients.length === 1 ? escapeHtml(user.clients[0].clientName) : `${user.clients.length} clients`}</span>`;
+      } else meta = `<span class="row-meta">${user.realmIds.length} client${user.realmIds.length === 1 ? '' : 's'}</span>`;
+      return `
           <button type="button" class="rail-row${isSelected ? ' selected' : ''}" data-action="select-user" data-id="${user.id}">
             <span class="avatar ${avatarClass}">${escapeHtml(initials(user.name))}</span>
             <span class="row-name">${escapeHtml(user.name)}</span>
             ${meta}
           </button>`;
-      })
-      .join('');
+    };
+    // Team first; logins held by people outside the firm sit under their own
+    // heading so the two are never confused.
+    const staff = users.filter((u) => u.accountType !== 'client');
+    const clientLogins = users.filter((u) => u.accountType === 'client');
+    list.innerHTML = `
+      ${staff.map(rowHtml).join('')}
+      <div class="rail-divider">
+        <span>Client logins</span>
+        <button type="button" class="btn-link" data-action="add-client-login">+ Add</button>
+      </div>
+      ${clientLogins.map(rowHtml).join('') || '<div class="rail-note rail-note-left">None yet. A client login lets a client read their own books through their AI assistant.</div>'}`;
   }
 }
 
@@ -593,6 +618,7 @@ function clientDetailHtml() {
 
   const conn = currentConnection();
   const isAdmin = me.role === 'admin';
+  if (isClientAccount()) return clientAccountDetailHtml(conn);
   if (!conn) {
     return `
       <div class="empty-state">
@@ -659,7 +685,7 @@ function clientDetailHtml() {
               <span class="team-meta">${
                 u.role === 'admin'
                   ? 'admin · all clients'
-                  : `member · ${
+                  : `${u.accountType === 'client' ? 'client login' : 'member'} · ${
                       u.clients.find((c) => c.realmId === conn.realmId)?.effectiveAccessLevel === 'read'
                         ? 'read-only'
                         : 'read & write'
@@ -721,6 +747,43 @@ function clientDetailHtml() {
       ${teamCard}
     </div>
     ${connectorCardHtml(scopeNote)}`;
+}
+
+// What a client sees after signing in: their company, the address to give
+// their AI assistant, and how to connect it. Nothing about the firm's server.
+function clientAccountDetailHtml(conn) {
+  if (!conn) {
+    return `
+      <div class="empty-state">
+        <h3>No company assigned yet</h3>
+        <p>Your login is set up, but it hasn't been linked to your QuickBooks company. Contact the firm that gave you this login.</p>
+      </div>`;
+  }
+  const url = `${window.location.origin}/mcp`;
+  return `
+    <div class="detail-header">
+      <div>
+        <div class="detail-title-row">
+          <h2 class="detail-title">${escapeHtml(conn.clientName)}</h2>
+          <span class="pill pill-muted">Read-only</span>
+        </div>
+        <div class="detail-sub">Your AI assistant can look things up and run reports from these books. It cannot create, change, or delete anything in QuickBooks.</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-label">Connect your AI assistant</div>
+      <div class="connector-url-row">
+        <code class="connector-url">${escapeHtml(url)}</code>
+        <button type="button" class="connector-copy" data-action="copy-shared-connector">Copy</button>
+      </div>
+      <ol class="help-steps">
+        <li>In Claude, open <strong>Customize → Connectors</strong>, then <strong>+ Add → Add custom connector</strong>.</li>
+        <li>Paste the address above, keep the suggested settings, and add it.</li>
+        <li>When the sign-in page opens, enter the same username and password you used here.</li>
+        <li>In a chat, switch the connector on and ask: <em>“What QuickBooks company am I connected to?”</em></li>
+      </ol>
+      <div class="connector-caption">Using a different assistant? Look for “add custom connector” or “add MCP server” and use the same address and sign-in. To change your password, open Settings (the gear, bottom left).</div>
+    </div>`;
 }
 
 // Connector setup card. Leads with the shared OAuth URL — one connector for
@@ -943,9 +1006,12 @@ function teamDetailHtml() {
   }
 
   const isDisabled = user.status === 'disabled';
+  const isClientLogin = user.accountType === 'client';
   const isReadOnly = user.role !== 'admin' && user.accessLevel === 'read';
   const readOnlyCount = user.role === 'admin' ? 0 : user.clients.filter((c) => c.effectiveAccessLevel === 'read').length;
-  const accessSummary = isReadOnly
+  const accessSummary = isClientLogin
+    ? 'Read-only (client login)'
+    : isReadOnly
     ? 'Read-only everywhere'
     : readOnlyCount === 0
       ? 'Read & write'
@@ -954,7 +1020,7 @@ function teamDetailHtml() {
         : `Read & write on ${user.clients.length - readOnlyCount}, read-only on ${readOnlyCount}`;
   let pill = isDisabled
     ? '<span class="pill pill-disabled">Disabled</span>'
-    : `<span class="pill pill-role">${escapeHtml(user.role)}</span>`;
+    : `<span class="pill pill-role">${isClientLogin ? 'client login' : escapeHtml(user.role)}</span>`;
   if (isReadOnly) pill += ' <span class="pill pill-muted">Read-only</span>';
   const subParts = [];
   if (user.email) subParts.push(escapeHtml(user.email));
@@ -996,16 +1062,16 @@ function teamDetailHtml() {
     </div>
     <div class="detail-cards">
       <div class="card">
-        <div class="card-label">Sign-in &amp; API key</div>
+        <div class="card-label">${isClientLogin ? 'Sign-in' : 'Sign-in &amp; API key'}</div>
         <div class="stat-rows">
           <div class="stat-row"><span class="stat-label">Username</span><span class="stat-value">${user.username ? escapeHtml(user.username) : '<span class="team-meta">not set</span>'}</span></div>
           <div class="stat-row"><span class="stat-label">Password</span><span class="stat-value">${user.hasPassword ? 'Set' : '<span class="team-meta">not set</span>'}</span></div>
-          <div class="stat-row"><span class="stat-label">Key</span><span class="key-chip">${escapeHtml(user.keyPrefix)}…</span></div>
+          ${isClientLogin ? '' : `<div class="stat-row"><span class="stat-label">Key</span><span class="key-chip">${escapeHtml(user.keyPrefix)}…</span></div>`}
           <div class="stat-row"><span class="stat-label">Last used</span><span class="stat-value">${escapeHtml(lastUsed)}</span></div>
           <div class="stat-row"><span class="stat-label">Status</span><span class="stat-value ${isDisabled ? 'status-bad' : 'status-ok'}"><span class="status-dot"></span>${isDisabled ? 'Disabled' : 'Active'}</span></div>
           <div class="stat-row"><span class="stat-label">QuickBooks access</span><span class="stat-value">${escapeHtml(accessSummary)}</span></div>
           <button type="button" class="btn btn-ghost btn-card" data-action="set-password" data-id="${idAttr}">${user.hasPassword ? 'Reset password' : 'Set up sign-in'}</button>
-          <button type="button" class="btn btn-ghost btn-card" data-action="rotate-key" data-id="${idAttr}">Rotate key</button>
+          ${isClientLogin ? '<p class="field-hint" style="margin-top:6px">Client logins connect by signing in. They have no API key.</p>' : `<button type="button" class="btn btn-ghost btn-card" data-action="rotate-key" data-id="${idAttr}">Rotate key</button>`}
         </div>
       </div>
       <div class="card">
@@ -1021,11 +1087,91 @@ function teamDetailHtml() {
 }
 
 // ── Activity feed ────────────────────────────────────────────────────────────
-// The server has no activity endpoint yet, so this derives an approximate feed
-// from data already on hand (token timestamps + member usage).
-// TODO: replace with a real GET /api/activity once the server records events —
-// refresh-daemon token renewals, MCP tool calls, connects/disconnects and key
-// rotations all already pass through the server.
+// Two sources, merged by time. Admins get the server's activity log (GET
+// /api/activity): every tool call and sign-in, who made it, on which company,
+// and whether it was blocked. Connection events (connected, token refreshed,
+// expired) aren't logged server-side, so those are still derived from data
+// already on hand.
+let activityEntries = []; // newest first, for the selection in activityKey
+let activityKey = null; // which selection activityEntries belongs to
+let activityLoadingKey = null;
+
+// What to ask the log for: one member in the Team view, everything otherwise.
+// null means "nothing to fetch" (not an admin, or no member selected).
+function activitySelectionKey() {
+  if (me?.role !== 'admin') return null;
+  if (view !== 'team') return 'all';
+  const user = currentUser();
+  return user ? `userId=${user.id}` : null;
+}
+
+async function refreshActivity(force = false) {
+  const key = activitySelectionKey();
+  if (key === null) {
+    activityEntries = [];
+    activityKey = null;
+    return;
+  }
+  if (!force && (key === activityKey || key === activityLoadingKey)) return;
+  activityLoadingKey = key;
+  try {
+    const entries = await api(`/api/activity?limit=60${key === 'all' ? '' : `&${key}`}`);
+    if (key !== activitySelectionKey()) return; // the selection moved on while loading
+    activityEntries = entries;
+    activityKey = key;
+    renderActivity();
+  } catch {
+    // The feed is a convenience; the derived events still render without it.
+  } finally {
+    if (activityLoadingKey === key) activityLoadingKey = null;
+  }
+}
+
+// One log entry → one feed row. Consecutive identical calls (a bulk job, or an
+// assistant paging through a report) collapse into a single row with a count.
+function loggedActivityEvents() {
+  const events = [];
+  for (const entry of activityKey === activitySelectionKey() ? activityEntries : []) {
+    const who = entry.accountType === 'client' ? `${entry.userName} (client)` : entry.userName;
+    const where = entry.clientName ? ` · ${entry.clientName}` : '';
+    let tone;
+    let title;
+    let mono = false;
+    if (entry.event === 'tool_call') {
+      mono = true;
+      title = entry.tool;
+      if (entry.outcome === 'denied') tone = 'warn';
+      else if (entry.outcome === 'error') tone = 'warn';
+      else tone = entry.writes ? 'ok' : 'info';
+    } else if (entry.event === 'sign_in') {
+      tone = 'ok';
+      title = entry.tool === 'connector' ? 'Connected an AI assistant' : 'Signed in to the dashboard';
+    } else if (entry.event === 'locked_out') {
+      tone = 'warn';
+      title = 'Locked out after failed sign-ins';
+    } else {
+      tone = 'warn';
+      title = 'Failed sign-in';
+    }
+    const note = entry.event === 'tool_call' && entry.outcome === 'denied' ? ' · blocked (read-only)' : entry.event === 'tool_call' && entry.outcome === 'error' ? ' · failed' : '';
+    const signature = `${entry.userId}|${entry.userName}|${entry.event}|${entry.tool}|${entry.realmId}|${entry.outcome}`;
+    const previous = events[events.length - 1];
+    if (previous && previous.signature === signature) {
+      previous.count += 1;
+      continue;
+    }
+    events.push({ ts: new Date(entry.at).getTime(), tone, title, mono, who, where, note, signature, count: 1, userId: entry.userId });
+  }
+  return events.map((e) => ({
+    ts: e.ts,
+    tone: e.tone,
+    title: e.count > 1 ? `${e.title} ×${e.count}` : e.title,
+    mono: e.mono,
+    meta: `${e.who}${e.where}${e.note} · ${relativeTime(e.ts)}`,
+    userId: e.userId,
+  }));
+}
+
 function buildActivity() {
   const events = [];
   const now = Date.now();
@@ -1089,12 +1235,13 @@ function buildActivity() {
         events.push({
           ts: new Date(user.createdAt).getTime(),
           tone: 'ok',
-          title: 'Member added',
+          title: user.accountType === 'client' ? 'Client login added' : 'Member added',
           meta: `${user.name} · ${relativeTime(user.createdAt)}`,
           userId: user.id,
         });
       }
-      if (user.lastUsedAt) {
+      // "API key used" is superseded by the log, which says what it was used for.
+      if (user.lastUsedAt && activityKey === null) {
         events.push({
           ts: new Date(user.lastUsedAt).getTime(),
           tone: 'info',
@@ -1106,12 +1253,14 @@ function buildActivity() {
     }
   }
 
+  events.push(...loggedActivityEvents());
   return events.filter((e) => Number.isFinite(e.ts)).sort((a, b) => b.ts - a.ts);
 }
 
 function renderActivity() {
   const label = $('activity-label');
   const list = $('activity-list');
+  refreshActivity(); // no-op unless the selection changed; re-renders when it lands
   let events = buildActivity();
 
   if (view === 'team') {
@@ -1122,7 +1271,7 @@ function renderActivity() {
     label.textContent = 'Activity';
   }
 
-  events = events.slice(0, 12);
+  events = events.slice(0, 16);
   if (events.length === 0) {
     list.innerHTML = '<div class="rail-note">No recent activity.</div>';
     return;
@@ -1133,7 +1282,7 @@ function renderActivity() {
         <div class="activity-item">
           <span class="act-dot ${e.tone}"></span>
           <div>
-            <div class="act-title">${escapeHtml(e.title)}</div>
+            <div class="act-title${e.mono ? ' mono' : ''}">${escapeHtml(e.title)}</div>
             <div class="act-meta">${escapeHtml(e.meta)}</div>
           </div>
         </div>`
@@ -1251,7 +1400,7 @@ async function manageClientAccess(realmId, clientName) {
             return accessRowHtml({
               inputName: 'userIds',
               value: u.id,
-              label: capped ? `${u.name} (read-only member)` : u.name,
+              label: u.accountType === 'client' ? `${u.name} (client login)` : capped ? `${u.name} (read-only member)` : u.name,
               checked: Boolean(assignment),
               level: assignment?.accessLevel,
               locked: capped,
@@ -1309,11 +1458,13 @@ function checkboxToolbar() {
       <button type="button" class="btn-link" data-action="check-all">Select all</button>
       <span class="toolbar-sep">·</span>
       <button type="button" class="btn-link" data-action="check-none">Select none</button>
-      <span class="toolbar-sep">·</span>
-      <span class="toolbar-label">Set checked to</span>
-      <button type="button" class="btn-link" data-action="level-all" data-level="read_write">Read &amp; write</button>
-      <span class="toolbar-sep">/</span>
-      <button type="button" class="btn-link" data-action="level-all" data-level="read">Read-only</button>
+      <span class="toolbar-levels" data-staff-only>
+        <span class="toolbar-sep">·</span>
+        <span class="toolbar-label">Set checked to</span>
+        <button type="button" class="btn-link" data-action="level-all" data-level="read_write">Read &amp; write</button>
+        <span class="toolbar-sep">/</span>
+        <button type="button" class="btn-link" data-action="level-all" data-level="read">Read-only</button>
+      </span>
     </div>
   `;
 }
@@ -1361,11 +1512,20 @@ function readAccessRows(root, inputName) {
 // "read-only everywhere" choice when the list sits in the member form.
 function syncAccessRows(root) {
   const cap = root.querySelector('input[name="accessLevel"]:checked');
-  const lockAll = cap?.value === 'read';
+  const type = root.querySelector('input[name="accountType"]:checked');
+  const isClient = type?.value === 'client';
+  const lockAll = isClient || cap?.value === 'read';
+  // A client login has no role or access choice to make, and can't be saved
+  // without a way to sign in (it has no API key to fall back on).
+  root.querySelectorAll('[data-staff-only]').forEach((el) => (el.hidden = isClient));
+  root.querySelectorAll('[data-client-only]').forEach((el) => (el.hidden = !isClient));
+  root.querySelectorAll('[data-client-required]').forEach((el) => (el.required = isClient));
+  const createButton = root.querySelector('[data-submit-create]');
+  if (createButton) createButton.textContent = isClient ? 'Create client login' : 'Create member';
   root.querySelectorAll('.access-row').forEach((row) => {
     const checkbox = row.querySelector('input[type="checkbox"]');
     const select = row.querySelector('.access-level');
-    if (cap) {
+    if (cap || type) {
       if (lockAll && !select.dataset.locked) {
         select.dataset.storedLevel = select.value;
         select.dataset.locked = 'true';
@@ -1384,7 +1544,7 @@ function clientCheckboxes(user) {
   if (connections.length === 0) {
     return '<p class="field-hint">No clients connected yet — connect one first, then assign it here.</p>';
   }
-  const locked = user?.role !== 'admin' && user?.accessLevel === 'read';
+  const locked = user?.role !== 'admin' && (user?.accessLevel === 'read' || user?.accountType === 'client');
   return `
     ${checkboxToolbar()}
     <div class="access-list">
@@ -1404,9 +1564,18 @@ function clientCheckboxes(user) {
   `;
 }
 
-function userFormHtml(user) {
+function userFormHtml(user, presetType) {
+  const accountType = user?.accountType || presetType || 'staff';
   return `
     <form id="user-form" class="form-stack">
+      <div class="field">
+        <span class="field-label">Account type</span>
+        <div class="radio-row">
+          <label><input type="radio" name="accountType" value="staff" ${accountType !== 'client' ? 'checked' : ''}> Team member — someone at the firm</label>
+          <label><input type="radio" name="accountType" value="client" ${accountType === 'client' ? 'checked' : ''}> Client login — a client reading their own books through their AI assistant</label>
+        </div>
+        <span class="field-hint" data-client-only hidden>A client login is always read-only, can never be an admin, and has no API key — the client signs in to the connector with the username and password below.</span>
+      </div>
       <label class="field">
         <span class="field-label">Name</span>
         <input type="text" name="name" required value="${user ? escapeHtml(user.name) : ''}" placeholder="e.g. Jane Smith">
@@ -1416,27 +1585,27 @@ function userFormHtml(user) {
         <input type="email" name="email" value="${user?.email ? escapeHtml(user.email) : ''}" placeholder="jane@example.com">
       </label>
       <label class="field">
-        <span class="field-label">Username <span class="field-hint">(for dashboard sign-in)</span></span>
-        <input type="text" name="username" value="${user?.username ? escapeHtml(user.username) : ''}" placeholder="e.g. jane.smith" autocomplete="off">
+        <span class="field-label">Username <span class="field-hint">(for signing in)</span></span>
+        <input type="text" name="username" data-client-required value="${user?.username ? escapeHtml(user.username) : ''}" placeholder="e.g. jane.smith" autocomplete="off">
       </label>
       ${
         user
           ? ''
           : `
       <label class="field">
-        <span class="field-label">Password <span class="field-hint">(optional — can be set later)</span></span>
-        <input type="password" name="password" minlength="8" placeholder="At least 8 characters" autocomplete="new-password">
-        <span class="field-hint">Give it to the member privately — they can change it after signing in.</span>
+        <span class="field-label">Password <span class="field-hint" data-staff-only>(optional — can be set later)</span></span>
+        <input type="password" name="password" data-client-required minlength="8" placeholder="At least 8 characters" autocomplete="new-password">
+        <span class="field-hint">Give it to them privately, separately from the username — they can change it after signing in.</span>
       </label>`
       }
-      <div class="field">
+      <div class="field" data-staff-only>
         <span class="field-label">Role</span>
         <div class="radio-row">
           <label><input type="radio" name="role" value="member" ${!user || user.role === 'member' ? 'checked' : ''}> Member — assigned clients only</label>
           <label><input type="radio" name="role" value="admin" ${user?.role === 'admin' ? 'checked' : ''}> Admin — all clients + team management</label>
         </div>
       </div>
-      <div class="field">
+      <div class="field" data-staff-only>
         <span class="field-label">QuickBooks access</span>
         <div class="radio-row">
           <label><input type="radio" name="accessLevel" value="read_write" ${!user || user.accessLevel !== 'read' ? 'checked' : ''}> Set per client — choose Read &amp; write or Read-only for each client below</label>
@@ -1447,11 +1616,12 @@ function userFormHtml(user) {
       <div class="field" id="client-assign-field">
         <span class="field-label">Assigned clients</span>
         ${clientCheckboxes(user)}
-        <span class="field-hint">Only checked clients are visible to this member. Read-only means reports and lookups — nothing in that client's books can be created, changed, or deleted. Ignored for admins.</span>
+        <span class="field-hint" data-staff-only>Only checked clients are visible to this member. Read-only means reports and lookups — nothing in that client's books can be created, changed, or deleted. Ignored for admins.</span>
+        <span class="field-hint" data-client-only hidden>Check the client's own company — usually just one. They will see everything in that file, including payroll and owner transactions, but cannot change any of it.</span>
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-ghost" data-action="close-modal">Cancel</button>
-        <button type="submit" class="btn btn-primary">${user ? 'Save changes' : 'Create member'}</button>
+        <button type="submit" class="btn btn-primary"${user ? '' : ' data-submit-create'}>${user ? 'Save changes' : 'Create member'}</button>
       </div>
     </form>
   `;
@@ -1459,19 +1629,22 @@ function userFormHtml(user) {
 
 function readUserForm(form) {
   const data = new FormData(form);
+  const isClient = data.get('accountType') === 'client';
   return {
     name: data.get('name')?.trim(),
     email: data.get('email')?.trim() || null,
-    role: data.get('role'),
-    accessLevel: data.get('accessLevel'),
+    accountType: isClient ? 'client' : 'staff',
+    role: isClient ? 'member' : data.get('role'),
+    accessLevel: isClient ? 'read' : data.get('accessLevel'),
     username: data.get('username')?.trim() || null,
     password: data.get('password') || null,
     clients: readAccessRows(form, 'realmIds').map((row) => ({ realmId: row.id, accessLevel: row.accessLevel })),
   };
 }
 
-function showCreateUserModal() {
-  openModal('Add a member', userFormHtml(null), { wide: true });
+function showCreateUserModal(presetType) {
+  openModal(presetType === 'client' ? 'Add a client login' : 'Add a member', userFormHtml(null, presetType), { wide: true });
+  syncAccessRows($('modal-body'));
   $('modal-body').querySelector('#user-form').addEventListener('submit', async (event) => {
     event.preventDefault();
     try {
@@ -1482,7 +1655,8 @@ function showCreateUserModal() {
       });
       selectedUserId = user.id;
       await loadUsers();
-      showKeyModal(user, newKey, 'created');
+      if (user.accountType === 'client') showClientLoginCreatedModal(user);
+      else showKeyModal(user, newKey, 'created');
     } catch (err) {
       toast(err.message, 'error');
     }
@@ -1491,6 +1665,7 @@ function showCreateUserModal() {
 
 function showEditUserModal(user) {
   openModal(`Edit ${user.name}`, userFormHtml(user), { wide: true });
+  syncAccessRows($('modal-body'));
   $('modal-body').querySelector('#user-form').addEventListener('submit', async (event) => {
     event.preventDefault();
     try {
@@ -1616,6 +1791,36 @@ function showKeyModal(user, plaintextKey, verb) {
   openModal(verb === 'created' ? 'Member created' : 'New key generated', body, { wide: true });
 }
 
+// After creating a client login: what to send them. There is no key to show —
+// they connect by signing in.
+function showClientLoginCreatedModal(user) {
+  const url = serverUrl?.connectorUrl || `${window.location.origin}/mcp`;
+  const company = user.clients.map((c) => c.clientName).join(', ');
+  const body = document.createElement('div');
+  body.innerHTML = `
+    <p class="field-hint" style="font-size:12.5px;margin-bottom:14px">${escapeHtml(user.name)} can now connect an AI assistant to ${
+      company ? `<strong>${escapeHtml(company)}</strong>` : 'their company (none assigned yet — add one under Edit assignments)'
+    }, read-only. Send them these two things, and the password separately.</p>
+    <div class="field">
+      <span class="field-label">Connector address</span>
+      <div class="connector-url-row">
+        <code class="connector-url">${escapeHtml(url)}</code>
+        <button type="button" class="connector-copy" data-copy-url>Copy</button>
+      </div>
+    </div>
+    <div class="field" style="margin-top:14px">
+      <span class="field-label">Username</span>
+      <div class="key-row"><code class="key-display">${escapeHtml(user.username || 'not set — use “Set up sign-in” before sending')}</code></div>
+    </div>
+    <p class="field-hint" style="margin-top:14px">A ready-to-send handout with setup steps is in <code>docs/CLIENT-CONNECTOR-SETUP.md</code>. Their activity will show on this page once they connect.</p>
+    <div class="modal-footer">
+      <button type="button" class="btn btn-primary" data-action="close-modal">Done</button>
+    </div>
+  `;
+  body.querySelector('[data-copy-url]').addEventListener('click', () => copyText(url, 'Connector address copied'));
+  openModal('Client login created', body, { wide: true });
+}
+
 function rotateUserKey(user) {
   confirmModal(
     'Rotate API key',
@@ -1710,7 +1915,7 @@ function showSettingsModal() {
   const identity =
     me.kind === 'master'
       ? 'Signed in with the master key'
-      : `Signed in as ${escapeHtml(me.name)}${me.username ? ` (${escapeHtml(me.username)})` : ''} · ${escapeHtml(me.role)}`;
+      : `Signed in as ${escapeHtml(me.name)}${me.username ? ` (${escapeHtml(me.username)})` : ''}${isClientAccount() ? '' : ` · ${escapeHtml(me.role)}`}`;
 
   const keySection = myApiKey
     ? `
@@ -1743,10 +1948,10 @@ function showSettingsModal() {
   const body = document.createElement('div');
   body.innerHTML = `
     <p class="field-hint" style="margin-bottom:14px;font-size:12.5px">${identity}</p>
-    <div class="field">
+    ${isClientAccount() ? '' : `<div class="field">
       <span class="field-label">Your API key</span>
       ${keySection}
-    </div>
+    </div>`}
     ${passwordSection}
     <div class="modal-footer">
       <button type="button" class="btn btn-ghost" data-action="close-modal">Close</button>
@@ -1874,7 +2079,7 @@ document.addEventListener('DOMContentLoaded', () => {
   document.addEventListener('change', (event) => {
     const modal = $('modal-body');
     if (!modal || !modal.contains(event.target)) return;
-    if (event.target.matches('.access-row input[type="checkbox"], input[name="accessLevel"]')) {
+    if (event.target.matches('.access-row input[type="checkbox"], input[name="accessLevel"], input[name="accountType"]')) {
       syncAccessRows(modal);
     }
   });
@@ -1920,6 +2125,7 @@ document.addEventListener('DOMContentLoaded', () => {
     else if (action === 'send-test-alert') sendTestAlert(target);
     else if (action === 'add-company') showAddCompanyModal();
     else if (action === 'add-user') showCreateUserModal();
+    else if (action === 'add-client-login') showCreateUserModal('client');
     else if (action === 'rename') renameCompany(realm, name);
     else if (action === 'manage-access') manageClientAccess(realm, name);
     else if (action === 'reconnect') reconnectCompany(realm, name);

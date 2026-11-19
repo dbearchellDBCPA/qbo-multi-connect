@@ -2,11 +2,13 @@
 
 <!--
   FIRM NOTE — delete this block before sending.
-  Fill in the four placeholders: [FIRM NAME], [CONNECTOR ADDRESS] (your
-  deployment's URL ending in /mcp), [SIGN-IN ADDRESS] (the same URL without
-  /mcp), and [SUPPORT CONTACT]. Send the username and password separately from
-  this document. Do a dry run with a test client account before the first
-  real one — menu names in Claude change from time to time.
+  Create the client's login first: dashboard → Team → Client logins → + Add
+  (see CLIENT-ACCESS.md). Then fill in the four placeholders: [FIRM NAME],
+  [CONNECTOR ADDRESS] (your deployment's URL ending in /mcp — shown when you
+  create the login), [SIGN-IN ADDRESS] (the same URL without /mcp), and
+  [SUPPORT CONTACT]. Send the username and password separately from this
+  document. Do a dry run with a test client login before the first real one —
+  menu names in Claude change from time to time.
 -->
 
 [FIRM NAME] can give your AI assistant a secure, **read-only** window into your
@@ -138,6 +140,7 @@ you use and we'll help you get connected.
 |---|---|
 | The assistant says it has no QuickBooks tools | In the chat, click **+ → Connectors** and switch the connector on. |
 | "Incorrect username or password" | Check for typos and make sure you're using the login we sent for this connector. Still stuck? Ask us to reset your password. |
+| "Too many failed sign-ins" | For your protection the login pauses after several wrong passwords. Wait the time shown and try again, or ask us to reset your password — that clears it right away. |
 | Sign-in page says "Unknown or missing client_id" | Remove the connector and add it again. When asked about the OAuth client, choose **Register automatically**. |
 | It worked before and now asks you to sign in | Normal after a long gap. Click **Connect** on the connector and sign in again. |
 | "Unauthorized" or "access denied" errors | Your login may have been switched off, or your company isn't assigned to it. Contact us. |
