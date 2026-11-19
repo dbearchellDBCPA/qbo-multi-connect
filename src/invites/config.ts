@@ -12,8 +12,9 @@ import { bareAddress } from '../alerts/config.js';
  *                          effect of having alerts set up.
  *   QBO_INVITE_REPLY_TO  — optional: where a client's reply goes (your real
  *                          inbox), when the sender address isn't monitored.
- *   QBO_FIRM_NAME        — optional: how the firm is named in the email.
- *                          Defaults to the display name in the sender.
+ *   QBO_FIRM_NAME        — optional: how the firm is named to clients. The
+ *                          name set in the dashboard's Settings wins over
+ *                          this; this wins over the sender's display name.
  *
  * Invitations stay OFF until there is a key and a usable sender. A partial
  * configuration is reported, not silently ignored, so the dashboard can say
@@ -25,6 +26,8 @@ export interface InvitesConfig {
   from: string;
   replyTo: string | null;
   firmName: string;
+  /** Where firmName came from: QBO_FIRM_NAME, the sender's display name, or the neutral default. */
+  firmNameSource: 'environment' | 'sender' | 'default';
   /** Variables that must be set before invitations turn on. */
   missing: string[];
   /** Problems with the values that ARE set. */
@@ -56,12 +59,15 @@ export function parseInvitesConfig(env: NodeJS.ProcessEnv = process.env): Invite
     problems.push(`QBO_INVITE_REPLY_TO is not a valid address: ${replyTo}`);
   }
 
+  const envName = env.QBO_FIRM_NAME?.trim() || '';
+  const senderName = (from ? displayName(from) : null) || '';
   return {
     enabled: missing.length === 0 && problems.length === 0,
     resendApiKey,
     from,
     replyTo,
-    firmName: env.QBO_FIRM_NAME?.trim() || (from ? displayName(from) : null) || DEFAULT_FIRM_NAME,
+    firmName: envName || senderName || DEFAULT_FIRM_NAME,
+    firmNameSource: envName ? 'environment' : senderName ? 'sender' : 'default',
     missing,
     problems,
   };

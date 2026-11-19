@@ -40,14 +40,14 @@ export async function inviteAcceptRoutes(fastify: FastifyInstance, qboManager: Q
   }
 
   fastify.get<{ Params: { token: string } }>('/invite/:token', async (request, reply) => {
-    const firmName = qboManager.invites.firmName;
+    const firm = await qboManager.branding.firm();
     const user = await qboManager.users.findInvite(request.params.token);
-    if (!user) return html(reply, 410, inviteInvalidPage(firmName));
+    if (!user) return html(reply, 410, inviteInvalidPage(firm));
     return html(
       reply,
       200,
       acceptInvitePage({
-        firmName,
+        firm,
         name: user.name,
         username: user.username ?? '',
         companyNames: await companyNames(user.realmIds),
@@ -59,17 +59,17 @@ export async function inviteAcceptRoutes(fastify: FastifyInstance, qboManager: Q
   fastify.post<{ Params: { token: string }; Body: { password?: unknown; confirm?: unknown } }>(
     '/invite/:token',
     async (request, reply) => {
-      const firmName = qboManager.invites.firmName;
+      const firm = await qboManager.branding.firm();
       const { token } = request.params;
       const user = await qboManager.users.findInvite(token);
-      if (!user) return html(reply, 410, inviteInvalidPage(firmName));
+      if (!user) return html(reply, 410, inviteInvalidPage(firm));
 
       const retry = async (error: string) =>
         html(
           reply,
           400,
           acceptInvitePage({
-            firmName,
+            firm,
             name: user.name,
             username: user.username ?? '',
             companyNames: await companyNames(user.realmIds),
@@ -91,7 +91,7 @@ export async function inviteAcceptRoutes(fastify: FastifyInstance, qboManager: Q
       } catch (error) {
         return retry(error instanceof Error ? `${error.message}.` : 'That password cannot be used.');
       }
-      if (!accepted) return html(reply, 410, inviteInvalidPage(firmName));
+      if (!accepted) return html(reply, 410, inviteInvalidPage(firm));
 
       // A new password ends whatever was open under the old one. For a first
       // invitation there is nothing; for a later one, this is the point.
@@ -103,7 +103,7 @@ export async function inviteAcceptRoutes(fastify: FastifyInstance, qboManager: Q
         reply,
         200,
         inviteAcceptedPage({
-          firmName,
+          firm,
           username: accepted.username ?? '',
           connectorUrl: `${base}/mcp`,
           signInUrl: base,

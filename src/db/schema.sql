@@ -167,6 +167,15 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
 CREATE INDEX IF NOT EXISTS idx_oauth_tokens_user ON oauth_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_oauth_codes_user ON oauth_auth_codes(user_id);
 
+-- ── Settings an admin changes from the dashboard ─────────────────────────────
+-- Small, named values that belong to this deployment rather than to its
+-- environment — e.g. the firm's name as clients see it.
+CREATE TABLE IF NOT EXISTS app_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
 -- ── Activity log ─────────────────────────────────────────────────────────────
 -- One row per MCP tool call and per sign-in: who, which tool, which company,
 -- whether it could change data, and how it ended. Arguments and results are

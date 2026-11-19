@@ -490,6 +490,11 @@ button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
   font-weight: 700;
   font-size: 14px;
   color: var(--rail-text);
+  /* A firm's name (shown to client logins) can be long. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .rail-toggle {

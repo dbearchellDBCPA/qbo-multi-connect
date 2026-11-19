@@ -37,7 +37,35 @@ export async function alertsRoutes(
     const scope = await authenticateRequest(request, reply, qboManager, masterApiKey);
     if (!scope) return;
     if (!(await requireAdmin(scope, reply))) return;
-    await reply.send(qboManager.invites.status());
+    const firm = await qboManager.branding.firm();
+    await reply.send({
+      ...qboManager.invites.status(),
+      // The name clients see, wherever it was set (dashboard, environment, sender).
+      firmName: firm.name,
+      firmNameConfigured: firm.configured,
+      firmNameSource: firm.source,
+    });
+  });
+
+  // The firm's name as clients see it — on the invitation email, the page
+  // where they choose a password, and the sign-in page. Blank clears the
+  // dashboard's value and falls back to the environment's.
+  fastify.put<{ Body: { firmName?: unknown } }>('/api/branding', async (request, reply) => {
+    const scope = await authenticateRequest(request, reply, qboManager, masterApiKey);
+    if (!scope) return;
+    if (!(await requireAdmin(scope, reply))) return;
+
+    const raw = request.body?.firmName;
+    if (raw != null && typeof raw !== 'string') {
+      await reply.code(400).send({ error: 'Bad Request', message: 'firmName must be text' });
+      return;
+    }
+    try {
+      const firm = await qboManager.branding.setFirmName(raw ?? null);
+      await reply.send({ firmName: firm.name, firmNameConfigured: firm.configured, firmNameSource: firm.source });
+    } catch (error) {
+      await reply.code(400).send({ error: 'Bad Request', message: error instanceof Error ? error.message : 'Invalid firm name' });
+    }
   });
 
   fastify.post('/api/alerts/test', async (request, reply) => {

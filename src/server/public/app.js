@@ -219,8 +219,14 @@ function applyIdentity() {
     el.hidden = !isAdmin;
   });
   // A client login gets a pared-down dashboard: their company and how to
-  // connect, without the firm-facing panels.
+  // connect, without the firm-facing panels — and under the firm's name,
+  // since that is who gave them the login.
   document.body.classList.toggle('client-account', isClientAccount());
+  const wordmark = document.querySelector('.rail-wordmark');
+  if (wordmark) {
+    if (!wordmark.dataset.appName) wordmark.dataset.appName = wordmark.textContent;
+    wordmark.textContent = isClientAccount() && me.firmName ? me.firmName : wordmark.dataset.appName;
+  }
   // If the caller just lost admin (demoted mid-session), leave the Team view.
   if (!isAdmin && view === 'team') view = 'clients';
 }
@@ -414,6 +420,8 @@ function signOut(expired = false) {
   activityEntries = [];
   activityKey = null;
   document.body.classList.remove('client-account');
+  const wordmark = document.querySelector('.rail-wordmark');
+  if (wordmark?.dataset.appName) wordmark.textContent = wordmark.dataset.appName;
   $('whoami').textContent = '';
   $('search-input').value = '';
   closeModal();
@@ -2032,6 +2040,14 @@ function showInviteClientModal(realmId, clientName) {
         ? 'They get an email with a link to choose their password and steps to connect Claude or ChatGPT.'
         : 'Email is not set up on this server, so you will be given a link to send them yourself.'
     }</p>
+    ${
+      invitesInfo?.firmNameConfigured
+        ? `<p class="field-hint">The invitation comes from <strong>${escapeHtml(invitesInfo.firmName)}</strong>.</p>`
+        : `<div class="callout-warning">
+            <div class="callout-title">Your firm's name isn't set</div>
+            <div class="callout-body">The invitation will say it is from “Your accounting firm”. Set your firm's name under <button type="button" class="btn-link" data-action="settings">Settings</button> first so clients see who it is from.</div>
+          </div>`
+    }
     <label class="field">
       <span class="field-label">Their name</span>
       <input type="text" name="name" required placeholder="e.g. Jordan Rivera" autocomplete="off">
@@ -2234,9 +2250,34 @@ function showSettingsModal() {
     </form>`
       : '<p class="field-hint" style="margin-top:18px">The master key has no password — it lives in the server environment (<code>QBO_API_KEY</code>).</p>';
 
+  // Admins: the name clients see. It is the firm that gives a client access,
+  // so the invitation email and the pages a client lands on carry this name
+  // rather than the app's.
+  const firmSection =
+    me.role === 'admin' && invitesInfo
+      ? `
+    <form data-firm-form class="form-stack" style="margin-bottom:18px">
+      <div class="field">
+        <span class="field-label">Your firm's name, as clients see it</span>
+        <input type="text" name="firmName" maxlength="100" value="${
+          invitesInfo.firmNameSource === 'dashboard' ? escapeHtml(invitesInfo.firmName || '') : ''
+        }" placeholder="${escapeHtml(invitesInfo.firmNameConfigured ? invitesInfo.firmName : 'e.g. Smith & Jones CPA LLC')}" autocomplete="organization">
+        <span class="field-hint">${
+          invitesInfo.firmNameConfigured
+            ? `Clients currently see <strong>${escapeHtml(invitesInfo.firmName)}</strong>${
+                invitesInfo.firmNameSource === 'dashboard' ? '' : ' (from the server settings — type a name here to change it)'
+              }.`
+            : 'Not set yet — invitations currently say “Your accounting firm”.'
+        } It appears on the invitation email, the page where a client chooses their password, and the sign-in page.</span>
+      </div>
+      <div><button type="submit" class="btn btn-ghost">Save firm name</button></div>
+    </form>`
+      : '';
+
   const body = document.createElement('div');
   body.innerHTML = `
     <p class="field-hint" style="margin-bottom:14px;font-size:12.5px">${identity}</p>
+    ${firmSection}
     ${isClientAccount() ? '' : `<div class="field">
       <span class="field-label">Your API key</span>
       ${keySection}
@@ -2256,6 +2297,25 @@ function showSettingsModal() {
       toggleBtn.textContent = revealed ? 'Hide' : 'Show';
     });
     body.querySelector('[data-copy-key]').addEventListener('click', () => copyText(myApiKey, 'API key copied'));
+  }
+  const firmForm = body.querySelector('[data-firm-form]');
+  if (firmForm) {
+    firmForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      try {
+        const saved = await api('/api/branding', {
+          method: 'PUT',
+          body: JSON.stringify({ firmName: new FormData(firmForm).get('firmName') }),
+        });
+        invitesInfo = { ...invitesInfo, ...saved };
+        me = { ...me, firmName: saved.firmNameConfigured ? saved.firmName : null };
+        toast(saved.firmNameConfigured ? `Clients will now see “${saved.firmName}”` : 'Firm name cleared');
+        closeModal();
+        renderAll();
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+    });
   }
   const passwordForm = body.querySelector('[data-password-form]');
   if (passwordForm) {

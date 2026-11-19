@@ -5,6 +5,7 @@
  * resources, so the link in the address bar is never sent anywhere else.
  */
 import { BRAND_BASE, BRAND_FONT_FACES, BRAND_MARK, BRAND_TOKENS } from './brand-css.js';
+import { APP_NAME, type FirmBrand } from '../branding.js';
 import {
   CHATGPT_NOTE,
   CHATGPT_STEPS,
@@ -62,9 +63,15 @@ ${BRAND_BASE}
   }
   ol, ul { padding-left:20px; margin-bottom:12px; }
   li { margin-bottom:6px; }
+  .powered { max-width:560px; margin:14px auto 0; text-align:center; font-size:11.5px; color:var(--text-faint); }
 `;
 
-function page(title: string, body: string): string {
+/**
+ * The page shell. The firm's name is the brand — it is the firm, not the
+ * software, giving this person access — with the app credited in small print
+ * underneath. Until a firm name has been set, the app's own name stands in.
+ */
+function page(title: string, body: string, firm: FirmBrand): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -72,20 +79,23 @@ function page(title: string, body: string): string {
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="robots" content="noindex, nofollow">
 <meta name="referrer" content="no-referrer">
-<title>${escapeHtml(title)}</title>
+<title>${escapeHtml(title)} — ${escapeHtml(firm.displayName)}</title>
 <style>${STYLES}</style>
 </head>
 <body>
-  <div class="card">
-    <div class="brand">${BRAND_MARK}<span class="brand-name">QBO Multi-Connect</span></div>
-    ${body}
+  <div>
+    <div class="card">
+      <div class="brand">${BRAND_MARK}<span class="brand-name">${escapeHtml(firm.displayName)}</span></div>
+      ${body}
+    </div>
+    ${firm.configured ? `<p class="powered">Secure access from ${escapeHtml(firm.name)}, provided through ${APP_NAME}.</p>` : ''}
   </div>
 </body>
 </html>`;
 }
 
 export interface AcceptPageDetails {
-  firmName: string;
+  firm: FirmBrand;
   name: string;
   username: string;
   companyNames: string[];
@@ -96,7 +106,8 @@ export interface AcceptPageDetails {
 
 /** Step 1: the invited person chooses their password. */
 export function acceptInvitePage(details: AcceptPageDetails): string {
-  const { firmName, name, username, companyNames, minPasswordLength, error } = details;
+  const { firm, name, username, companyNames, minPasswordLength, error } = details;
+  const firmName = firm.name;
   return page(
     'Choose your password',
     `<h1>Welcome, ${escapeHtml(name)}</h1>
@@ -112,12 +123,13 @@ export function acceptInvitePage(details: AcceptPageDetails): string {
       <input type="password" id="confirm" name="confirm" autocomplete="new-password" minlength="${minPasswordLength}" required>
       <button type="submit">Set password and continue</button>
     </form>
-    <p class="note">Only you will know this password. You'll type it once, on a sign-in page like this one, when you add the connector to your assistant.</p>`
+    <p class="note">Only you will know this password. You'll type it once, on a sign-in page like this one, when you add the connector to your assistant.</p>`,
+    firm
   );
 }
 
 export interface AcceptedPageDetails {
-  firmName: string;
+  firm: FirmBrand;
   username: string;
   connectorUrl: string;
   signInUrl: string;
@@ -125,7 +137,8 @@ export interface AcceptedPageDetails {
 
 /** Step 2: the password is set — here is how to connect. */
 export function inviteAcceptedPage(details: AcceptedPageDetails): string {
-  const { firmName, username, connectorUrl, signInUrl } = details;
+  const { firm, username, connectorUrl, signInUrl } = details;
+  const firmName = firm.name;
   const ol = (steps: string[]) => `<ol>${steps.map((s) => `<li>${rich(s)}</li>`).join('')}</ol>`;
   return page(
     'You are set up',
@@ -144,16 +157,19 @@ export function inviteAcceptedPage(details: AcceptedPageDetails): string {
     <p>${escapeHtml(CHATGPT_NOTE)}</p>
     <h2>Then try asking</h2>
     <ul>${TRY_ASKING.map((q) => `<li>${escapeHtml(q)}</li>`).join('')}</ul>
-    <p class="note">These steps are also in your invitation email. To change your password later, sign in at ${escapeHtml(signInUrl)} and open Settings. Questions? Contact ${escapeHtml(firmName)}.</p>`
+    <p class="note">These steps are also in your invitation email. To change your password later, sign in at ${escapeHtml(signInUrl)} and open Settings. Questions? Contact ${escapeHtml(firmName)}.</p>`,
+    firm
   );
 }
 
 /** The link is used, replaced, expired, or was never real. */
-export function inviteInvalidPage(firmName: string): string {
+export function inviteInvalidPage(firm: FirmBrand): string {
+  const firmName = firm.name;
   return page(
     'Invitation link no longer valid',
     `<h1>This invitation link can't be used</h1>
     <p class="lead">It may have expired, already been used to set a password, or been replaced by a newer invitation. Check your inbox for a more recent one, or ask <strong>${escapeHtml(firmName)}</strong> to send a new invitation.</p>
-    <p class="note">If you have already chosen a password, you don't need this link — add the connector to your assistant and sign in with your email address and that password.</p>`
+    <p class="note">If you have already chosen a password, you don't need this link — add the connector to your assistant and sign in with your email address and that password.</p>`,
+    firm
   );
 }
