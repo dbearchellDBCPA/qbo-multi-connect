@@ -82,6 +82,14 @@ export type UserRole = 'admin' | 'member';
 export type UserStatus = 'active' | 'disabled';
 
 /**
+ * Who a login is for. 'staff' is a firm team member. 'client' is a login
+ * given to a client so their own AI assistant can read their own books: it
+ * is always read-only, can never be an admin, and signs in through the
+ * connector only (its API key is never accepted).
+ */
+export type UserAccountType = 'staff' | 'client';
+
+/**
  * What a user's API key may do in QuickBooks: 'read' is reports and lookups
  * only, 'read_write' is full access. It is set per assigned company
  * (ClientAssignment); the level on the user itself is a ceiling — a 'read'
@@ -105,6 +113,7 @@ export interface UserRecord {
   name: string;
   email: string | null;
   role: UserRole;
+  account_type: UserAccountType;
   access_level: UserAccessLevel;
   username: string | null;
   password_hash: string | null;
@@ -125,6 +134,7 @@ export interface User {
   name: string;
   email: string | null;
   role: UserRole;
+  accountType: UserAccountType;
   accessLevel: UserAccessLevel;
   username: string | null;
   /** Whether a dashboard password is set (the hash itself never leaves the DB layer). */
@@ -149,6 +159,7 @@ export interface NewUser {
   name: string;
   email?: string | null;
   role?: UserRole;
+  accountType?: UserAccountType;
   accessLevel?: UserAccessLevel;
   username?: string | null;
   password?: string | null;
@@ -165,9 +176,45 @@ export interface UserUpdate {
   name?: string;
   email?: string | null;
   role?: UserRole;
+  accountType?: UserAccountType;
   accessLevel?: UserAccessLevel;
   username?: string | null;
   status?: UserStatus;
+}
+
+/**
+ * One entry in the activity log. Records that something happened and how it
+ * ended — never the arguments or results, which are client financial data.
+ */
+export type ActivityEvent = 'tool_call' | 'sign_in' | 'sign_in_failed' | 'locked_out';
+export type ActivityOutcome = 'ok' | 'denied' | 'error';
+
+export interface ActivityEntry {
+  id: number;
+  at: Date;
+  userId: number | null;
+  userName: string;
+  accountType: 'master' | UserAccountType;
+  event: ActivityEvent;
+  /** The MCP tool, or for sign-ins where it happened ('connector' | 'dashboard'). */
+  tool: string | null;
+  /** Whether the tool can change QuickBooks data. */
+  writes: boolean;
+  realmId: string | null;
+  clientName: string | null;
+  outcome: ActivityOutcome;
+}
+
+export interface NewActivityEntry {
+  userId: number | null;
+  userName: string;
+  accountType: 'master' | UserAccountType;
+  event: ActivityEvent;
+  tool?: string | null;
+  writes?: boolean;
+  realmId?: string | null;
+  clientName?: string | null;
+  outcome: ActivityOutcome;
 }
 
 /**

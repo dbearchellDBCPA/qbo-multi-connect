@@ -40,6 +40,8 @@ import type { QBOManager } from '../index.js';
 import { resolveAuth, createScopedManager, canWriteRealm, type AuthScope, type ScopedQBOManager } from './auth.js';
 import { publicBaseUrl, resolvePublicUrl } from './public-url.js';
 import { registerImportTools } from './import-tools.js';
+import { CLIENT_TOOLS } from './client-tools.js';
+import type { ActivityOutcome } from '../db/models.js';
 import type { BatchRunnerOptions } from './qbo-batch.js';
 import { ImportStoreHandle, IMPORT_STORE_FILENAME } from '../db/import-store.js';
 import {
@@ -506,6 +508,33 @@ export async function registerMcpRoutes(
       };
     };
 
+    // Every tool call is written to the activity log: who, which tool, which
+    // company, and how it ended — never the arguments or the result, which
+    // are client financial data. Logging must not be able to fail a call.
+    const logToolCall = async (toolName: string, writes: boolean, args: any, outcome: ActivityOutcome) => {
+      try {
+        let realmId: string | null = null;
+        let clientName: string | null = null;
+        if (typeof args?.client_name === 'string' && args.client_name.trim()) {
+          realmId = await findRealmId(qboManager, args.client_name);
+          clientName = realmId ? ((await qboManager.getConnection(realmId))?.clientName ?? null) : null;
+        }
+        await qboRoot.activity.record({
+          userId: scope.userId,
+          userName: scope.userName,
+          accountType: scope.accountType,
+          event: 'tool_call',
+          tool: toolName,
+          writes,
+          realmId,
+          clientName,
+          outcome,
+        });
+      } catch {
+        // already best-effort; never surface a logging problem to the caller
+      }
+    };
+
     const registerToolRaw = server.tool.bind(server);
     (server as any).tool = (name: string, ...rest: any[]) => {
       // Keys that can't write anywhere never see write tools at all —
@@ -515,6 +544,10 @@ export async function registerMcpRoutes(
       // (create/update/delete/apply/convert/close/match/swap/bulk) writes.
       const isWriteTool = !isReadOnlyTool(name);
       if (isWriteTool && !scope.canWrite) return undefined;
+      // A client login gets an explicit list of tools about its own books —
+      // and nothing else, including any tool added after that list was
+      // written. See client-tools.ts.
+      if (scope.accountType === 'client' && (isWriteTool || !CLIENT_TOOLS.has(name))) return undefined;
       if (rest.length > 0 && typeof rest[rest.length - 1] === 'function') {
         const rawCb = rest[rest.length - 1];
         // Blanket credential redaction: no tool may echo a URL whose query
@@ -522,12 +555,24 @@ export async function registerMcpRoutes(
         // carries intuit_apikey + user-auth-info). Only a result the tool
         // explicitly marked via allowSensitiveUrls() passes through as-is.
         const cb = async (...cbArgs: any[]) => {
-          if (isWriteTool) {
-            const denied = await writeDenial(name, cbArgs[0]);
-            if (denied) return denied;
+          let outcome: ActivityOutcome = 'ok';
+          try {
+            if (isWriteTool) {
+              const denied = await writeDenial(name, cbArgs[0]);
+              if (denied) {
+                outcome = 'denied';
+                return denied;
+              }
+            }
+            const result = await rawCb(...cbArgs);
+            if (result?.isError) outcome = 'error';
+            return isSensitiveUrlAllowed(result) ? result : redactToolResult(result);
+          } catch (err) {
+            outcome = 'error';
+            throw err;
+          } finally {
+            await logToolCall(name, isWriteTool, cbArgs[0], outcome);
           }
-          const result = await rawCb(...cbArgs);
-          return isSensitiveUrlAllowed(result) ? result : redactToolResult(result);
         };
         const head = rest.slice(0, -1); // [description?, shape?]
         const description = typeof head[0] === 'string' ? head[0] : undefined;

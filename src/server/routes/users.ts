@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { QBOManager } from '../../index.js';
-import type { ClientAssignment, UserAccessLevel, UserRole, UserStatus } from '../../db/models.js';
+import type { ClientAssignment, UserAccessLevel, UserAccountType, UserRole, UserStatus } from '../../db/models.js';
 import { authenticateRequest, requireAdmin } from '../middleware.js';
 import { isRealmAllowed, canWriteRealm } from '../auth.js';
 import { MIN_PASSWORD_LENGTH, effectiveAccessLevel, isValidUsername, normalizeUsername } from '../../users.js';
@@ -8,11 +8,14 @@ import { MIN_PASSWORD_LENGTH, effectiveAccessLevel, isValidUsername, normalizeUs
 const VALID_ROLES: UserRole[] = ['admin', 'member'];
 const VALID_STATUSES: UserStatus[] = ['active', 'disabled'];
 const VALID_ACCESS_LEVELS: UserAccessLevel[] = ['read', 'read_write'];
+const VALID_ACCOUNT_TYPES: UserAccountType[] = ['staff', 'client'];
 
 interface UserBody {
   name?: string;
   email?: string | null;
   role?: UserRole;
+  /** 'client' creates a client login: always read-only, never admin, no API key. */
+  accountType?: UserAccountType;
   accessLevel?: UserAccessLevel;
   username?: string | null;
   password?: string | null;
@@ -64,6 +67,10 @@ export async function usersRoutes(
     }
     if (body.status !== undefined && !VALID_STATUSES.includes(body.status)) {
       await reply.code(400).send({ error: 'Bad Request', message: `status must be one of: ${VALID_STATUSES.join(', ')}` });
+      return false;
+    }
+    if (body.accountType !== undefined && !VALID_ACCOUNT_TYPES.includes(body.accountType)) {
+      await reply.code(400).send({ error: 'Bad Request', message: `accountType must be one of: ${VALID_ACCOUNT_TYPES.join(', ')}` });
       return false;
     }
     if (body.accessLevel !== undefined && !VALID_ACCESS_LEVELS.includes(body.accessLevel)) {
@@ -139,6 +146,7 @@ export async function usersRoutes(
       userId: scope.userId,
       name: scope.userName,
       role: scope.role,
+      accountType: scope.accountType,
       allClients: scope.allRealms,
       canWrite: scope.canWrite,
       username: self?.username ?? null,
@@ -175,18 +183,23 @@ export async function usersRoutes(
         name: body.name,
         email: body.email ?? null,
         role: body.role ?? 'member',
-        accessLevel: body.accessLevel ?? 'read_write',
+        accountType: body.accountType ?? 'staff',
+        accessLevel: body.accessLevel ?? (body.accountType === 'client' ? 'read' : 'read_write'),
         username: body.username ?? null,
         password: body.password ?? null,
         realmIds: body.realmIds ?? [],
         assignments: assignmentsFromBody(body),
       });
-      await reply.code(201).send({ user: withClientNames(user, await realmNameMap()), apiKey });
+      // A client login's key is never accepted, so it is never handed out.
+      await reply.code(201).send({
+        user: withClientNames(user, await realmNameMap()),
+        apiKey: user.accountType === 'client' ? null : apiKey,
+      });
     } catch (error) {
       // "already taken" and validation messages from the service are client
       // errors, not server faults.
       const message = error instanceof Error ? error.message : 'Unknown error';
-      const clientError = /already taken|must be at least|must be 3-64|required/i.test(message);
+      const clientError = /already taken|must be at least|must be 3-64|required|client login/i.test(message);
       await reply.code(clientError ? 400 : 500).send({
         error: clientError ? 'Bad Request' : 'Internal Server Error',
         message,
@@ -219,6 +232,7 @@ export async function usersRoutes(
         name: body.name,
         email: body.email,
         role: body.role,
+        accountType: body.accountType,
         accessLevel: body.accessLevel,
         username: body.username,
         status: body.status,
@@ -268,6 +282,9 @@ export async function usersRoutes(
         return;
       }
       await qboManager.users.deleteSessions(id);
+      // A reset is how a locked-out person gets back in — don't leave them
+      // waiting out the lock on a password that no longer exists.
+      qboManager.users.clearLoginFailures((await qboManager.users.get(id))?.username);
       await reply.send({ success: true });
     }
   );
@@ -285,7 +302,10 @@ export async function usersRoutes(
       return;
     }
 
-    await reply.send({ user: withClientNames(result.user, await realmNameMap()), apiKey: result.apiKey });
+    await reply.send({
+      user: withClientNames(result.user, await realmNameMap()),
+      apiKey: result.user.accountType === 'client' ? null : result.apiKey,
+    });
   });
 
   // Delete a user (admin only)

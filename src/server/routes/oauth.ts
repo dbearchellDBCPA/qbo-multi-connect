@@ -18,6 +18,7 @@ import { BRAND_BASE, BRAND_FONT_FACES, BRAND_MARK, BRAND_TOKENS } from '../brand
 // request came in on (or QBO_PUBLIC_URL when pinned), so a custom domain
 // works without touching this file — see ../public-url.ts.
 import { publicBaseUrl } from '../public-url.js';
+import { waitText } from './auth.js';
 export { publicBaseUrl };
 
 const SIGN_IN_STYLES = `
@@ -76,7 +77,7 @@ function signInPage(opts: {
   <div class="card">
     <div class="brand">${BRAND_MARK}<span class="brand-name">QBO Multi-Connect</span></div>
     <h1>Sign in to connect</h1>
-    <p class="lead"><strong>${escapeHtml(opts.clientName)}</strong> is requesting access to QuickBooks on your behalf. Sign in with your QBO Multi-Connect account — you'll only reach the client companies assigned to you.</p>
+    <p class="lead"><strong>${escapeHtml(opts.clientName)}</strong> is requesting access to QuickBooks on your behalf. Sign in with the username and password you were given — you'll only reach the companies assigned to you.</p>
     ${opts.error ? `<div class="err">${escapeHtml(opts.error)}</div>` : ''}
     <form method="POST" action="/oauth/authorize">
       ${hidden}
@@ -86,7 +87,7 @@ function signInPage(opts: {
       <input type="password" id="password" name="password" autocomplete="current-password" required>
       <button type="submit">Sign in and allow access</button>
     </form>
-    <p class="note">Use the same username and password you use for the QBO Multi-Connect dashboard. Don't have one? Ask your administrator to create your account on the Team page.</p>
+    <p class="note">Trouble signing in? Contact the person who set up your access — they can check your username or reset your password.</p>
   </div>
 </body>
 </html>`;
@@ -243,17 +244,42 @@ export async function oauthRoutes(fastify: FastifyInstance, qboManager: QBOManag
 
     const username = body.username?.trim();
     const password = body.password;
-    const user = username && password ? await qboManager.users.verifyLogin(username, password) : null;
-    if (!user) {
-      await reply.code(401).type('text/html').send(
+    // Same lock as the dashboard sign-in (UserService.login): this page is
+    // reachable by anyone who has the connector address, so repeated guesses
+    // at one username are slowed, then stopped.
+    const result = username && password
+      ? await qboManager.users.login(username, password)
+      : ({ status: 'invalid' } as const);
+    if (result.status !== 'ok') {
+      const locked = result.status === 'locked';
+      await qboManager.activity.record({
+        userId: null,
+        userName: username || '(blank)',
+        accountType: 'staff',
+        event: locked ? 'locked_out' : 'sign_in_failed',
+        tool: 'connector',
+        outcome: 'denied',
+      });
+      await reply.code(locked ? 429 : 401).type('text/html').send(
         signInPage({
           clientName: client.clientName || 'An MCP client',
           params,
-          error: 'Incorrect username or password. Try again.',
+          error: locked
+            ? `Too many failed sign-ins. Wait ${waitText(result.retryAfterMs)} and try again, or ask for a password reset.`
+            : 'Incorrect username or password. Try again.',
         })
       );
       return;
     }
+    const user = result.user;
+    await qboManager.activity.record({
+      userId: user.id,
+      userName: user.name,
+      accountType: user.accountType,
+      event: 'sign_in',
+      tool: 'connector',
+      outcome: 'ok',
+    });
 
     const code = await qboManager.oauth.createAuthCode({
       clientId: client.clientId,

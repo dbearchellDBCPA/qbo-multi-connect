@@ -1,7 +1,7 @@
 import { randomBytes, createHash, scryptSync, timingSafeEqual } from 'node:crypto';
 import { encrypt, decrypt } from './crypto/encrypt.js';
 import type { ConnectionDatabase } from './db/index.js';
-import type { ClientAssignment, NewUser, User, UserAccessLevel, UserRecord, UserUpdate } from './db/models.js';
+import type { ClientAssignment, NewUser, User, UserAccessLevel, UserAccountType, UserRecord, UserUpdate } from './db/models.js';
 
 /** Length of the plaintext prefix stored for display (e.g. "qbo_1a2b3c4d") */
 const KEY_PREFIX_LENGTH = 12;
@@ -19,6 +19,19 @@ const SESSION_TOKEN_PREFIX = 'qbos_';
 const USERNAME_RE = /^[a-z0-9@._-]{3,64}$/;
 
 export const MIN_PASSWORD_LENGTH = 8;
+
+/** Consecutive failed sign-ins before a username is locked… */
+export const MAX_LOGIN_FAILURES = 5;
+/** …for this long at first, doubling with each further failure… */
+export const LOGIN_LOCKOUT_MS = 60_000;
+/** …up to this ceiling, so a determined guesser gets a handful of tries an hour. */
+export const MAX_LOGIN_LOCKOUT_MS = 15 * 60_000;
+
+/** The result of a password sign-in attempt. */
+export type LoginResult =
+  | { status: 'ok'; user: User }
+  | { status: 'invalid' }
+  | { status: 'locked'; retryAfterMs: number };
 
 export function hashApiKey(apiKey: string): string {
   return createHash('sha256').update(apiKey, 'utf8').digest('hex');
@@ -90,16 +103,24 @@ function defaultLevelFor(memberLevel: UserAccessLevel | undefined): UserAccessLe
 /**
  * What a user may actually do in one company: null when it isn't assigned to
  * them, otherwise the per-company level capped by the user-level ceiling.
- * Admins reach every company with full access.
+ * Admins reach every company with full access. A client login is read-only
+ * on its assigned companies no matter what else is stored on it — that rule
+ * is checked first so no combination of other fields can widen it.
  */
 export function effectiveAccessLevel(
-  user: Pick<User, 'role' | 'accessLevel' | 'assignments'>,
+  user: Pick<User, 'role' | 'accessLevel' | 'assignments'> & { accountType?: UserAccountType },
   realmId: string
 ): UserAccessLevel | null {
-  if (user.role === 'admin') return 'read_write';
   const assignment = user.assignments.find((a) => a.realmId === realmId);
+  if (user.accountType === 'client') return assignment ? 'read' : null;
+  if (user.role === 'admin') return 'read_write';
   if (!assignment) return null;
   return user.accessLevel === 'read' ? 'read' : assignment.accessLevel;
+}
+
+/** Whether the user has the admin role AND is a kind of account that may hold it. */
+export function isAdminUser(user: Pick<User, 'role'> & { accountType?: UserAccountType }): boolean {
+  return user.role === 'admin' && user.accountType !== 'client';
 }
 
 function toUser(record: UserRecord, assignments: ClientAssignment[]): User {
@@ -109,6 +130,7 @@ function toUser(record: UserRecord, assignments: ClientAssignment[]): User {
     name: record.name,
     email: record.email,
     role: record.role,
+    accountType: record.account_type ?? 'staff',
     accessLevel: record.access_level,
     username: record.username,
     hasPassword: record.password_hash != null,
@@ -129,6 +151,9 @@ function toUser(record: UserRecord, assignments: ClientAssignment[]): User {
  * access; member-role users see only their assignments.
  */
 export class UserService {
+  /** Failed sign-ins per username. In memory: a restart clears every lock. */
+  private loginFailures = new Map<string, { fails: number; lockedUntil: number }>();
+
   constructor(
     private db: ConnectionDatabase,
     private encryptionKey: string
@@ -158,12 +183,30 @@ export class UserService {
     if (input.password && input.password.length < MIN_PASSWORD_LENGTH) {
       throw new Error(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`);
     }
+    const isClient = input.accountType === 'client';
+    if (isClient && input.role === 'admin') {
+      throw new Error('A client login cannot be an admin');
+    }
+    if (isClient && input.accessLevel === 'read_write') {
+      throw new Error('A client login is always read-only');
+    }
+    if (isClient) {
+      // Stored read-only as well as enforced read-only, so the data itself
+      // says the same thing the account type does.
+      input = {
+        ...input,
+        accessLevel: 'read',
+        assignments: (input.assignments ?? (input.realmIds ?? []).map((realmId) => ({ realmId, accessLevel: 'read' as const })))
+          .map((a) => ({ realmId: a.realmId, accessLevel: 'read' as const })),
+      };
+    }
 
     const apiKey = generateApiKey();
     const id = await this.db.insertUser({
       name,
       email: input.email?.trim() || null,
       role: input.role ?? 'member',
+      accountType: input.accountType ?? 'staff',
       accessLevel: input.accessLevel ?? 'read_write',
       username: input.username ? await this.prepareUsername(input.username) : null,
       passwordHash: input.password ? hashPassword(input.password) : null,
@@ -192,9 +235,22 @@ export class UserService {
   }
 
   async update(id: number, fields: UserUpdate): Promise<User | null> {
-    if (!(await this.db.getUserById(id))) return null;
+    const existing = await this.db.getUserById(id);
+    if (!existing) return null;
     if (fields.name !== undefined && !fields.name.trim()) {
       throw new Error('User name cannot be empty');
+    }
+    // A client login stays a read-only member whatever else is being edited,
+    // and turning a staff account into one drops it to read-only.
+    const becomesClient = (fields.accountType ?? existing.account_type) === 'client';
+    if (becomesClient) {
+      if ((fields.role ?? existing.role) === 'admin') {
+        throw new Error('A client login cannot be an admin');
+      }
+      if (fields.accessLevel === 'read_write') {
+        throw new Error('A client login is always read-only');
+      }
+      fields = { ...fields, accessLevel: 'read' };
     }
     let username: string | null | undefined = fields.username;
     if (typeof username === 'string' && username.trim()) {
@@ -231,8 +287,14 @@ export class UserService {
 
   /** Replace the user's assigned companies, each with an explicit access level. */
   async setAssignments(id: number, assignments: ClientAssignment[]): Promise<User | null> {
-    if (!(await this.db.getUserById(id))) return null;
-    await this.db.setUserAssignments(id, assignments);
+    const record = await this.db.getUserById(id);
+    if (!record) return null;
+    await this.db.setUserAssignments(
+      id,
+      record.account_type === 'client'
+        ? assignments.map((a) => ({ realmId: a.realmId, accessLevel: 'read' as const }))
+        : assignments
+    );
     return this.get(id);
   }
 
@@ -258,7 +320,12 @@ export class UserService {
     realmId: string,
     assignments: Array<{ userId: number; accessLevel: UserAccessLevel }>
   ): Promise<void> {
-    await this.db.setRealmAssignments(realmId, assignments);
+    const stored = [];
+    for (const a of assignments) {
+      const isClient = (await this.db.getUserById(a.userId))?.account_type === 'client';
+      stored.push({ userId: a.userId, accessLevel: isClient ? ('read' as const) : a.accessLevel });
+    }
+    await this.db.setRealmAssignments(realmId, stored);
   }
 
   /**
@@ -283,6 +350,7 @@ export class UserService {
    */
   async getApiKey(id: number): Promise<string | null> {
     const record = await this.db.getUserById(id);
+    if (record?.account_type === 'client') return null; // client logins have no usable key
     if (!record?.api_key_encrypted) return null;
     try {
       return decrypt(record.api_key_encrypted, this.encryptionKey);
@@ -323,6 +391,51 @@ export class UserService {
     }
     if (!verifyPassword(password, record.password_hash)) return null;
     return toUser(record, await this.db.getUserAssignments(record.id));
+  }
+
+  /**
+   * verifyLogin behind a brute-force lock, shared by every place a password
+   * can be tried (the dashboard and the connector sign-in page), so guesses
+   * against one don't get a fresh allowance on the other.
+   *
+   * After MAX_LOGIN_FAILURES consecutive failures the username is locked for
+   * LOGIN_LOCKOUT_MS, doubling with each further failure up to
+   * MAX_LOGIN_LOCKOUT_MS. A locked username is refused without checking the
+   * password — even the right one — and a successful sign-in clears the count.
+   */
+  async login(username: string, password: string): Promise<LoginResult> {
+    const key = normalizeUsername(username);
+    const entry = this.loginFailures.get(key);
+    const now = Date.now();
+    if (entry && entry.lockedUntil > now) {
+      return { status: 'locked', retryAfterMs: entry.lockedUntil - now };
+    }
+
+    const user = await this.verifyLogin(key, password);
+    if (user) {
+      this.loginFailures.delete(key);
+      return { status: 'ok', user };
+    }
+
+    const fails = (entry?.fails ?? 0) + 1;
+    const overBy = fails - MAX_LOGIN_FAILURES;
+    const lockMs = overBy < 0 ? 0 : Math.min(LOGIN_LOCKOUT_MS * 2 ** overBy, MAX_LOGIN_LOCKOUT_MS);
+    this.loginFailures.set(key, { fails, lockedUntil: lockMs ? now + lockMs : 0 });
+    // Usernames are attacker-chosen, so the table is bounded: once it grows
+    // large, entries that are neither locked nor recent are dropped.
+    if (this.loginFailures.size > 10_000) {
+      for (const [name, e] of this.loginFailures) {
+        if (e.lockedUntil <= now) this.loginFailures.delete(name);
+      }
+    }
+    // The attempt that trips the lock is still just "wrong password"; the
+    // lock is what the NEXT attempt meets.
+    return { status: 'invalid' };
+  }
+
+  /** Clear a username's failed sign-in count (an admin resetting the password). */
+  clearLoginFailures(username: string | null | undefined): void {
+    if (username) this.loginFailures.delete(normalizeUsername(username));
   }
 
   /** Issue a dashboard session for a user. The token is stored hashed. */
@@ -375,6 +488,10 @@ export class UserService {
     if (!apiKey || typeof apiKey !== 'string') return null;
     const record = await this.db.getUserByKeyHash(hashApiKey(apiKey));
     if (!record || record.status !== 'active') return null;
+    // Client logins sign in through the connector with a username and
+    // password. Their row has a key only because the column requires one; it
+    // is never accepted, so there is no long-lived secret to leak in a URL.
+    if (record.account_type === 'client') return null;
     // Keys created before retrievable storage have no encrypted copy; the
     // key itself just authenticated (hash matched), so store one now — after
     // this, the member can view their key from the dashboard too.

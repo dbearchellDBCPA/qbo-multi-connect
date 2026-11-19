@@ -2,6 +2,7 @@ import { ConnectionDatabase } from './db/index.js';
 import { TokenStore, CallbackServer, generateAuthUrl, RefreshDaemon } from './auth/index.js';
 import { QBOClient, ReportsAPI, JournalEntriesAPI, TransactionsAPI, AccountsAPI, CompanyAPI, BankingAPI, RecurringAPI, CdcAPI, DocumentsAPI, TimeActivityAPI, ListsAPI, AttachmentsAPI, BatchAPI } from './api/index.js';
 import { UserService } from './users.js';
+import { ActivityLog } from './activity.js';
 import { UploadTokenService } from './upload-tokens.js';
 import { OAuthServerService } from './oauth-server.js';
 import { ConnectionAlerts } from './alerts/connection-alerts.js';
@@ -50,6 +51,7 @@ export class QBOManager {
   public readonly uploadTokens: UploadTokenService;
   public readonly oauth: OAuthServerService;
   public readonly users: UserService;
+  public readonly activity: ActivityLog;
   public readonly alerts: ConnectionAlerts;
 
   constructor(config: QBOManagerConfig) {
@@ -90,6 +92,7 @@ export class QBOManager {
     this.uploadTokens = new UploadTokenService(this.db);
     this.oauth = new OAuthServerService(this.db);
     this.users = new UserService(this.db, config.encryptionKey);
+    this.activity = new ActivityLog(this.db);
 
     // Email alerts for broken connections: off unless configured. The
     // transport is injectable so tests never reach the network.
@@ -221,6 +224,7 @@ export class QBOManager {
 export type { Connection, OAuthConfig, User, NewUser, UserUpdate, UserRole, UserStatus } from './db/models.js';
 export { QBOError } from './api/index.js';
 export { UserService, generateApiKey, hashApiKey } from './users.js';
+export { ActivityLog } from './activity.js';
 export { parseAlertsConfig } from './alerts/config.js';
 export type { AlertsConfig } from './alerts/config.js';
 export type { EmailSender, OutboundEmail } from './alerts/email.js';
