@@ -101,7 +101,29 @@ export const BRAND_BASE = `
   .brand-logo i:nth-child(2) { height:12px; background:var(--accent-400); }
   .brand-logo i:nth-child(3) { height:17px; background:#ffffff; }
   .brand-name { font-weight:650; font-size:15px; color:var(--text); }
+  /* A firm's own logo, in place of the mark. On a dark page it sits on a
+     white plate, since most logos are drawn for a light background. */
+  .brand-img { display:block; height:40px; width:auto; max-width:240px; object-fit:contain; flex-shrink:0; }
+  @media (prefers-color-scheme: dark) {
+    .brand-img { background:#ffffff; border-radius:8px; padding:4px 8px; box-sizing:content-box; }
+  }
 `;
 
 /** The three-bar brand mark, as markup for the `.brand-logo` rules above. */
 export const BRAND_MARK = '<span class="brand-logo"><i></i><i></i><i></i></span>';
+
+function escapeAttr(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+/**
+ * The brand line at the top of a client-facing page: the firm's logo when it
+ * has uploaded one (alone if it is a wordmark, beside the name otherwise),
+ * else the app's mark beside the name.
+ */
+export function brandLine(firm: { displayName: string; logo?: { path: string; wide: boolean } | null }): string {
+  const name = `<span class="brand-name">${escapeAttr(firm.displayName)}</span>`;
+  if (!firm.logo) return `${BRAND_MARK}${name}`;
+  const image = `<img class="brand-img" src="${escapeAttr(firm.logo.path)}" alt="${firm.logo.wide ? escapeAttr(firm.displayName) : ''}">`;
+  return firm.logo.wide ? image : `${image}${name}`;
+}

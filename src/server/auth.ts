@@ -1,4 +1,5 @@
 import { timingSafeEqual } from 'node:crypto';
+import { needsAcknowledgment } from '../client-terms.js';
 import type { QBOManager } from '../index.js';
 import type { Connection, User } from '../db/models.js';
 import { effectiveAccessLevel, isAdminUser } from '../users.js';
@@ -35,6 +36,12 @@ export interface AuthScope {
   allWrite: boolean;
   /** For members: the assigned companies they may change. */
   writeRealmIds: Set<string>;
+  /**
+   * A client login that has not yet accepted the current "before you
+   * connect" points. It may sign in, but the connector gives it no data
+   * until it has — whichever kind of token it presents.
+   */
+  mustAcknowledge?: boolean;
 }
 
 export function isRealmAllowed(scope: AuthScope, realmId: string): boolean {
@@ -64,6 +71,7 @@ export function scopeForUser(user: User): AuthScope {
     canWrite: isAdmin || writeRealmIds.size > 0,
     allWrite: isAdmin,
     writeRealmIds,
+    mustAcknowledge: needsAcknowledgment(user),
   };
 }
 

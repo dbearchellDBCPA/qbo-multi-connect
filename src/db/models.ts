@@ -128,6 +128,8 @@ export interface UserRecord {
   invite_token_hash: string | null;
   invite_expires_at: string | null;
   invite_accepted_at: string | null;
+  risks_ack_at: string | null;
+  risks_ack_version: string | null;
 }
 
 /**
@@ -157,6 +159,9 @@ export interface User {
   inviteExpiresAt: Date | null;
   /** When they last accepted an invitation and chose their password. */
   inviteAcceptedAt: Date | null;
+  /** When they accepted the "before you connect" points (client logins), and which version. */
+  acknowledgedAt: Date | null;
+  acknowledgedVersion: string | null;
   realmIds: string[];
   /**
    * Access level per assigned company, as stored. The user-level accessLevel
@@ -280,4 +285,23 @@ export interface ConnectionAlertRecord {
   recipients: string;
   provider_id: string | null;
   sent_at: string;
+}
+
+/** Where a request for access stands. */
+export type AccessRequestStatus = 'pending' | 'approved' | 'declined';
+
+/** A row of access_requests, as stored. */
+export interface AccessRequestRecord {
+  id: number;
+  name: string;
+  email: string;
+  email_key: string;
+  company: string;
+  status: AccessRequestStatus;
+  created_at: string;
+  notified_at: string | null;
+  decided_at: string | null;
+  decided_by: string | null;
+  user_id: number | null;
+  realm_id: string | null;
 }

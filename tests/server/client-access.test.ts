@@ -389,6 +389,9 @@ describe('client logins — over the connector, REST, and the activity log', () 
         state: 's',
         username,
         password,
+        // These logins were given a password directly, so the connector asks
+        // them to accept the "before you connect" points; tick the box.
+        agree: 'on',
       },
     });
     if (authorize.statusCode !== 302) return { authorize, accessToken: null as string | null };

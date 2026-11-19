@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import type {
+  AccessRequestRecord,
+  AccessRequestStatus,
   ActivityEntry,
   ConnectionAlertRecord,
   ConnectionRecord,
@@ -66,6 +68,8 @@ export class ConnectionDatabase {
     if (!has('invite_token_hash')) this.db.exec('ALTER TABLE users ADD COLUMN invite_token_hash TEXT');
     if (!has('invite_expires_at')) this.db.exec('ALTER TABLE users ADD COLUMN invite_expires_at DATETIME');
     if (!has('invite_accepted_at')) this.db.exec('ALTER TABLE users ADD COLUMN invite_accepted_at DATETIME');
+    if (!has('risks_ack_at')) this.db.exec('ALTER TABLE users ADD COLUMN risks_ack_at DATETIME');
+    if (!has('risks_ack_version')) this.db.exec('ALTER TABLE users ADD COLUMN risks_ack_version TEXT');
     // Client logins. Everyone already in the table is firm staff.
     if (!has('account_type')) {
       this.db.exec(
@@ -395,6 +399,11 @@ export class ConnectionDatabase {
   }
 
   /** The login an unexpired invitation token belongs to, if any. */
+  /** Record that a login accepted the "before you connect" points. */
+  async setUserAcknowledgment(id: number, version: string): Promise<void> {
+    this.db.prepare("UPDATE users SET risks_ack_at = datetime('now'), risks_ack_version = ? WHERE id = ?").run(version, id);
+  }
+
   async getUserByInviteHash(tokenHash: string): Promise<UserRecord | null> {
     const row = this.db
       .prepare("SELECT * FROM users WHERE invite_token_hash = ? AND invite_expires_at > datetime('now')")
@@ -534,6 +543,101 @@ export class ConnectionDatabase {
          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`
       )
       .run(key, value);
+  }
+
+  // ── Requests for access ──────────────────────────────────────────────────
+
+  async insertAccessRequest(row: { name: string; email: string; emailKey: string; company: string; at: string }): Promise<number> {
+    const result = this.db
+      .prepare('INSERT INTO access_requests (name, email, email_key, company, created_at) VALUES (?, ?, ?, ?, ?)')
+      .run(row.name, row.email, row.emailKey, row.company, row.at);
+    return Number(result.lastInsertRowid);
+  }
+
+  async getAccessRequest(id: number): Promise<AccessRequestRecord | null> {
+    return (this.db.prepare('SELECT * FROM access_requests WHERE id = ?').get(id) as AccessRequestRecord | undefined) ?? null;
+  }
+
+  async getPendingAccessRequestByEmail(emailKey: string): Promise<AccessRequestRecord | null> {
+    return (
+      (this.db
+        .prepare("SELECT * FROM access_requests WHERE email_key = ? AND status = 'pending' ORDER BY id LIMIT 1")
+        .get(emailKey) as AccessRequestRecord | undefined) ?? null
+    );
+  }
+
+  async listAccessRequests(status: AccessRequestStatus | 'decided', limit: number): Promise<AccessRequestRecord[]> {
+    const sql =
+      status === 'decided'
+        ? "SELECT * FROM access_requests WHERE status != 'pending' ORDER BY decided_at DESC, id DESC LIMIT ?"
+        : 'SELECT * FROM access_requests WHERE status = ? ORDER BY id LIMIT ?';
+    const args = status === 'decided' ? [limit] : [status, limit];
+    return this.db.prepare(sql).all(...args) as AccessRequestRecord[];
+  }
+
+  async countAccessRequests(filter: { status?: AccessRequestStatus; createdSince?: string } = {}): Promise<number> {
+    const where: string[] = [];
+    const args: string[] = [];
+    if (filter.status) {
+      where.push('status = ?');
+      args.push(filter.status);
+    }
+    if (filter.createdSince) {
+      where.push('created_at >= ?');
+      args.push(filter.createdSince);
+    }
+    const row = this.db
+      .prepare(`SELECT COUNT(*) AS n FROM access_requests ${where.length ? `WHERE ${where.join(' AND ')}` : ''}`)
+      .get(...args) as { n: number };
+    return row.n;
+  }
+
+  /**
+   * Move a request out of 'pending'. Conditional, so two admins deciding at
+   * the same moment cannot both win: returns whether this call did.
+   */
+  async decideAccessRequest(id: number, status: 'approved' | 'declined', by: string, at: string): Promise<boolean> {
+    return (
+      this.db
+        .prepare("UPDATE access_requests SET status = ?, decided_by = ?, decided_at = ? WHERE id = ? AND status = 'pending'")
+        .run(status, by, at, id).changes === 1
+    );
+  }
+
+  /** Undo an approval that could not be carried out, so it can be tried again. */
+  async reopenAccessRequest(id: number): Promise<void> {
+    this.db
+      .prepare("UPDATE access_requests SET status = 'pending', decided_by = NULL, decided_at = NULL WHERE id = ? AND status = 'approved' AND user_id IS NULL")
+      .run(id);
+  }
+
+  /** Record which login and company an approved request became. */
+  async completeAccessRequest(id: number, userId: number, realmId: string): Promise<void> {
+    this.db.prepare('UPDATE access_requests SET user_id = ?, realm_id = ? WHERE id = ?').run(userId, realmId, id);
+  }
+
+  async declineAllPendingAccessRequests(by: string, at: string): Promise<number> {
+    return this.db
+      .prepare("UPDATE access_requests SET status = 'declined', decided_by = ?, decided_at = ? WHERE status = 'pending'")
+      .run(by, at).changes;
+  }
+
+  async listUnnotifiedAccessRequests(limit: number): Promise<AccessRequestRecord[]> {
+    return this.db
+      .prepare("SELECT * FROM access_requests WHERE status = 'pending' AND notified_at IS NULL ORDER BY id LIMIT ?")
+      .all(limit) as AccessRequestRecord[];
+  }
+
+  async markAccessRequestsNotified(ids: number[], at: string): Promise<void> {
+    const mark = this.db.prepare('UPDATE access_requests SET notified_at = ? WHERE id = ? AND notified_at IS NULL');
+    this.db.transaction(() => ids.forEach((id) => mark.run(at, id)))();
+  }
+
+  /** Drop old history: handled requests, and pending ones nobody acted on. */
+  async purgeAccessRequests(decidedBefore: string, pendingBefore: string): Promise<number> {
+    return this.db
+      .prepare("DELETE FROM access_requests WHERE (status != 'pending' AND decided_at < ?) OR (status = 'pending' AND created_at < ?)")
+      .run(decidedBefore, pendingBefore).changes;
   }
 
   // ── Activity log ─────────────────────────────────────────────────────────

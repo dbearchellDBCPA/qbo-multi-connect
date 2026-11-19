@@ -89,19 +89,23 @@ describe('inviting a client by link', () => {
   const reinvite = (id: number | string, headers: Record<string, string> = asMaster) =>
     app.inject({ method: 'POST', url: `/api/users/${id}/invite`, headers });
   const openLink = (path: string) => app.inject({ method: 'GET', url: path, headers: HOST });
-  const accept = (path: string, password = CHOSEN, confirm = password) =>
-    app.inject({ method: 'POST', url: path, headers: { ...HOST, 'content-type': 'application/x-www-form-urlencoded' }, payload: new URLSearchParams({ password, confirm }).toString() });
+  /** Submit the accept form the way a person would: both password boxes, and the box that accepts the points. */
+  const accept = (path: string, password = CHOSEN, confirm = password, extra: Record<string, string> = { agree: 'on' }) =>
+    app.inject({ method: 'POST', url: path, headers: { ...HOST, 'content-type': 'application/x-www-form-urlencoded' }, payload: new URLSearchParams({ password, confirm, ...extra }).toString() });
 
+  /** The response to the most recent connector sign-in, for looking at the page it showed. */
+  let lastSignInPage: Awaited<ReturnType<FastifyInstance['inject']>>;
   /** Sign in through the connector the way an AI assistant would. Returns the access token, or null. */
-  async function connectorSignIn(username: string, password: string): Promise<string | null> {
+  async function connectorSignIn(username: string, password: string, extra: Record<string, string> = {}): Promise<string | null> {
     const client = (await app.inject({ method: 'POST', url: '/oauth/register', headers: HOST, payload: { client_name: 'Claude', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'none' } })).json();
     const verifier = randomBytes(32).toString('base64url');
     const authorize = await app.inject({
       method: 'POST',
       url: '/oauth/authorize',
       headers: HOST,
-      payload: { client_id: client.client_id, redirect_uri: REDIRECT, response_type: 'code', code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256', state: 's', username, password },
+      payload: { client_id: client.client_id, redirect_uri: REDIRECT, response_type: 'code', code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256', state: 's', username, password, ...extra },
     });
+    lastSignInPage = authorize;
     if (authorize.statusCode !== 302) return null;
     const code = new URL(authorize.headers.location as string).searchParams.get('code')!;
     const token = await app.inject({ method: 'POST', url: '/oauth/token', headers: HOST, payload: { grant_type: 'authorization_code', client_id: client.client_id, code, code_verifier: verifier, redirect_uri: REDIRECT } });
@@ -367,7 +371,148 @@ describe('inviting a client by link', () => {
     const link = sender.lastLinkPath();
     await app.inject({ method: 'POST', url: `/api/users/${id}/password`, headers: asMaster, payload: { password: 'admin-chose-this-1' } });
     expect((await accept(link)).statusCode).toBe(410);
-    expect(await connectorSignIn(EMAIL, 'admin-chose-this-1')).toBeTruthy();
+    // They never went through the link, so the connector asks them to accept the points first.
+    expect(await connectorSignIn(EMAIL, 'admin-chose-this-1', { agree: 'on' })).toBeTruthy();
+  });
+
+  // ── Before you connect ─────────────────────────────────────────────────────
+
+  it('asks the client to accept a short list of what is theirs to manage, and records that they did', async () => {
+    const id = (await invite()).json().user.id;
+    const link = sender.lastLinkPath();
+    const form = await openLink(link);
+    expect(form.body).toContain('Before you connect');
+    expect(form.body).toContain('may be used to train its AI'); // the point about AI providers
+    expect(form.body).toContain('read the whole QuickBooks file');
+    expect(form.body).toContain('AI can be wrong');
+    expect(form.body).toContain('<input type="checkbox" name="agree" value="on" required>');
+    expect(form.body).toContain('href="/security"');
+
+    // Without the box: no password, and the link is still good.
+    for (const extra of [{}, { agree: '' }, { agree: 'no' }]) {
+      const refused = await accept(link, CHOSEN, CHOSEN, extra);
+      expect(refused.statusCode).toBe(400);
+      expect(refused.body).toContain('tick the box');
+    }
+    expect(await connectorSignIn(EMAIL, CHOSEN)).toBeNull();
+    expect((await qbo.users.get(id))!).toMatchObject({ hasPassword: false, acknowledgedAt: null, acknowledgedVersion: null });
+
+    expect((await accept(link)).statusCode).toBe(200);
+    const accepted = (await qbo.users.get(id))!;
+    expect(accepted.acknowledgedVersion).toBe('1');
+    expect(accepted.acknowledgedAt).toBeInstanceOf(Date);
+    // The admin can see it.
+    const listed = (await app.inject({ method: 'GET', url: '/api/users', headers: asMaster })).json().find((u: any) => u.id === id);
+    expect(listed.acknowledgedVersion).toBe('1');
+    // And having accepted, they connect without being asked again.
+    expect(await connectorSignIn(EMAIL, CHOSEN)).toBeTruthy();
+  });
+
+  it('a client login given a password directly accepts the same points the first time it connects', async () => {
+    const created = (await app.inject({ method: 'POST', url: '/api/users', headers: asMaster, payload: { name: 'Typed In', email: 'typed@client.example', username: 'typed@client.example', password: 'admin-chose-this-1', accountType: 'client', clients: [{ realmId: 'realm-1' }] } })).json();
+    const id = created.user.id;
+
+    // The right password alone is not enough: the page comes back with the points.
+    expect(await connectorSignIn('typed@client.example', 'admin-chose-this-1')).toBeNull();
+    expect(lastSignInPage.statusCode).toBe(200);
+    expect(lastSignInPage.headers.location).toBeUndefined(); // nothing was issued
+    expect(lastSignInPage.body).toContain('One more step before you connect');
+    expect(lastSignInPage.body).toContain('Before you connect');
+    expect(lastSignInPage.body).toContain('name="agree"');
+    expect(lastSignInPage.body).toContain('value="typed@client.example"'); // their username is kept; the password is not
+    expect(lastSignInPage.body).not.toContain('admin-chose-this-1');
+    expect((await qbo.users.get(id))!.acknowledgedAt).toBeNull();
+
+    // Ticking the box does not get anyone past a wrong password.
+    expect(await connectorSignIn('typed@client.example', 'wrong-password-1', { agree: 'on' })).toBeNull();
+    expect(lastSignInPage.statusCode).toBe(401);
+    expect((await qbo.users.get(id))!.acknowledgedAt).toBeNull();
+
+    // Both together: connected, and recorded.
+    expect(await connectorSignIn('typed@client.example', 'admin-chose-this-1', { agree: 'on' })).toBeTruthy();
+    expect((await qbo.users.get(id))!.acknowledgedVersion).toBe('1');
+    // Not asked again…
+    expect(await connectorSignIn('typed@client.example', 'admin-chose-this-1')).toBeTruthy();
+    // …until the points themselves change.
+    await (qbo as any).db.setUserAcknowledgment(id, '0');
+    expect(await connectorSignIn('typed@client.example', 'admin-chose-this-1')).toBeNull();
+    expect(lastSignInPage.body).toContain('One more step before you connect');
+  });
+
+  it('an assistant that is already connected cannot renew its way past the points', async () => {
+    const created = (await app.inject({ method: 'POST', url: '/api/users', headers: asMaster, payload: { name: 'Typed In', email: 'typed@client.example', username: 'typed@client.example', password: 'admin-chose-this-1', accountType: 'client', clients: [{ realmId: 'realm-1' }] } })).json();
+    const id = created.user.id;
+    // Connected before the points existed (or before they changed): tokens in hand, nothing accepted.
+    const client = (await app.inject({ method: 'POST', url: '/oauth/register', headers: HOST, payload: { client_name: 'Claude', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'none' } })).json();
+    const verifier = randomBytes(32).toString('base64url');
+    const code = await qbo.oauth.createAuthCode({ clientId: client.client_id, userId: id, redirectUri: REDIRECT, codeChallenge: createHash('sha256').update(verifier).digest('base64url'), scope: null, resource: null });
+    const first = (await app.inject({ method: 'POST', url: '/oauth/token', headers: HOST, payload: { grant_type: 'authorization_code', client_id: client.client_id, code, code_verifier: verifier, redirect_uri: REDIRECT } })).json();
+    expect(await tokenWorks(first.access_token)).toBe(true);
+    const renew = (refresh_token: string) => app.inject({ method: 'POST', url: '/oauth/token', headers: HOST, payload: { grant_type: 'refresh_token', client_id: client.client_id, refresh_token } });
+
+    const refused = await renew(first.refresh_token);
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json().error).toBe('invalid_grant'); // the assistant asks them to sign in again
+    expect(await tokenWorks(first.access_token)).toBe(false); // and what it held is gone
+
+    // They sign in, accept, and from then on renewing works as usual.
+    const token = await connectorSignIn('typed@client.example', 'admin-chose-this-1', { agree: 'on' });
+    expect(token).toBeTruthy();
+    expect((await qbo.users.get(id))!.acknowledgedVersion).toBe('1');
+    expect(await tokenWorks(token!)).toBe(true);
+  });
+
+  it('gives a client login no data until it has accepted, whatever token it holds', async () => {
+    await app.inject({ method: 'POST', url: '/api/users', headers: asMaster, payload: { name: 'Typed In', email: 'typed@client.example', username: 'typed@client.example', password: 'admin-chose-this-1', accountType: 'client', clients: [{ realmId: 'realm-1' }] } });
+    // A dashboard session is a real token for this login — and still not a way round the points.
+    const session = (await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'typed@client.example', password: 'admin-chose-this-1' } })).json().token;
+    const callConnector = () =>
+      app.inject({
+        method: 'POST',
+        url: '/mcp',
+        headers: { ...HOST, authorization: `Bearer ${session}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
+        payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      });
+    const before = await callConnector();
+    expect(before.statusCode).toBe(401);
+    expect(before.headers['www-authenticate']).toContain('resource_metadata'); // "sign in", which is where they accept
+
+    expect(await connectorSignIn('typed@client.example', 'admin-chose-this-1', { agree: 'on' })).toBeTruthy();
+    expect((await callConnector()).statusCode).not.toBe(401);
+  });
+
+  it('renewing is untouched for a client who has accepted', async () => {
+    await invite();
+    await accept(sender.lastLinkPath());
+    for (const [username, password] of [[EMAIL, CHOSEN]] as const) {
+      const client = (await app.inject({ method: 'POST', url: '/oauth/register', headers: HOST, payload: { client_name: 'Claude', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'none' } })).json();
+      const verifier = randomBytes(32).toString('base64url');
+      const authorize = await app.inject({ method: 'POST', url: '/oauth/authorize', headers: HOST, payload: { client_id: client.client_id, redirect_uri: REDIRECT, response_type: 'code', code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256', state: 's', username, password } });
+      const code = new URL(authorize.headers.location as string).searchParams.get('code')!;
+      const tokens = (await app.inject({ method: 'POST', url: '/oauth/token', headers: HOST, payload: { grant_type: 'authorization_code', client_id: client.client_id, code, code_verifier: verifier, redirect_uri: REDIRECT } })).json();
+      const renewed = await app.inject({ method: 'POST', url: '/oauth/token', headers: HOST, payload: { grant_type: 'refresh_token', client_id: client.client_id, refresh_token: tokens.refresh_token } });
+      expect(renewed.statusCode).toBe(200);
+      expect(await tokenWorks(renewed.json().access_token)).toBe(true);
+    }
+  });
+
+  it('never asks the firm\'s own team', async () => {
+    await app.inject({ method: 'POST', url: '/api/users', headers: asMaster, payload: { name: 'Staff Person', username: 'staff.person', password: 'a-staff-password-1', realmIds: ['realm-1'] } });
+    expect(await connectorSignIn('staff.person', 'a-staff-password-1')).toBeTruthy();
+    expect(lastSignInPage.statusCode).toBe(302);
+  });
+
+  it('explains security and risks on a public page in the firm\'s name', async () => {
+    const res = await app.inject({ method: 'GET', url: '/security', headers: HOST });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('Example CPA');
+    expect(res.body).toContain('How the connection is protected');
+    expect(res.body).toContain('Read-only.');
+    expect(res.body).toContain('AI providers and training on your data');
+    expect(res.body).toContain('may be used to train its AI');
+    expect(res.body).not.toMatch(/<script/i);
+    expect(res.body).not.toMatch(/(src|href)="https?:\/\//i);
+    expect(res.headers['x-frame-options']).toBe('DENY');
   });
 
   // ── Inviting again (also: "I forgot my password") ──────────────────────────
@@ -580,6 +725,95 @@ describe('inviting a client by link', () => {
     expect(cleared.json()).toMatchObject({ setupVideoUrl: null, setupVideoEmbedded: false });
     await reinvite((await qbo.users.list())[0].id);
     expect(sender.sent[sender.sent.length - 1].text).not.toContain('Prefer to watch');
+  });
+
+  // A 1×1 PNG, and the same bytes stretched into a "wide" header for the wordmark case.
+  const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+  const dataUrl = (bytes: Buffer, type = 'image/png') => `data:${type};base64,${bytes.toString('base64')}`;
+  const putLogo = (payload: Record<string, unknown>, headers: Record<string, string> = asMaster) =>
+    app.inject({ method: 'PUT', url: '/api/branding/logo', headers, payload });
+
+  it('a logo uploaded in the dashboard heads the pages a client sees and the invitation email', async () => {
+    // Before: the app's own mark, and nothing to fetch.
+    expect((await app.inject({ method: 'GET', url: '/brand/logo', headers: HOST })).statusCode).toBe(404);
+
+    const set = await putLogo({ dataUrl: dataUrl(PNG) });
+    expect(set.statusCode).toBe(200);
+    const logoUrl = set.json().logoUrl as string;
+    expect(logoUrl).toMatch(/^\/brand\/logo\?v=[0-9a-f]{12}$/);
+
+    // Served as exactly what it is, to anyone, and safe to keep.
+    const served = await app.inject({ method: 'GET', url: logoUrl, headers: HOST });
+    expect(served.statusCode).toBe(200);
+    expect(served.headers['content-type']).toBe('image/png');
+    expect(served.headers['x-content-type-options']).toBe('nosniff');
+    expect(served.headers['content-security-policy']).toContain("default-src 'none'");
+    expect(served.headers['cache-control']).toContain('immutable');
+    expect(served.rawPayload.equals(PNG)).toBe(true);
+    expect((await app.inject({ method: 'GET', url: '/brand/logo', headers: HOST })).headers['cache-control']).toBe('public, max-age=300');
+
+    await invite();
+    const email = sender.sent[0];
+    expect(email.html).toContain(`<img src="https://qbo.example-cpa.com${logoUrl}" alt="Example CPA"`); // a full address, for a mail client
+    const form = await openLink(sender.lastLinkPath());
+    expect(form.body).toContain(`<img class="brand-img" src="${logoUrl}" alt="">`); // a square mark sits beside the name
+    expect(form.body).toContain('<span class="brand-name">Example CPA</span>');
+    expect(form.body).not.toContain('class="brand-logo"');
+    expect(form.body).not.toMatch(/(src|href)="https?:\/\//i); // still nothing from anywhere else
+
+    // The sign-in page an assistant opens carries it too.
+    const client = (await app.inject({ method: 'POST', url: '/oauth/register', headers: HOST, payload: { client_name: 'Claude', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'none' } })).json();
+    const signIn = await app.inject({ method: 'GET', url: `/oauth/authorize?client_id=${client.client_id}&redirect_uri=${encodeURIComponent(REDIRECT)}&response_type=code&code_challenge=${'x'.repeat(43)}&code_challenge_method=S256`, headers: HOST });
+    expect(signIn.body).toContain(`<img class="brand-img" src="${logoUrl}"`);
+
+    // A wordmark already spells the name, so it stands alone.
+    const wide = await putLogo({ dataUrl: dataUrl(Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(64)]), 'image/jpeg'), width: 600, height: 120 });
+    const widePage = await openLink(sender.lastLinkPath());
+    expect(widePage.body).toContain(`<img class="brand-img" src="${wide.json().logoUrl}" alt="Example CPA">`);
+    expect(widePage.body).not.toContain('<span class="brand-name">');
+    expect(wide.json().logoUrl).not.toBe(logoUrl); // a new image gets a new address
+
+    // Removing it brings the app's mark back.
+    const removed = await app.inject({ method: 'DELETE', url: '/api/branding/logo', headers: asMaster });
+    expect(removed.json().logoUrl).toBeNull();
+    expect((await app.inject({ method: 'GET', url: logoUrl, headers: HOST })).statusCode).toBe(404);
+    expect((await openLink(sender.lastLinkPath())).body).toContain('class="brand-logo"');
+    await reinvite((await qbo.users.list())[0].id);
+    expect(sender.sent[sender.sent.length - 1].html).not.toContain('<img');
+  });
+
+  it('only takes a real image of a sensible size as a logo, and only from an admin', async () => {
+    const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>');
+    const refused: Array<[string, unknown]> = [
+      ['an SVG', dataUrl(svg, 'image/svg+xml')],
+      ['an SVG calling itself a PNG', dataUrl(svg)],
+      ['a web page calling itself a PNG', dataUrl(Buffer.from('<html><script>alert(1)</script></html>'))],
+      ['too large', dataUrl(Buffer.concat([PNG, Buffer.alloc(300 * 1024)]))],
+      ['empty', 'data:image/png;base64,'],
+      ['not a data URL', 'https://example.com/logo.png'],
+      ['not text', 42],
+      ['missing', undefined],
+    ];
+    for (const [what, value] of refused) {
+      const res = await putLogo({ dataUrl: value });
+      expect(res.statusCode, what).toBe(400);
+    }
+    expect((await app.inject({ method: 'GET', url: '/brand/logo', headers: HOST })).statusCode).toBe(404);
+
+    // What it is served as comes from its bytes, never from what the upload claimed.
+    await putLogo({ dataUrl: dataUrl(PNG, 'text/html') });
+    expect((await app.inject({ method: 'GET', url: '/brand/logo', headers: HOST })).headers['content-type']).toBe('image/png');
+
+    // Neither a stranger nor a signed-in client can change it.
+    await invite();
+    await accept(sender.lastLinkPath());
+    const login = (await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: EMAIL, password: CHOSEN } })).json().token;
+    expect(login).toBeTruthy();
+    for (const headers of [HOST, { ...HOST, authorization: `Bearer ${login}` }]) {
+      expect((await putLogo({ dataUrl: dataUrl(PNG) }, headers)).statusCode).toBeGreaterThanOrEqual(401);
+      expect((await app.inject({ method: 'DELETE', url: '/api/branding/logo', headers })).statusCode).toBeGreaterThanOrEqual(401);
+    }
+    expect((await app.inject({ method: 'GET', url: '/brand/logo', headers: HOST })).statusCode).toBe(200);
   });
 
   it('refuses a video link that is not a plain https address, and saves nothing when it does', async () => {

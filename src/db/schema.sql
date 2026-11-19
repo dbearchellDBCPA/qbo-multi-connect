@@ -58,7 +58,11 @@ CREATE TABLE IF NOT EXISTS users (
   invite_sent_at DATETIME,
   invite_token_hash TEXT,
   invite_expires_at DATETIME,
-  invite_accepted_at DATETIME
+  invite_accepted_at DATETIME,
+  -- When a client login accepted the "before you connect" points, and which
+  -- version of them. NULL until they have.
+  risks_ack_at DATETIME,
+  risks_ack_version TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_api_key_hash ON users(api_key_hash);
@@ -175,6 +179,30 @@ CREATE TABLE IF NOT EXISTS app_settings (
   value TEXT NOT NULL,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+-- ── Requests for access ──────────────────────────────────────────────────────
+-- What someone typed into the public request page. A row grants nothing: it
+-- only becomes a login when an admin approves it, and the invitation that
+-- follows goes to the address on the row. Timestamps are ISO-8601 strings
+-- written by the server. user_id and realm_id have no foreign keys so the
+-- record of who was approved for what survives a login being removed.
+CREATE TABLE IF NOT EXISTS access_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  email TEXT NOT NULL,
+  email_key TEXT NOT NULL,
+  company TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'declined')),
+  created_at TEXT NOT NULL,
+  notified_at TEXT,
+  decided_at TEXT,
+  decided_by TEXT,
+  user_id INTEGER,
+  realm_id TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_access_requests_status ON access_requests(status, id);
+CREATE INDEX IF NOT EXISTS idx_access_requests_email ON access_requests(email_key, status);
 
 -- ── Activity log ─────────────────────────────────────────────────────────────
 -- One row per MCP tool call and per sign-in: who, which tool, which company,

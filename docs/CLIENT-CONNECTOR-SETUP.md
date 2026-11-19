@@ -127,6 +127,8 @@ or ask your assistant to draft the request and forward it.
   your business.
 - **Only add the connector using the address above.** We will never ask for
   your password by email or phone.
+- **Read the fuller explanation** at `[SIGN-IN ADDRESS]/security` — how the
+  connection is protected, and what to check with your AI provider.
 
 To change your password, sign in at `[SIGN-IN ADDRESS]` with your email
 address and password, open **Settings**, and choose **Change password**.

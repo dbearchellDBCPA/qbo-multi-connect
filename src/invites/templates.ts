@@ -43,6 +43,10 @@ export interface InvitationDetails {
   canReply: boolean;
   /** The firm's walkthrough video, when it has recorded one. */
   videoUrl?: string | null;
+  /** The full address of the firm's logo, when it has uploaded one. */
+  logoUrl?: string | null;
+  /** The full address of the page explaining security and what is theirs to manage. */
+  securityUrl?: string | null;
 }
 
 // These strings are dropped into style="…" attributes: no double quotes inside.
@@ -69,8 +73,9 @@ function formatDay(date: Date): string {
 }
 
 export function renderClientInvitationEmail(details: InvitationDetails): RenderedEmail {
-  const { firmName, name, username, acceptUrl, expiresAt, connectorUrl, companyNames, canReply, videoUrl } = details;
+  const { firmName, name, username, acceptUrl, expiresAt, connectorUrl, companyNames, canReply, videoUrl, logoUrl, securityUrl } = details;
   const videoLine = 'Prefer to watch? This short video walks through it:';
+  const securityLine = 'How this is protected, and what to check in your AI provider\'s privacy settings:';
   const company = companyPhrase(companyNames);
   const subject = `${firmName} invited you to connect your AI assistant to QuickBooks`;
   const intro =
@@ -113,6 +118,7 @@ export function renderClientInvitationEmail(details: InvitationDetails): Rendere
     '',
     'GOOD TO KNOW',
     ...GOOD_TO_KNOW.map((line) => `- ${line}`),
+    ...(securityUrl ? [`- ${securityLine} ${securityUrl}`] : []),
     '',
     contact,
     unexpected,
@@ -122,8 +128,12 @@ export function renderClientInvitationEmail(details: InvitationDetails): Rendere
     `<ol style="${STYLE.list}">${steps.map((s) => `<li style="${STYLE.li}">${rich(s)}</li>`).join('')}</ol>`;
   const ul = (items: string[]) =>
     `<ul style="${STYLE.list}">${items.map((s) => `<li style="${STYLE.li}">${escapeHtml(s)}</li>`).join('')}</ul>`;
+  // Mail clients often hide images until asked; the alt text carries the name.
+  const logo = logoUrl
+    ? `<p style="margin:0 0 18px;"><img src="${escapeHtml(logoUrl)}" alt="${escapeHtml(firmName)}" height="40" style="display:block;height:40px;width:auto;max-width:240px;border:0;"></p>`
+    : '';
   const html = `<!doctype html><html><body style="${STYLE.body}"><div style="${STYLE.card}">
-<h1 style="${STYLE.h1}">Connect your AI assistant to your QuickBooks data</h1>
+${logo}<h1 style="${STYLE.h1}">Connect your AI assistant to your QuickBooks data</h1>
 <p style="${STYLE.p}">Hello ${escapeHtml(name)},</p>
 <p style="${STYLE.p}">${escapeHtml(intro)}</p>
 <h2 style="${STYLE.h2}">Step 1 — Accept and choose your password</h2>
@@ -148,6 +158,7 @@ ${ol(CHATGPT_STEPS)}
 ${ul(TRY_ASKING)}
 <h2 style="${STYLE.h2}">Good to know</h2>
 ${ul(GOOD_TO_KNOW)}
+${securityUrl ? `<p style="${STYLE.p}">${escapeHtml(securityLine)} <a href="${escapeHtml(securityUrl)}" style="color:#117c75;font-weight:600;">Security and what to keep in mind</a></p>` : ''}
 <p style="${STYLE.muted}">${escapeHtml(contact)} ${escapeHtml(unexpected)} Sent by ${escapeHtml(firmName)}.</p>
 </div></body></html>`;
 

@@ -192,6 +192,8 @@ function toUser(record: UserRecord, assignments: ClientAssignment[]): User {
     inviteSentAt: record.invite_sent_at ? parseUtcDate(record.invite_sent_at) : null,
     inviteExpiresAt: record.invite_expires_at ? parseUtcDate(record.invite_expires_at) : null,
     inviteAcceptedAt: record.invite_accepted_at ? parseUtcDate(record.invite_accepted_at) : null,
+    acknowledgedAt: record.risks_ack_at ? parseUtcDate(record.risks_ack_at) : null,
+    acknowledgedVersion: record.risks_ack_version ?? null,
     realmIds,
     assignments,
   };
@@ -508,6 +510,11 @@ export class UserService {
   }
 
   /** Withdraw a login's outstanding invitation link. */
+  /** Record that this login accepted the "before you connect" points, at this version. */
+  async recordAcknowledgment(id: number, version: string): Promise<void> {
+    await this.db.setUserAcknowledgment(id, version);
+  }
+
   async cancelInvite(id: number): Promise<void> {
     await this.db.clearUserInvite(id);
   }

@@ -5854,8 +5854,14 @@ export async function registerMcpRoutes(
   // Accepts Bearer token in Authorization header OR ?key= query param (for
   // Claude.ai connectors). Resolves to a scope: the master key and admin
   // users see everything; member users see only their assigned companies.
-  function checkAuth(authHeader: string | undefined, queryKey?: string): Promise<AuthScope | null> {
-    return resolveAuth(qboRoot, masterApiKey, authHeader, queryKey);
+  async function checkAuth(authHeader: string | undefined, queryKey?: string): Promise<AuthScope | null> {
+    const scope = await resolveAuth(qboRoot, masterApiKey, authHeader, queryKey);
+    // A client login that has not accepted the "before you connect" points is
+    // treated as not signed in here, whatever token it holds: the challenge
+    // sends its assistant to the sign-in page, which is where it accepts.
+    // The sign-in page and token refresh enforce the same thing; this is the
+    // one place all data passes through.
+    return scope?.mustAcknowledge ? null : scope;
   }
 
   /**

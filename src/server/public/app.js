@@ -16,6 +16,8 @@ let serverUrl = null;
 // non-admins / a server without the feature).
 let alertsInfo = null;
 let invitesInfo = null; // { enabled, from, firmName, replyTo, missing, problems } — admins only
+let accessRequestsInfo = null; // { enabled, url, notice, pending, recent } — admins only
+let teamPanel = 'user'; // what the Team screen shows: a member ('user') or the 'requests' queue
 let connections = [];
 let users = [];
 let connectionsLoaded = false;
@@ -302,6 +304,228 @@ async function loadInvites() {
   renderAll();
 }
 
+// ── Requests for access ──────────────────────────────────────────────────────
+// Clients ask on a public page; nothing happens until an admin decides here.
+async function loadAccessRequests() {
+  const sessionToken = authToken;
+  try {
+    const data = await api('/api/access-requests');
+    if (sessionToken !== authToken) return;
+    accessRequestsInfo = data;
+  } catch {
+    if (sessionToken !== authToken) return;
+    accessRequestsInfo = null; // non-admin or older server — the panel stays hidden
+  }
+  renderAll();
+}
+
+function pendingRequestCount() {
+  return accessRequestsInfo?.pending?.length || 0;
+}
+
+function showRequestsPanel() {
+  return view === 'team' && teamPanel === 'requests' && Boolean(accessRequestsInfo);
+}
+
+// What the reviewer should know about the address before deciding.
+function requestFlagHtml(item) {
+  const login = item.existingLogin;
+  if (!login) return '';
+  if (login.accountType !== 'client') {
+    return `<div class="request-flag bad">This address belongs to ${escapeHtml(login.name)}, a team member — it can't be given a client login. Decline it.</div>`;
+  }
+  const has = login.companies.map((c) => c.clientName).join(', ');
+  if (login.status !== 'active') {
+    return `<div class="request-flag bad">${escapeHtml(login.name)} already has a client login, and it is disabled. Enable it under Team before approving.</div>`;
+  }
+  return `<div class="request-flag">Already has a client login${has ? ` for ${escapeHtml(has)}` : ''}. Approving adds the company you choose to it.</div>`;
+}
+
+function accessRequestsHtml() {
+  const info = accessRequestsInfo;
+  const pending = info.pending;
+  const notice = info.notice;
+  const noticeLine = !info.enabled
+    ? ''
+    : notice.available
+      ? `New requests are emailed to <strong>${escapeHtml(notice.recipients.join(', '))}</strong>.`
+      : `You are not emailed about new requests: ${escapeHtml(notice.reason || 'not set up')}`;
+
+  const rows = pending
+    .map((item) => {
+      const id = escapeHtml(String(item.id));
+      return `
+        <div class="request-row">
+          <div class="request-main">
+            <div class="request-who"><strong>${escapeHtml(item.name)}</strong> <span class="request-email">${escapeHtml(item.email)}</span></div>
+            <div class="request-meta">Says their business is <strong>${escapeHtml(item.company)}</strong> · asked ${escapeHtml(relativeTime(item.createdAt))}</div>
+            ${requestFlagHtml(item)}
+          </div>
+          <div class="request-actions">
+            <button type="button" class="btn btn-primary btn-small" data-action="approve-request" data-id="${id}">Approve…</button>
+            <button type="button" class="btn btn-ghost btn-small" data-action="decline-request" data-id="${id}">Decline</button>
+          </div>
+        </div>`;
+    })
+    .join('');
+
+  const recent = (info.recent || [])
+    .map((item) => {
+      const what =
+        item.status === 'approved'
+          ? `Approved${item.clientName ? ` for ${escapeHtml(item.clientName)}` : ''}`
+          : 'Declined';
+      return `
+        <div class="request-row request-row-done">
+          <div class="request-main">
+            <div class="request-who">${escapeHtml(item.name)} <span class="request-email">${escapeHtml(item.email)}</span></div>
+            <div class="request-meta">${what}${item.decidedBy ? ` by ${escapeHtml(item.decidedBy)}` : ''}${item.decidedAt ? ` · ${escapeHtml(relativeTime(item.decidedAt))}` : ''}</div>
+          </div>
+        </div>`;
+    })
+    .join('');
+
+  return `
+    <div class="detail-header">
+      <div>
+        <div class="detail-title-row">
+          <h2 class="detail-title">Access requests</h2>
+          <span class="pill ${info.enabled ? 'pill-active' : 'pill-disabled'}">${info.enabled ? '<span class="pill-dot"></span>Open' : 'Closed'}</span>
+        </div>
+        <div class="detail-sub">Clients ask for access on a page you give them. Nothing is sent, and nobody gets in, until you approve.</div>
+      </div>
+      <div class="detail-actions">
+        <button type="button" class="btn btn-ghost" data-action="settings">Settings</button>
+      </div>
+    </div>
+    <div class="detail-cards single">
+      <div class="card">
+        <div class="card-label">The page to give your clients</div>
+        ${
+          info.enabled
+            ? `<div class="connector-url-row">
+                <code class="connector-url">${escapeHtml(info.url)}</code>
+                <button type="button" class="connector-copy" data-action="copy-request-link">Copy</button>
+              </div>
+              <div class="connector-caption">Put this link in your email to clients. ${noticeLine} To close the page or change who is emailed, open Settings.</div>`
+            : `<p class="field-hint" style="font-size:12.5px">The request page is closed, so <code>${escapeHtml(info.url)}</code> tells visitors to contact you instead. Turn it on under <button type="button" class="btn-link" data-action="settings">Settings</button> when you are ready to send the link out.</p>`
+        }
+      </div>
+      <div class="card">
+        <div class="card-label request-card-label">
+          <span>Waiting for you${pending.length ? ` — ${pending.length}` : ''}</span>
+          ${pending.length > 1 ? '<button type="button" class="btn-link" data-action="decline-all-requests">Decline all</button>' : ''}
+        </div>
+        ${
+          pending.length
+            ? `<div class="request-list">${rows}</div>
+               <p class="field-hint" style="margin-top:12px">These details were typed by the person asking and are not verified. Approve only someone you recognise as your client, at an email address you know is theirs — the invitation goes to that address.</p>`
+            : '<p class="field-hint" style="font-size:12.5px">No requests are waiting.</p>'
+        }
+      </div>
+      ${recent ? `<div class="card"><div class="card-label">Recently handled</div><div class="request-list">${recent}</div></div>` : ''}
+    </div>`;
+}
+
+// Approving is where access is actually given, so the reviewer chooses the
+// company themselves; what the requester typed is only a starting point.
+function showApproveRequestModal(item) {
+  const emailing = Boolean(invitesInfo?.enabled);
+  const login = item.existingLogin;
+  const sorted = [...connections].sort((a, b) => a.clientName.localeCompare(b.clientName));
+  const options = sorted
+    .map(
+      (c) =>
+        `<option value="${escapeHtml(c.realmId)}"${c.realmId === item.suggestedRealmId ? ' selected' : ''}>${escapeHtml(c.clientName)}</option>`
+    )
+    .join('');
+  const body = document.createElement('form');
+  body.className = 'form-stack';
+  body.innerHTML = `
+    <p class="field-hint" style="font-size:12.5px"><strong>${escapeHtml(item.name)}</strong> (${escapeHtml(item.email)}) asked for access and said their business is <strong>${escapeHtml(item.company)}</strong>.</p>
+    <div class="callout-warning">
+      <div class="callout-title">Do you recognise this email address?</div>
+      <div class="callout-body">Anyone can fill in the request page. Approve only if <strong>${escapeHtml(item.email)}</strong> is an address you know belongs to this client. They will be able to see everything in the QuickBooks file — including payroll and owner transactions — and change none of it.</div>
+    </div>
+    ${requestFlagHtml(item)}
+    <label class="field">
+      <span class="field-label">Give them read-only access to</span>
+      <select name="realmId" required>
+        <option value=""${item.suggestedRealmId ? '' : ' selected'} disabled>Choose a company…</option>
+        ${options}
+      </select>
+      <span class="field-hint">${
+        item.suggestedRealmId
+          ? 'Picked from the business name they typed — check it is the right one.'
+          : 'Nothing connected matches the business name they typed, so choose it yourself.'
+      }</span>
+    </label>
+    <p class="field-hint">${
+      login && login.hasPassword
+        ? 'They already have a password, so the company simply appears for their assistant. Nothing is emailed.'
+        : emailing
+          ? 'They are emailed an invitation with a link to choose their password and steps to connect.'
+          : 'Email is not set up on this server, so you will be given an invitation link to send them yourself.'
+    }</p>
+    <div class="modal-footer">
+      <button type="button" class="btn btn-ghost" data-action="close-modal">Cancel</button>
+      <button type="submit" class="btn btn-primary">${login && login.hasPassword ? 'Approve' : emailing ? 'Approve and send invitation' : 'Approve and create link'}</button>
+    </div>`;
+  body.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const submit = body.querySelector('button[type="submit"]');
+    const realmId = new FormData(body).get('realmId');
+    if (!realmId) return;
+    const clientName = connections.find((c) => c.realmId === realmId)?.clientName || 'the company';
+    submit.disabled = true;
+    try {
+      const result = await api(`/api/access-requests/${item.id}/approve`, { method: 'POST', body: JSON.stringify({ realmId }) });
+      await Promise.all([loadUsers(), loadAccessRequests()]);
+      const user = users.find((u) => u.id === result.userId);
+      if (result.invite && !result.invite.sent && user) {
+        showClientLoginCreatedModal(user, result.invite);
+        return;
+      }
+      closeModal();
+      if (result.invite?.sent) toast(`Invitation sent to ${result.invite.to}`);
+      else if (result.outcome === 'added') toast(`${clientName} added to ${item.name}'s login`);
+      else toast(`${item.name} already had access to ${clientName} — nothing changed`);
+    } catch (err) {
+      submit.disabled = false;
+      toast(err.message, 'error');
+      loadAccessRequests(); // someone else may have decided it meanwhile
+    }
+  });
+  openModal(`Approve — ${item.name}`, body);
+}
+
+function declineRequest(item) {
+  confirmModal(
+    'Decline this request',
+    `Decline the request from ${item.name} (${item.email})? Nothing is sent to them, and they can ask again.`,
+    'Decline',
+    async () => {
+      await api(`/api/access-requests/${item.id}/decline`, { method: 'POST' });
+      await loadAccessRequests();
+      toast('Request declined');
+    }
+  );
+}
+
+function declineAllRequests() {
+  const count = pendingRequestCount();
+  confirmModal(
+    'Decline all requests',
+    `Decline all ${count} waiting requests? Use this to clear out junk. Nothing is sent to anyone, and real clients can ask again.`,
+    `Decline ${count}`,
+    async () => {
+      await api('/api/access-requests/decline-all', { method: 'POST' });
+      await loadAccessRequests();
+      toast('All waiting requests declined');
+    }
+  );
+}
+
 async function initApp() {
   me = await api('/api/me');
   $('auth-screen').hidden = true;
@@ -313,12 +537,13 @@ async function initApp() {
   await Promise.all([
     loadData(false),
     loadMyKey(),
-    ...(me.role === 'admin' ? [loadServerUrl(), loadAlerts(), loadInvites()] : []),
+    ...(me.role === 'admin' ? [loadServerUrl(), loadAlerts(), loadInvites(), loadAccessRequests()] : []),
   ]);
 
   clearInterval(refreshTimer);
   refreshTimer = setInterval(() => {
     loadData(true).catch(() => {});
+    if (me?.role === 'admin') loadAccessRequests(); // new requests show up without a reload
     refreshActivity(true); // keep the feed live while the page is open
   }, 60000);
   // Token countdowns tick client-side between data polls.
@@ -399,6 +624,9 @@ function signOut(expired = false) {
   me = null;
   serverUrl = null;
   alertsInfo = null;
+  invitesInfo = null;
+  accessRequestsInfo = null;
+  teamPanel = 'user';
   users = [];
   connections = [];
   connectionsLoaded = false;
@@ -507,6 +735,7 @@ function switchView(next) {
   if (next === 'team' && me?.role !== 'admin') return;
   if (view === next) return;
   view = next;
+  teamPanel = next === 'team' && pendingRequestCount() > 0 ? 'requests' : 'user';
   searchQuery = '';
   $('search-input').value = '';
   renderAll();
@@ -524,6 +753,10 @@ function renderAll() {
 function updateRailChrome() {
   document.querySelectorAll('.seg-btn').forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.view === view);
+    if (btn.dataset.view === 'team') {
+      const waiting = pendingRequestCount();
+      btn.innerHTML = waiting ? `Team <span class="seg-badge" title="${waiting} waiting for review">${waiting}</span>` : 'Team';
+    }
   });
   // Search only exists on the Clients screen (per the design reference).
   $('rail-search').hidden = view !== 'clients';
@@ -588,11 +821,20 @@ function renderRail() {
       list.innerHTML = '<div class="rail-note">Loading…</div>';
       return;
     }
+    const waiting = pendingRequestCount();
+    const requestsRow = accessRequestsInfo
+      ? `
+          <button type="button" class="rail-row${showRequestsPanel() ? ' selected' : ''}" data-action="select-requests">
+            <span class="avatar avatar-requests">${waiting || '✓'}</span>
+            <span class="row-name">Access requests</span>
+            <span class="row-meta${waiting ? ' bang' : ''}">${waiting ? 'review' : accessRequestsInfo.enabled ? 'open' : 'closed'}</span>
+          </button>`
+      : '';
     if (users.length === 0) {
-      list.innerHTML = '<div class="rail-note">No team members yet</div>';
+      list.innerHTML = `${requestsRow}<div class="rail-note">No team members yet</div>`;
       return;
     }
-    const selected = currentUser();
+    const selected = showRequestsPanel() ? null : currentUser();
     const rowHtml = (user) => {
       const isSelected = user.id === selected?.id;
       const avatarClass =
@@ -616,6 +858,7 @@ function renderRail() {
     const staff = users.filter((u) => u.accountType !== 'client');
     const clientLogins = users.filter((u) => u.accountType === 'client');
     list.innerHTML = `
+      ${requestsRow}
       ${staff.map(rowHtml).join('')}
       <div class="rail-divider">
         <span>Client logins</span>
@@ -626,7 +869,7 @@ function renderRail() {
 }
 
 function renderDetail() {
-  $('detail').innerHTML = view === 'clients' ? clientDetailHtml() : teamDetailHtml();
+  $('detail').innerHTML = view === 'clients' ? clientDetailHtml() : showRequestsPanel() ? accessRequestsHtml() : teamDetailHtml();
 }
 
 function statusPillHtml(status) {
@@ -816,6 +1059,7 @@ function clientAccountDetailHtml(conn) {
           : ''
       }
       <div class="connector-caption">Using a different assistant? Look for “add custom connector” or “add MCP server” and use the same address and sign-in. To change your password, open Settings (the gear, bottom left).</div>
+      <div class="connector-caption"><a href="/security" target="_blank" rel="noopener">How this is protected, and what to keep in mind</a> — including your AI provider's privacy settings.</div>
     </div>`;
 }
 
@@ -1157,6 +1401,7 @@ function teamDetailHtml() {
           <div class="stat-row"><span class="stat-label">Last used</span><span class="stat-value">${escapeHtml(lastUsed)}</span></div>
           <div class="stat-row"><span class="stat-label">Status</span><span class="stat-value ${isDisabled ? 'status-bad' : 'status-ok'}"><span class="status-dot"></span>${isDisabled ? 'Disabled' : 'Active'}</span></div>
           <div class="stat-row"><span class="stat-label">QuickBooks access</span><span class="stat-value">${escapeHtml(accessSummary)}</span></div>
+          ${isClientLogin ? `<div class="stat-row"><span class="stat-label" title="The short list a client accepts before connecting: AI provider privacy, whole-file visibility, AI errors, keeping the login private">Accepted the risks</span><span class="stat-value">${user.acknowledgedAt ? escapeHtml(dayText(user.acknowledgedAt)) : '<span class="team-meta">not yet — asked when they connect</span>'}</span></div>` : ''}
           ${isClientLogin ? `<div class="stat-row"><span class="stat-label">Invitation</span><span class="stat-value">${inviteStatusText(user) ? escapeHtml(inviteStatusText(user)) : '<span class="team-meta">not sent</span>'}</span></div>` : ''}
           <button type="button" class="btn btn-ghost btn-card" data-action="set-password" data-id="${idAttr}">${user.hasPassword ? 'Reset password' : 'Set up sign-in'}</button>
           ${isClientLogin ? clientInviteControlsHtml(user, idAttr) : `<button type="button" class="btn btn-ghost btn-card" data-action="rotate-key" data-id="${idAttr}">Rotate key</button>`}
@@ -1188,7 +1433,7 @@ let activityLoadingKey = null;
 // null means "nothing to fetch" (not an admin, or no member selected).
 function activitySelectionKey() {
   if (me?.role !== 'admin') return null;
-  if (view !== 'team') return 'all';
+  if (view !== 'team' || showRequestsPanel()) return 'all';
   const user = currentUser();
   return user ? `userId=${user.id}` : null;
 }
@@ -1351,7 +1596,7 @@ function renderActivity() {
   refreshActivity(); // no-op unless the selection changed; re-renders when it lands
   let events = buildActivity();
 
-  if (view === 'team') {
+  if (view === 'team' && !showRequestsPanel()) {
     const user = currentUser();
     label.textContent = user ? `${firstName(user.name)}’s activity` : 'Activity';
     events = user ? events.filter((e) => e.userId === user.id) : [];
@@ -2280,6 +2525,22 @@ function showSettingsModal() {
         } It appears on the invitation email, the page where a client chooses their password, and the sign-in page.</span>
       </div>
       <div class="field">
+        <span class="field-label">Logo <span class="field-hint">(optional)</span></span>
+        <div class="logo-row">
+          ${
+            invitesInfo.logoUrl
+              ? `<span class="logo-preview"><img src="${escapeHtml(invitesInfo.logoUrl)}" alt="Your logo"></span>`
+              : '<span class="logo-preview logo-preview-empty">No logo</span>'
+          }
+          <label class="btn btn-ghost btn-small logo-pick">
+            ${invitesInfo.logoUrl ? 'Replace…' : 'Choose image…'}
+            <input type="file" name="logo" accept="image/png,image/jpeg,image/gif,image/webp" hidden>
+          </label>
+          ${invitesInfo.logoUrl ? '<button type="button" class="btn-link" data-remove-logo>Remove</button>' : ''}
+        </div>
+        <span class="field-hint">Shown at the top of the pages clients see — the request page, the page where they choose a password, the sign-in page — and of the invitation email. PNG or JPEG, up to 256 KB. It is saved as soon as you choose it.</span>
+      </div>
+      <div class="field">
         <span class="field-label">Setup walkthrough video <span class="field-hint">(optional)</span></span>
         <input type="url" name="setupVideoUrl" maxlength="500" value="${escapeHtml(invitesInfo.setupVideoUrl || '')}" placeholder="https://www.loom.com/share/…" autocomplete="off">
         <span class="field-hint">${
@@ -2294,10 +2555,44 @@ function showSettingsModal() {
     </form>`
       : '';
 
+  // Admins: the public page where clients ask for access, and who hears
+  // about it. Off until switched on here.
+  const requestsSection =
+    me.role === 'admin' && accessRequestsInfo
+      ? `
+    <form data-requests-form class="form-stack settings-group" style="margin-bottom:18px">
+      <div class="settings-group-title">Requests for access</div>
+      <div class="field">
+        <label class="checkbox-item checkbox-solo">
+          <input type="checkbox" name="enabled"${accessRequestsInfo.enabled ? ' checked' : ''}>
+          <span>Let clients ask for access on a public page</span>
+        </label>
+        <span class="field-hint">The page is <code>${escapeHtml(accessRequestsInfo.url)}</code>. While this is on, anyone with that link can send you a request. Nothing is sent to them and nobody gets access until you approve it under Team → Access requests.</span>
+      </div>
+      <div class="field">
+        <span class="field-label">Email new requests to</span>
+        <input type="text" name="notifyEmail" maxlength="500" value="${escapeHtml(accessRequestsInfo.notice.setting || '')}" placeholder="${escapeHtml(
+          accessRequestsInfo.notice.source === 'alerts' ? accessRequestsInfo.notice.recipients.join(', ') : 'you@yourfirm.com'
+        )}" autocomplete="off">
+        <span class="field-hint">${
+          accessRequestsInfo.notice.available
+            ? `Notices go to <strong>${escapeHtml(accessRequestsInfo.notice.recipients.join(', '))}</strong>${
+                accessRequestsInfo.notice.source === 'alerts' ? ' (the connection-alert address — type another here to change it)' : ''
+              }. The first request is emailed at once; after that, at most one email every 15 minutes.`
+            : `No notice can be sent yet: ${escapeHtml(accessRequestsInfo.notice.reason || 'not set up')} Requests still arrive and show under Team.`
+        } Separate several addresses with commas.${
+          accessRequestsInfo.notice.lastError ? ` <span class="status-bad">Last attempt failed: ${escapeHtml(accessRequestsInfo.notice.lastError)}</span>` : ''
+        }</span>
+      </div>
+      <div><button type="submit" class="btn btn-ghost">Save</button></div>
+    </form>`
+      : '';
+
   const body = document.createElement('div');
   body.innerHTML = `
     <p class="field-hint" style="margin-bottom:14px;font-size:12.5px">${identity}</p>
     ${firmSection}
+    ${requestsSection}
     ${isClientAccount() ? '' : `<div class="field">
       <span class="field-label">Your API key</span>
       ${keySection}
@@ -2320,6 +2615,43 @@ function showSettingsModal() {
   }
   const firmForm = body.querySelector('[data-firm-form]');
   if (firmForm) {
+    // The logo saves on its own, the moment a file is chosen.
+    const applyBranding = (saved, message) => {
+      invitesInfo = { ...invitesInfo, ...saved };
+      toast(message);
+      showSettingsModal(); // redraw with the new preview
+    };
+    firmForm.querySelector('input[name="logo"]').addEventListener('change', async (event) => {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      try {
+        if (file.size > 256 * 1024) throw new Error('The logo must be 256 KB or smaller — save a smaller version and try again');
+        const dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = () => reject(new Error('That file could not be read'));
+          reader.readAsDataURL(file);
+        });
+        // Its shape decides whether it is shown alone or beside the firm's name.
+        const size = await new Promise((resolve) => {
+          const image = new Image();
+          image.onload = () => resolve({ width: image.naturalWidth, height: image.naturalHeight });
+          image.onerror = () => resolve({});
+          image.src = dataUrl;
+        });
+        applyBranding(await api('/api/branding/logo', { method: 'PUT', body: JSON.stringify({ dataUrl, ...size }) }), 'Logo saved');
+      } catch (err) {
+        event.target.value = '';
+        toast(err.message, 'error');
+      }
+    });
+    firmForm.querySelector('[data-remove-logo]')?.addEventListener('click', async () => {
+      try {
+        applyBranding(await api('/api/branding/logo', { method: 'DELETE' }), 'Logo removed');
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+    });
     firmForm.addEventListener('submit', async (event) => {
       event.preventDefault();
       try {
@@ -2334,6 +2666,25 @@ function showSettingsModal() {
         invitesInfo = { ...invitesInfo, ...saved };
         me = { ...me, firmName: saved.firmNameConfigured ? saved.firmName : null, setupVideoUrl: saved.setupVideoUrl };
         toast(saved.firmNameConfigured ? `Saved — clients see “${saved.firmName}”` : 'Saved');
+        closeModal();
+        renderAll();
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+    });
+  }
+  const requestsForm = body.querySelector('[data-requests-form]');
+  if (requestsForm) {
+    requestsForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      try {
+        const form = new FormData(requestsForm);
+        const enabled = form.get('enabled') === 'on';
+        accessRequestsInfo = await api('/api/access-requests/settings', {
+          method: 'PUT',
+          body: JSON.stringify({ enabled, notifyEmail: form.get('notifyEmail') }),
+        });
+        toast(enabled ? 'Saved — the request page is open' : 'Saved — the request page is closed');
         closeModal();
         renderAll();
       } catch (err) {
@@ -2493,8 +2844,19 @@ document.addEventListener('DOMContentLoaded', () => {
     else if (action === 'select-client') selectClient(realm);
     else if (action === 'select-user') {
       selectedUserId = Number(id);
+      teamPanel = 'user';
       renderAll();
-    } else if (action === 'settings') showSettingsModal();
+    } else if (action === 'select-requests') {
+      teamPanel = 'requests';
+      renderAll();
+    } else if (action === 'approve-request' || action === 'decline-request') {
+      const item = accessRequestsInfo?.pending.find((r) => String(r.id) === id);
+      if (!item) loadAccessRequests();
+      else if (action === 'approve-request') showApproveRequestModal(item);
+      else declineRequest(item);
+    } else if (action === 'decline-all-requests') declineAllRequests();
+    else if (action === 'copy-request-link') copyText(accessRequestsInfo?.url || '', 'Link copied');
+    else if (action === 'settings') showSettingsModal();
     else if (action === 'copy-own-connector') copyText(ownConnectorUrl(), 'Connector URL copied');
     else if (action === 'copy-shared-connector')
       copyText(serverUrl?.connectorUrl || `${window.location.origin}/mcp`, 'Connector URL copied');
