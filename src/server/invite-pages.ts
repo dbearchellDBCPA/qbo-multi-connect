@@ -1,11 +1,15 @@
 /**
  * The pages a client sees when they follow an invitation link: choose a
- * password, then how to connect their assistant. Server-rendered and
- * self-contained, like the connector sign-in page — no scripts, no outside
- * resources, so the link in the address bar is never sent anywhere else.
+ * password, then how to connect their assistant. Server-rendered, no
+ * scripts, and no referrer is ever sent.
+ *
+ * The page with the password form loads nothing from anywhere else — the
+ * link in its address bar is still a live credential. The page after it,
+ * shown once that link has been used up, may embed the firm's walkthrough
+ * video.
  */
 import { BRAND_BASE, BRAND_FONT_FACES, BRAND_MARK, BRAND_TOKENS } from './brand-css.js';
-import { APP_NAME, type FirmBrand } from '../branding.js';
+import { APP_NAME, type FirmBrand, type SetupVideo } from '../branding.js';
 import {
   CHATGPT_NOTE,
   CHATGPT_STEPS,
@@ -64,7 +68,34 @@ ${BRAND_BASE}
   ol, ul { padding-left:20px; margin-bottom:12px; }
   li { margin-bottom:6px; }
   .powered { max-width:560px; margin:14px auto 0; text-align:center; font-size:11.5px; color:var(--text-faint); }
+  .video {
+    position:relative; height:0; padding-bottom:56.25%; margin:4px 0 8px;
+    border:1px solid var(--border); border-radius:10px; overflow:hidden; background:var(--surface-2);
+  }
+  .video iframe { position:absolute; top:0; left:0; width:100%; height:100%; border:0; }
+  .watch {
+    display:inline-block; margin:4px 0 8px; padding:10px 16px; border-radius:8px; background:var(--primary);
+    color:var(--on-primary); font-size:14px; font-weight:600; text-decoration:none;
+  }
+  a { color:var(--primary); }
 `;
+
+/**
+ * The firm's walkthrough video: its player when it is a kind we embed, a
+ * plain link otherwise — and always a link as well, for when the player is
+ * blocked. The frame is sandboxed and is sent no referrer.
+ */
+function videoSection(video: SetupVideo | null | undefined): string {
+  if (!video) return '';
+  const link = `<a href="${escapeHtml(video.url)}" target="_blank" rel="noopener noreferrer">`;
+  if (!video.embedUrl) {
+    return `<h2>Watch how to connect</h2>
+    <p>${link.replace('<a ', '<a class="watch" ')}Watch the walkthrough video</a></p>`;
+  }
+  return `<h2>Watch how to connect</h2>
+    <div class="video"><iframe src="${escapeHtml(video.embedUrl)}" title="How to connect your AI assistant" loading="lazy" allowfullscreen referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-presentation allow-popups"></iframe></div>
+    <p class="hint" style="margin:0 0 4px">Video not showing? ${link}Open it in a new tab</a>.</p>`;
+}
 
 /**
  * The page shell. The firm's name is the brand — it is the firm, not the
@@ -133,11 +164,13 @@ export interface AcceptedPageDetails {
   username: string;
   connectorUrl: string;
   signInUrl: string;
+  /** The firm's walkthrough video, when it has recorded one. */
+  video?: SetupVideo | null;
 }
 
 /** Step 2: the password is set — here is how to connect. */
 export function inviteAcceptedPage(details: AcceptedPageDetails): string {
-  const { firm, username, connectorUrl, signInUrl } = details;
+  const { firm, username, connectorUrl, signInUrl, video } = details;
   const firmName = firm.name;
   const ol = (steps: string[]) => `<ol>${steps.map((s) => `<li>${rich(s)}</li>`).join('')}</ol>`;
   return page(
@@ -149,6 +182,7 @@ export function inviteAcceptedPage(details: AcceptedPageDetails): string {
       <dt>Your username</dt><dd>${escapeHtml(username)}</dd>
       <dt>Your password</dt><dd style="font-family:inherit;user-select:auto">The one you just chose</dd>
     </dl>
+    ${videoSection(video)}
     <h2>In Claude</h2>
     ${ol(CLAUDE_STEPS)}
     <p>${escapeHtml(CLAUDE_NOTE)}</p>

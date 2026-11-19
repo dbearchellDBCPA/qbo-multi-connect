@@ -7,6 +7,59 @@ export const APP_NAME = 'QBO Multi-Connect';
 export const MAX_FIRM_NAME_LENGTH = 100;
 
 const FIRM_NAME_SETTING = 'firm_name';
+const SETUP_VIDEO_SETTING = 'setup_video_url';
+
+export const MAX_VIDEO_URL_LENGTH = 500;
+
+/**
+ * A walkthrough video the firm recorded for its clients. It is linked from
+ * the invitation email and shown on the page a client lands on after
+ * choosing their password — embedded when it is a kind we know how to embed
+ * safely, linked otherwise.
+ */
+export interface SetupVideo {
+  /** The link as the admin pasted it. */
+  url: string;
+  /** The player address to put in an iframe, or null when it should only be linked. */
+  embedUrl: string | null;
+}
+
+/**
+ * A video link fit to hand to clients: an https address, nothing else.
+ * Throws with a message for the admin when it isn't.
+ */
+export function cleanVideoUrl(raw: unknown): string {
+  if (typeof raw !== 'string') throw new Error('Video link must be text');
+  const value = raw.trim();
+  if (value.length > MAX_VIDEO_URL_LENGTH) throw new Error(`Video link must be at most ${MAX_VIDEO_URL_LENGTH} characters`);
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error('Video link must be a full web address, like https://www.loom.com/share/…');
+  }
+  if (url.protocol !== 'https:') throw new Error('Video link must start with https://');
+  if (url.username || url.password) throw new Error('Video link cannot contain a username or password');
+  return url.href;
+}
+
+/**
+ * The embeddable player address for a video link, or null. Only Loom is
+ * embedded: a share link (`/share/<id>`) or an embed link (`/embed/<id>`)
+ * becomes `https://www.loom.com/embed/<id>`. Anything else is shown as a
+ * link — a page that sets passwords does not frame arbitrary sites.
+ */
+export function videoEmbedUrl(videoUrl: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(videoUrl);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'https:' || !/^(www\.)?loom\.com$/i.test(url.hostname)) return null;
+  const match = url.pathname.match(/^\/(?:share|embed)\/([A-Za-z0-9]{8,64})\/?$/);
+  return match ? `https://www.loom.com/embed/${match[1]}` : null;
+}
 
 /**
  * Who clients are dealing with. The app is the tool; the firm is the one
@@ -67,6 +120,22 @@ export class Branding {
     const { firmName, firmNameSource } = this.invitesConfig;
     const configured = firmNameSource !== 'default';
     return { name: firmName, configured, source: firmNameSource, displayName: configured ? firmName : APP_NAME };
+  }
+
+  /** The firm's setup walkthrough video, if one has been set. */
+  async setupVideo(): Promise<SetupVideo | null> {
+    const url = (await this.db.getSetting(SETUP_VIDEO_SETTING))?.trim();
+    return url ? { url, embedUrl: videoEmbedUrl(url) } : null;
+  }
+
+  /** Set the setup video link, or clear it (null / blank). */
+  async setSetupVideoUrl(raw: string | null): Promise<SetupVideo | null> {
+    if (raw == null || (typeof raw === 'string' && !raw.trim())) {
+      await this.db.setSetting(SETUP_VIDEO_SETTING, null);
+    } else {
+      await this.db.setSetting(SETUP_VIDEO_SETTING, cleanVideoUrl(raw));
+    }
+    return this.setupVideo();
   }
 
   /** Set the firm's name from the dashboard, or clear it (null / blank) to fall back. */

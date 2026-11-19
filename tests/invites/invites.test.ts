@@ -6,7 +6,7 @@ import { acceptInvitePage, inviteAcceptedPage, inviteInvalidPage } from '../../s
 import { redactUrlForLog } from '../../src/server/log-redaction.js';
 import { ResendEmailSender, EmailSendError, type EmailSender, type OutboundEmail } from '../../src/alerts/email.js';
 import { isValidUsername } from '../../src/users.js';
-import { APP_NAME, cleanFirmName, senderWithFirmName, type FirmBrand } from '../../src/branding.js';
+import { APP_NAME, cleanFirmName, cleanVideoUrl, senderWithFirmName, videoEmbedUrl, type FirmBrand } from '../../src/branding.js';
 
 const FIRM: FirmBrand = { name: 'Example CPA', configured: true, source: 'dashboard', displayName: 'Example CPA' };
 const NO_FIRM: FirmBrand = { name: 'Your accounting firm', configured: false, source: 'default', displayName: APP_NAME };
@@ -262,6 +262,71 @@ describe('firm name', () => {
     expect(parseInvitesConfig({ QBO_FIRM_NAME: 'Env Firm', QBO_INVITE_FROM: 'Sender Firm <a@b.com>' })).toMatchObject({ firmName: 'Env Firm', firmNameSource: 'environment' });
     expect(parseInvitesConfig({ QBO_INVITE_FROM: 'Sender Firm <a@b.com>' })).toMatchObject({ firmName: 'Sender Firm', firmNameSource: 'sender' });
     expect(parseInvitesConfig({})).toMatchObject({ firmName: 'Your accounting firm', firmNameSource: 'default' });
+  });
+});
+
+describe('setup walkthrough video', () => {
+  const LOOM = 'https://www.loom.com/share/0123456789abcdef0123456789abcdef';
+  const EMBED = 'https://www.loom.com/embed/0123456789abcdef0123456789abcdef';
+
+  it('accepts an https link and nothing else', () => {
+    expect(cleanVideoUrl(`  ${LOOM}?sid=abc  `)).toBe(`${LOOM}?sid=abc`);
+    expect(cleanVideoUrl('https://example.com/videos/setup')).toBe('https://example.com/videos/setup');
+    for (const bad of ['http://www.loom.com/share/abc12345', 'javascript:alert(1)', 'loom.com/share/abc', 'not a link', 'https://user:pw@example.com/v', `https://example.com/${'x'.repeat(500)}`, 7, null]) {
+      expect(() => cleanVideoUrl(bad as any), JSON.stringify(bad)).toThrow();
+    }
+  });
+
+  it('only ever embeds Loom, from its share or embed link', () => {
+    expect(videoEmbedUrl(LOOM)).toBe(EMBED);
+    expect(videoEmbedUrl(`${LOOM}?sid=1234-abcd`)).toBe(EMBED);
+    expect(videoEmbedUrl(EMBED)).toBe(EMBED);
+    expect(videoEmbedUrl('https://loom.com/share/0123456789abcdef')).toBe('https://www.loom.com/embed/0123456789abcdef');
+    for (const link of [
+      'https://example.com/share/0123456789abcdef',
+      'https://www.loom.com.evil.example/share/0123456789abcdef',
+      'https://evil.example/?x=https://www.loom.com/share/0123456789abcdef',
+      'https://www.loom.com/share/../../login',
+      'https://www.loom.com/looms/videos',
+      'https://www.youtube.com/watch?v=abc',
+      'nonsense',
+    ]) {
+      expect(videoEmbedUrl(link), link).toBeNull();
+    }
+  });
+
+  it('plays on the page after the password is set, never on the page with the password form', () => {
+    const done = inviteAcceptedPage({ firm: FIRM, username: 'j@x.example', connectorUrl: 'https://q.example/mcp', signInUrl: 'https://q.example', video: { url: LOOM, embedUrl: EMBED } });
+    expect(done).toContain(`<iframe src="${EMBED}"`);
+    expect(done).toContain('referrerpolicy="no-referrer"');
+    expect(done).toContain('sandbox="allow-scripts allow-same-origin allow-presentation allow-popups"');
+    expect(done).toContain(`href="${LOOM}"`); // and a plain link, in case the player is blocked
+    expect(done).not.toMatch(/<script/i);
+    // Before the video, the things they need; after it, the written steps.
+    expect(done.indexOf('Connector address')).toBeLessThan(done.indexOf('<iframe'));
+    expect(done.indexOf('<iframe')).toBeLessThan(done.indexOf('<h2>In Claude</h2>'));
+
+    const form = acceptInvitePage({ firm: FIRM, name: 'J', username: 'j@x.example', companyNames: [], minPasswordLength: 8 });
+    expect(form).not.toContain('<iframe');
+    expect(form).not.toMatch(/(src|href)="https?:\/\//i);
+  });
+
+  it('is only linked when it is not a Loom video, and absent when there is none', () => {
+    const other = inviteAcceptedPage({ firm: FIRM, username: 'j@x.example', connectorUrl: 'https://q.example/mcp', signInUrl: 'https://q.example', video: { url: 'https://example.com/v/setup', embedUrl: null } });
+    expect(other).not.toContain('<iframe');
+    expect(other).toContain('href="https://example.com/v/setup"');
+    expect(other).toContain('rel="noopener noreferrer"');
+    const none = inviteAcceptedPage({ firm: FIRM, username: 'j@x.example', connectorUrl: 'https://q.example/mcp', signInUrl: 'https://q.example' });
+    expect(none).not.toContain('Watch');
+    expect(none).not.toContain('<iframe');
+  });
+
+  it('is linked from the invitation email, and escaped', () => {
+    const withVideo = renderClientInvitationEmail({ ...INVITATION, videoUrl: `${LOOM}?a=1&b=2` });
+    expect(withVideo.text).toContain(`Prefer to watch? This short video walks through it: ${LOOM}?a=1&b=2`);
+    expect(withVideo.html).toContain(`href="${LOOM}?a=1&amp;b=2"`);
+    expect(renderClientInvitationEmail(INVITATION).text).not.toContain('Prefer to watch');
+    expect(renderClientInvitationEmail({ ...INVITATION, videoUrl: null }).html).not.toContain('Watch the walkthrough');
   });
 });
 

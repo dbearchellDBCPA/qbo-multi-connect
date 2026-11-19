@@ -131,6 +131,7 @@ export async function usersRoutes(
           connectorUrl: `${base}/mcp`,
           companyNames: user.realmIds.map((realmId) => names.get(realmId)).filter((n): n is string => Boolean(n)),
           firm: await qboManager.branding.firm(),
+          videoUrl: (await qboManager.branding.setupVideo())?.url ?? null,
         }
       );
       result.sent = delivery.sent;
@@ -263,6 +264,8 @@ export async function usersRoutes(
       // The firm's name, once one is set — the dashboard shows it to clients
       // in place of the app's.
       firmName: firm.configured ? firm.name : null,
+      // The firm's walkthrough video, for the "how to connect" card.
+      setupVideoUrl: (await qboManager.branding.setupVideo())?.url ?? null,
       clients: visibleClients,
     });
   });

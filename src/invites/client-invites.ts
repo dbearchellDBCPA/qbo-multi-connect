@@ -20,6 +20,8 @@ export interface InviteContext {
   companyNames: string[];
   /** Whose name the invitation goes out in. */
   firm: FirmBrand;
+  /** The firm's walkthrough video, when it has one. */
+  videoUrl?: string | null;
 }
 
 /** What happened when an invitation email was sent. Never contains the link. */
@@ -101,6 +103,7 @@ export class ClientInvites {
         connectorUrl: context.connectorUrl,
         companyNames: context.companyNames,
         canReply: this.config.replyTo !== null,
+        videoUrl: context.videoUrl ?? null,
       });
       await this.sender.send({
         from: senderWithFirmName(this.config.from, context.firm),

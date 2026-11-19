@@ -107,6 +107,7 @@ export async function inviteAcceptRoutes(fastify: FastifyInstance, qboManager: Q
           username: accepted.username ?? '',
           connectorUrl: `${base}/mcp`,
           signInUrl: base,
+          video: await qboManager.branding.setupVideo(),
         })
       );
     }

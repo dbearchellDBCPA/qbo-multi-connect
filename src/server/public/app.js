@@ -807,6 +807,11 @@ function clientAccountDetailHtml(conn) {
         <li>When the sign-in page opens, enter the same username and password you used here.</li>
         <li>In a chat, switch the connector on and ask: <em>“What QuickBooks company am I connected to?”</em></li>
       </ol>
+      ${
+        me.setupVideoUrl
+          ? `<p class="connector-caption"><a href="${escapeHtml(me.setupVideoUrl)}" target="_blank" rel="noopener noreferrer"><strong>Watch the walkthrough video</strong></a> to see these steps done.</p>`
+          : ''
+      }
       <div class="connector-caption">Using a different assistant? Look for “add custom connector” or “add MCP server” and use the same address and sign-in. To change your password, open Settings (the gear, bottom left).</div>
     </div>`;
 }
@@ -2256,9 +2261,10 @@ function showSettingsModal() {
   const firmSection =
     me.role === 'admin' && invitesInfo
       ? `
-    <form data-firm-form class="form-stack" style="margin-bottom:18px">
+    <form data-firm-form class="form-stack settings-group" style="margin-bottom:18px">
+      <div class="settings-group-title">What clients see</div>
       <div class="field">
-        <span class="field-label">Your firm's name, as clients see it</span>
+        <span class="field-label">Firm name</span>
         <input type="text" name="firmName" maxlength="100" value="${
           invitesInfo.firmNameSource === 'dashboard' ? escapeHtml(invitesInfo.firmName || '') : ''
         }" placeholder="${escapeHtml(invitesInfo.firmNameConfigured ? invitesInfo.firmName : 'e.g. Smith & Jones CPA LLC')}" autocomplete="organization">
@@ -2270,7 +2276,18 @@ function showSettingsModal() {
             : 'Not set yet — invitations currently say “Your accounting firm”.'
         } It appears on the invitation email, the page where a client chooses their password, and the sign-in page.</span>
       </div>
-      <div><button type="submit" class="btn btn-ghost">Save firm name</button></div>
+      <div class="field">
+        <span class="field-label">Setup walkthrough video <span class="field-hint">(optional)</span></span>
+        <input type="url" name="setupVideoUrl" maxlength="500" value="${escapeHtml(invitesInfo.setupVideoUrl || '')}" placeholder="https://www.loom.com/share/…" autocomplete="off">
+        <span class="field-hint">${
+          invitesInfo.setupVideoUrl
+            ? invitesInfo.setupVideoEmbedded
+              ? 'This video plays on the page clients see after choosing their password, and is linked in the invitation email.'
+              : 'Clients get a link to this video on the page they see after choosing their password, and in the invitation email. (Only Loom links are played on the page itself.)'
+            : 'Paste the share link to a video of you walking through the setup — a Loom link plays right on the page clients see after choosing their password, and is linked in the invitation email. Leave blank until you have one.'
+        }</span>
+      </div>
+      <div><button type="submit" class="btn btn-ghost">Save</button></div>
     </form>`
       : '';
 
@@ -2303,13 +2320,17 @@ function showSettingsModal() {
     firmForm.addEventListener('submit', async (event) => {
       event.preventDefault();
       try {
-        const saved = await api('/api/branding', {
-          method: 'PUT',
-          body: JSON.stringify({ firmName: new FormData(firmForm).get('firmName') }),
-        });
+        const form = new FormData(firmForm);
+        const payload = { setupVideoUrl: form.get('setupVideoUrl') };
+        // An empty name box means "leave the name as it is" when the name
+        // comes from the server settings, and "clear it" only when it was
+        // set here.
+        const typedName = String(form.get('firmName') || '').trim();
+        if (typedName || invitesInfo.firmNameSource === 'dashboard') payload.firmName = typedName;
+        const saved = await api('/api/branding', { method: 'PUT', body: JSON.stringify(payload) });
         invitesInfo = { ...invitesInfo, ...saved };
-        me = { ...me, firmName: saved.firmNameConfigured ? saved.firmName : null };
-        toast(saved.firmNameConfigured ? `Clients will now see “${saved.firmName}”` : 'Firm name cleared');
+        me = { ...me, firmName: saved.firmNameConfigured ? saved.firmName : null, setupVideoUrl: saved.setupVideoUrl };
+        toast(saved.firmNameConfigured ? `Saved — clients see “${saved.firmName}”` : 'Saved');
         closeModal();
         renderAll();
       } catch (err) {
