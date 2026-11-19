@@ -684,7 +684,7 @@ function clientDetailHtml() {
   const scopeNote = isAdmin
     ? `every connected client (${clientCount})`
     : `your ${clientCount} assigned client${clientCount === 1 ? '' : 's'}${
-        me.canWrite === false
+        me.canWrite === false && clientCount > 0
           ? ', read-only'
           : me.clients?.some((c) => c.canWrite === false)
             ? ', some read-only'
@@ -1323,8 +1323,10 @@ function checkboxToolbar() {
 // used when the member is read-only everywhere, which overrides the picker.
 function accessRowHtml({ inputName, value, label, checked, level, locked }) {
   const shown = locked ? 'read' : level || 'read_write';
+  // data-assigned marks rows that already had a level before this dialog
+  // opened — see readAccessRows for why that matters while locked.
   return `
-    <div class="access-row">
+    <div class="access-row"${checked ? ' data-assigned="true"' : ''}>
       <label class="checkbox-item">
         <input type="checkbox" name="${inputName}" value="${escapeHtml(String(value))}" ${checked ? 'checked' : ''}>
         <span title="${escapeHtml(label)}">${escapeHtml(label)}</span>
@@ -1340,15 +1342,18 @@ function accessRowHtml({ inputName, value, label, checked, level, locked }) {
 }
 
 // Read an access list back as [{ id, accessLevel }] for the checked rows. A
-// locked picker reports the level stored on the assignment, so saving while
-// the member is read-only everywhere doesn't quietly rewrite it.
+// locked picker (member is read-only everywhere) shows "Read-only" whatever
+// is stored, so: a row that was already assigned keeps its stored level —
+// saving doesn't quietly rewrite it — while a row newly checked under the
+// lock is saved as read-only, which is what the admin was shown. Otherwise
+// lifting the member-wide lock later would hand out write access nobody chose.
 function readAccessRows(root, inputName) {
   return [...root.querySelectorAll(`input[name="${inputName}"]:checked`)].map((cb) => {
-    const select = cb.closest('.access-row').querySelector('.access-level');
-    return {
-      id: cb.value,
-      accessLevel: select.dataset.locked ? select.dataset.storedLevel : select.value,
-    };
+    const row = cb.closest('.access-row');
+    const select = row.querySelector('.access-level');
+    let accessLevel = select.value;
+    if (select.dataset.locked) accessLevel = row.dataset.assigned ? select.dataset.storedLevel : 'read';
+    return { id: cb.value, accessLevel };
   });
 }
 

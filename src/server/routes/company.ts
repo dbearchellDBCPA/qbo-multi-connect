@@ -4,6 +4,7 @@ import type { QBOManager } from '../../index.js';
 import { authenticateRequest } from '../middleware.js';
 import { isRealmAllowed, canWriteRealm, createScopedManager, type AuthScope } from '../auth.js';
 import { runWithAccess } from '../../access-context.js';
+import { effectiveAccessLevel } from '../../users.js';
 import { contentTypeForFile, supportedExtensions, MAX_ATTACHMENT_BYTES } from '../../api/attachments.js';
 import { looksLikeUploadToken } from '../../upload-tokens.js';
 
@@ -52,7 +53,18 @@ export async function companyRoutes(
       const authHeader = request.headers.authorization;
       const bearer = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
       if (looksLikeUploadToken(bearer)) {
-        const valid = await qboManager.uploadTokens.validate(realmId, bearer!);
+        // The token is only as good as the member who minted it: if they have
+        // since been disabled, unassigned, or made read-only for this company,
+        // it stops working now rather than when it expires.
+        const grant = await qboManager.uploadTokens.resolve(realmId, bearer!);
+        let valid = grant !== null;
+        if (grant && grant.userId != null) {
+          const issuer = await qboManager.users.get(grant.userId);
+          valid =
+            issuer != null &&
+            issuer.status === 'active' &&
+            effectiveAccessLevel(issuer, realmId) === 'read_write';
+        }
         if (!valid) {
           await reply.code(401).send({
             error: 'Unauthorized',

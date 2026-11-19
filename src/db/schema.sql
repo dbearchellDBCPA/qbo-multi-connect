@@ -95,12 +95,15 @@ CREATE INDEX IF NOT EXISTS idx_user_clients_realm_id ON user_clients(realm_id);
 
 -- Short-lived tokens minted by create_upload_session so an agent can push
 -- file bytes to the REST attachments endpoint without knowing an API key.
--- Bound to one realm; stored hashed.
+-- Bound to one realm; stored hashed. user_id is the member who minted it
+-- (NULL for the master key): the token only works while that member still
+-- has read & write access to the realm.
 CREATE TABLE IF NOT EXISTS upload_tokens (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   token_hash TEXT NOT NULL UNIQUE,
   realm_id TEXT NOT NULL,
   issued_by TEXT,
+  user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   expires_at DATETIME NOT NULL
 );

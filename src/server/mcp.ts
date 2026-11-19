@@ -289,12 +289,15 @@ async function findRealmId(qboManager: ScopedQBOManager, clientName: string): Pr
   // picked — the wrong books, and possibly a different access level.
   const exact = connections.find((c) => c.clientName.toLowerCase().trim() === normalized);
   if (exact) return exact.realmId;
-  const match = connections.find(
+  // Otherwise accept a partial name only when it points at exactly one
+  // company. Two candidates means we'd be guessing whose books to open, so
+  // the tool reports "not found" and the caller picks from list_clients.
+  const loose = connections.filter(
     (c) =>
       c.clientName.toLowerCase().trim().includes(normalized) ||
       normalized.includes(c.clientName.toLowerCase().trim())
   );
-  return match?.realmId ?? null;
+  return loose.length === 1 ? loose[0].realmId : null;
 }
 
 // ─── Vendor name resolution ───────────────────────────────────────────────────
@@ -5629,7 +5632,7 @@ export async function registerMcpRoutes(
           return { content: [{ type: 'text', text: 'Cannot determine this server\'s public URL. Set QBO_PUBLIC_URL on the deployment (e.g. https://qbo.yourfirm.com) and retry.' }] };
         }
         try {
-          const { token, expiresAt } = await qboManager.uploadTokens.issue(realmId, scope.userName);
+          const { token, expiresAt } = await qboManager.uploadTokens.issue(realmId, scope.userName, scope.userId);
           const uploadUrl = `${baseUrl}/api/company/${encodeURIComponent(realmId)}/attachments`;
           const text = [
             `Upload session created for ${client_name} (realm ${realmId}).`,
@@ -5719,54 +5722,59 @@ export async function registerMcpRoutes(
       }
     );
 
-    // ── list_staging_files ────────────────────────────────────────────────────
-    server.tool(
-      'list_staging_files',
-      "List files currently in the SERVER's attachments staging directory (the place file_path parameters resolve against). Use it to confirm staged files exist before referencing them.",
-      {
-        prefix: z.string().optional().describe('Only list entries whose path starts with this prefix'),
-      },
-      async ({ prefix }) => {
-        if (!attachmentsDir) {
-          return { content: [{ type: 'text', text: 'No staging directory is configured on this deployment. Use create_upload_session to upload local files instead.' }] };
-        }
-        try {
-          const entries: Array<{ name: string; size: number; modified: string }> = [];
-          const MAX_ENTRIES = 500;
-          async function walk(dir: string, rel: string): Promise<void> {
-            let names: string[];
-            try {
-              names = await readdir(dir);
-            } catch (err: any) {
-              if (err?.code === 'ENOENT') return; // staging dir not created yet
-              throw err;
-            }
-            for (const name of names.sort()) {
-              if (entries.length >= MAX_ENTRIES) return;
-              const relPath = rel ? `${rel}/${name}` : name;
-              const s = await stat(`${dir}/${name}`);
-              if (s.isDirectory()) await walk(`${dir}/${name}`, relPath);
-              else if (!prefix || relPath.startsWith(prefix)) {
-                entries.push({ name: relPath, size: s.size, modified: s.mtime.toISOString() });
+    // The staging directory is one shared folder for the whole deployment, so
+    // its file names can reveal other companies' documents. Only callers who
+    // already see every company (the master key and admins) may list it.
+    if (scope.allRealms) {
+      // ── list_staging_files ────────────────────────────────────────────────────
+      server.tool(
+        'list_staging_files',
+        "List files currently in the SERVER's attachments staging directory (the place file_path parameters resolve against). Use it to confirm staged files exist before referencing them.",
+        {
+          prefix: z.string().optional().describe('Only list entries whose path starts with this prefix'),
+        },
+        async ({ prefix }) => {
+          if (!attachmentsDir) {
+            return { content: [{ type: 'text', text: 'No staging directory is configured on this deployment. Use create_upload_session to upload local files instead.' }] };
+          }
+          try {
+            const entries: Array<{ name: string; size: number; modified: string }> = [];
+            const MAX_ENTRIES = 500;
+            async function walk(dir: string, rel: string): Promise<void> {
+              let names: string[];
+              try {
+                names = await readdir(dir);
+              } catch (err: any) {
+                if (err?.code === 'ENOENT') return; // staging dir not created yet
+                throw err;
+              }
+              for (const name of names.sort()) {
+                if (entries.length >= MAX_ENTRIES) return;
+                const relPath = rel ? `${rel}/${name}` : name;
+                const s = await stat(`${dir}/${name}`);
+                if (s.isDirectory()) await walk(`${dir}/${name}`, relPath);
+                else if (!prefix || relPath.startsWith(prefix)) {
+                  entries.push({ name: relPath, size: s.size, modified: s.mtime.toISOString() });
+                }
               }
             }
+            await walk(attachmentsDir, '');
+            if (entries.length === 0) {
+              return { content: [{ type: 'text', text: `Staging directory ${attachmentsDir} is empty${prefix ? ` (no entries matching "${prefix}")` : ''}. Files from your machine reach QBO via create_upload_session + curl — they do not need staging.` }] };
+            }
+            const lines = [
+              `STAGED FILES — ${attachmentsDir}${prefix ? ` (prefix: ${prefix})` : ''}`,
+              `Total: ${entries.length}${entries.length >= MAX_ENTRIES ? ' (truncated at 500)' : ''}`,
+              '─'.repeat(80),
+              ...entries.map((e) => `  ${e.name}  (${e.size} bytes, modified ${e.modified})`),
+            ];
+            return { content: [{ type: 'text', text: lines.join('\n') }] };
+          } catch (err: any) {
+            return { content: [{ type: 'text', text: `Error listing staging files: ${err?.message ?? err}` }] };
           }
-          await walk(attachmentsDir, '');
-          if (entries.length === 0) {
-            return { content: [{ type: 'text', text: `Staging directory ${attachmentsDir} is empty${prefix ? ` (no entries matching "${prefix}")` : ''}. Files from your machine reach QBO via create_upload_session + curl — they do not need staging.` }] };
-          }
-          const lines = [
-            `STAGED FILES — ${attachmentsDir}${prefix ? ` (prefix: ${prefix})` : ''}`,
-            `Total: ${entries.length}${entries.length >= MAX_ENTRIES ? ' (truncated at 500)' : ''}`,
-            '─'.repeat(80),
-            ...entries.map((e) => `  ${e.name}  (${e.size} bytes, modified ${e.modified})`),
-          ];
-          return { content: [{ type: 'text', text: lines.join('\n') }] };
-        } catch (err: any) {
-          return { content: [{ type: 'text', text: `Error listing staging files: ${err?.message ?? err}` }] };
         }
-      }
-    );
+      );
+    }
 
     return server;
   }

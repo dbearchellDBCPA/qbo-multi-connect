@@ -147,6 +147,38 @@ describe('per-company access levels — storage and resolution', () => {
     expect((await qbo.users.get(bob.id))?.assignments).toEqual([{ realmId: 'realm-1', accessLevel: 'read' }]);
   });
 
+  it('a company added to a read-only-everywhere member is stored read-only', async () => {
+    // Otherwise lifting the member-wide cap later would hand out write access
+    // to companies that were only ever added as read-only.
+    const { user } = await qbo.users.create({ name: 'Capped', accessLevel: 'read', realmIds: ['realm-1'] });
+    expect(user.assignments).toEqual([{ realmId: 'realm-1', accessLevel: 'read' }]);
+
+    const widened = await qbo.users.setClients(user.id, ['realm-1', 'realm-2']);
+    expect(widened?.assignments).toEqual([
+      { realmId: 'realm-1', accessLevel: 'read' },
+      { realmId: 'realm-2', accessLevel: 'read' },
+    ]);
+
+    await qbo.users.setClientUsers('realm-3', [user.id]);
+    const uncapped = await qbo.users.update(user.id, { accessLevel: 'read_write' });
+    expect(uncapped?.assignments.map((a) => a.accessLevel)).toEqual(['read', 'read', 'read']);
+    expect(effectiveAccessLevel(uncapped!, 'realm-3')).toBe('read');
+  });
+
+  it('editing a company\'s members leaves an admin\'s own assignment alone', async () => {
+    const jane = (await qbo.users.create({ name: 'Jane', assignments: [{ realmId: 'realm-1', accessLevel: 'read' }] })).user;
+    const bob = (await qbo.users.create({ name: 'Bob', realmIds: ['realm-1'] })).user;
+    await qbo.users.update(jane.id, { role: 'admin' });
+
+    // The dashboard only lists members, so Jane is not in what it sends back.
+    await qbo.users.setClientAssignments('realm-1', [{ userId: bob.id, accessLevel: 'read' }]);
+    await qbo.users.setClientUsers('realm-1', []);
+
+    const demoted = await qbo.users.update(jane.id, { role: 'member' });
+    expect(demoted?.assignments).toEqual([{ realmId: 'realm-1', accessLevel: 'read' }]);
+    expect((await qbo.users.get(bob.id))?.assignments).toEqual([]);
+  });
+
   it('resolveAuth builds a per-company write set', async () => {
     const mixed = await qbo.users.create({
       name: 'Mixed',
@@ -190,6 +222,17 @@ describe('per-company access levels — storage and resolution', () => {
       const raw = new Database(dbPath);
       raw.exec('ALTER TABLE user_clients DROP COLUMN access_level');
       expect((raw.prepare('PRAGMA table_info(user_clients)').all() as any[]).map((c) => c.name)).not.toContain('access_level');
+      // …and the previous release's upload_tokens table, with a live token in it.
+      raw.exec('DROP TABLE upload_tokens');
+      raw.exec(`CREATE TABLE upload_tokens (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        token_hash TEXT NOT NULL UNIQUE,
+        realm_id TEXT NOT NULL,
+        issued_by TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        expires_at DATETIME NOT NULL
+      )`);
+      raw.prepare("INSERT INTO upload_tokens (token_hash, realm_id, issued_by, expires_at) VALUES ('h', 'realm-1', 'Writer', datetime('now', '+30 minutes'))").run();
       raw.close();
 
       const upgraded = makeManager(dbPath);
@@ -202,6 +245,10 @@ describe('per-company access levels — storage and resolution', () => {
         expect((await upgraded.users.get(writer.user.id))?.assignments).toEqual([
           { realmId: 'realm-1', accessLevel: 'read_write' },
         ]);
+        // The in-flight token survives the upgrade, and new ones record who minted them.
+        expect(await (upgraded as any).db.getUploadToken('h')).toMatchObject({ realm_id: 'realm-1', user_id: null });
+        const { token } = await upgraded.uploadTokens.issue('realm-1', 'Writer', writer.user.id);
+        expect(await upgraded.uploadTokens.resolve('realm-1', token)).toEqual({ userId: writer.user.id });
       } finally {
         upgraded.close();
       }
@@ -464,6 +511,31 @@ describe('per-company access over MCP and REST', () => {
     }
   });
 
+  it('a partial client name works only when it points at one company', async () => {
+    await addConnection(qbo, 'Smith Dental', 'realm-6');
+    await addConnection(qbo, 'Smith Dental Group', 'realm-7');
+    const info = (name: string) =>
+      mcp(MASTER_KEY, 'tools/call', { name: 'get_company_info', arguments: { client_name: name } }).then(toolText);
+
+    intuit.calls.length = 0;
+    expect(await info('Smith')).toContain('Client not found'); // two candidates → no guessing
+    expect(await info('Smith Dental Group LLC')).toContain('Client not found'); // contains both names
+    expect(intuit.calls).toEqual([]);
+
+    await info('gamma'); // one candidate → resolved
+    await info('Smith Dental Group'); // exact
+    expect(intuit.calls.map((c) => c.realmId)).toEqual(['realm-3', 'realm-7']);
+  });
+
+  it('only callers who see every company can list the shared staging directory', async () => {
+    const names = async (key: string) => (await mcp(key, 'tools/list', {})).result.tools.map((t: any) => t.name);
+    const admin = await qbo.users.create({ name: 'Boss', role: 'admin' });
+    expect(await names(MASTER_KEY)).toContain('list_staging_files');
+    expect(await names(admin.apiKey)).toContain('list_staging_files');
+    expect(await names(mixedKey)).not.toContain('list_staging_files');
+    expect(await names(viewerKey)).not.toContain('list_staging_files');
+  });
+
   // ── REST ───────────────────────────────────────────────────────────────────
 
   it('REST write routes follow the per-company level', async () => {
@@ -530,6 +602,48 @@ describe('per-company access over MCP and REST', () => {
     expect(intuit.calls).toEqual([]);
   });
 
+  it('an upload token stops working when the member who minted it loses write access', async () => {
+    const upload = (token: string) => {
+      const boundary = 'b-upload';
+      return app.inject({
+        method: 'POST',
+        url: '/api/company/realm-1/attachments',
+        headers: { authorization: `Bearer ${token}`, 'content-type': `multipart/form-data; boundary=${boundary}` },
+        payload:
+          `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="x.png"\r\n` +
+          `Content-Type: image/png\r\n\r\nx\r\n--${boundary}--\r\n`,
+      });
+    };
+    const scope = (await resolveAuth(qbo, MASTER_KEY, `Bearer ${mixedKey}`))!;
+    const { token } = await createScopedManager(qbo, scope).uploadTokens.issue('realm-1', scope.userName, scope.userId);
+    const masterToken = (await qbo.uploadTokens.issue('realm-1', 'Master key')).token;
+
+    expect((await upload(token)).statusCode).not.toBe(401); // accepted while they can write
+
+    // Made read-only for this company → the token is dead at once.
+    await qbo.users.setAssignments(mixedId, [{ realmId: 'realm-1', accessLevel: 'read' }]);
+    expect((await upload(token)).statusCode).toBe(401);
+
+    // Restored, then disabled.
+    await qbo.users.setAssignments(mixedId, [{ realmId: 'realm-1', accessLevel: 'read_write' }]);
+    expect((await upload(token)).statusCode).not.toBe(401);
+    await qbo.users.update(mixedId, { status: 'disabled' });
+    expect((await upload(token)).statusCode).toBe(401);
+
+    // Re-enabled, then unassigned from the company altogether.
+    await qbo.users.update(mixedId, { status: 'active' });
+    await qbo.users.setAssignments(mixedId, []);
+    expect((await upload(token)).statusCode).toBe(401);
+
+    // Removing the member removes their tokens with them.
+    await qbo.users.setAssignments(mixedId, [{ realmId: 'realm-1', accessLevel: 'read_write' }]);
+    await qbo.users.remove(mixedId);
+    expect((await upload(token)).statusCode).toBe(401);
+
+    // A token minted with the master key has no member behind it to lose access.
+    expect((await upload(masterToken)).statusCode).not.toBe(401);
+  });
+
   it('REST read routes still work for a read-only company', async () => {
     const res = await app.inject({
       method: 'GET',
@@ -570,11 +684,24 @@ describe('per-company access over MCP and REST', () => {
     expect(capped.json().user.clients.map((c: any) => c.effectiveAccessLevel)).toEqual(['read', 'read']);
     expect(capped.json().user.clients.map((c: any) => c.accessLevel)).toEqual(['read', 'read_write']);
 
-    // The older realmIds form keeps levels for companies that stay.
+    // The older realmIds form keeps levels for companies that stay. Pat is
+    // read-only everywhere right now, so the newly added company is stored
+    // read-only too; once the cap is lifted a new one gets read & write.
     const kept = await app.inject({ method: 'PATCH', url: `/api/users/${pat.id}`, headers: asMaster, payload: { realmIds: ['realm-1', 'realm-2'] } });
     expect(kept.json().user.clients.map((c: any) => [c.realmId, c.accessLevel])).toEqual([
       ['realm-1', 'read'],
-      ['realm-2', 'read_write'],
+      ['realm-2', 'read'],
+    ]);
+    const uncapped = await app.inject({
+      method: 'PATCH',
+      url: `/api/users/${pat.id}`,
+      headers: asMaster,
+      payload: { accessLevel: 'read_write', realmIds: ['realm-1', 'realm-2', 'realm-3'] },
+    });
+    expect(uncapped.json().user.clients.map((c: any) => [c.realmId, c.accessLevel])).toEqual([
+      ['realm-1', 'read'],
+      ['realm-2', 'read'],
+      ['realm-3', 'read_write'],
     ]);
   });
 

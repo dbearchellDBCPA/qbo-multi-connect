@@ -23,20 +23,44 @@ function hashToken(token: string): string {
 export class UploadTokenService {
   constructor(private db: ConnectionDatabase) {}
 
-  /** Issue a token for one realm. Returns the plaintext token (never stored). */
-  async issue(realmId: string, issuedBy: string): Promise<{ token: string; expiresAt: Date }> {
+  /**
+   * Issue a token for one realm. Returns the plaintext token (never stored).
+   * `userId` is the member minting it (null for the master key); the upload
+   * route re-checks that member's access each time the token is presented.
+   */
+  async issue(
+    realmId: string,
+    issuedBy: string,
+    userId: number | null = null
+  ): Promise<{ token: string; expiresAt: Date }> {
     await this.db.purgeExpiredUploadTokens();
     const token = `${UPLOAD_TOKEN_PREFIX}${randomBytes(24).toString('hex')}`;
     const expiresAt = new Date(Date.now() + UPLOAD_TOKEN_TTL_MS);
-    await this.db.insertUploadToken(hashToken(token), realmId, issuedBy, expiresAt.toISOString().replace('T', ' ').slice(0, 19));
+    await this.db.insertUploadToken(
+      hashToken(token),
+      realmId,
+      issuedBy,
+      expiresAt.toISOString().replace('T', ' ').slice(0, 19),
+      userId
+    );
     return { token, expiresAt };
   }
 
-  /** Validate a token for a specific realm. Realm-first for scope guarding. */
-  async validate(realmId: string, token: string): Promise<boolean> {
-    if (!token.startsWith(UPLOAD_TOKEN_PREFIX)) return false;
+  /**
+   * Look up an unexpired token for a specific realm. Returns who minted it
+   * (userId null = master key), or null when the token is unknown, expired,
+   * or bound to a different realm. Realm-first for scope guarding.
+   */
+  async resolve(realmId: string, token: string): Promise<{ userId: number | null } | null> {
+    if (!token.startsWith(UPLOAD_TOKEN_PREFIX)) return null;
     const row = await this.db.getUploadToken(hashToken(token));
-    return row !== null && row.realm_id === realmId;
+    if (row === null || row.realm_id !== realmId) return null;
+    return { userId: row.user_id };
+  }
+
+  /** Whether a token is unexpired and bound to this realm (issuer not checked). */
+  async validate(realmId: string, token: string): Promise<boolean> {
+    return (await this.resolve(realmId, token)) !== null;
   }
 }
 

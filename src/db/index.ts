@@ -74,6 +74,19 @@ export class ConnectionDatabase {
         );
       }
     }
+
+    // Upload tokens remember who minted them, so one stops working when that
+    // member loses write access. Tokens from before this column (they live an
+    // hour at most) keep NULL and simply run out their time.
+    const hasUploadTokens = this.db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'upload_tokens'")
+      .get();
+    if (hasUploadTokens) {
+      const tokenColumns = this.db.prepare('PRAGMA table_info(upload_tokens)').all() as Array<{ name: string }>;
+      if (!tokenColumns.some((c) => c.name === 'user_id')) {
+        this.db.exec('ALTER TABLE upload_tokens ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE CASCADE');
+      }
+    }
   }
 
   /**
@@ -386,17 +399,24 @@ export class ConnectionDatabase {
   }
 
   /**
-   * Replace the full set of users assigned to a realm (edit access from the
-   * client side), each with its own access level. Members not in the list
+   * Replace the full set of members assigned to a realm (edit access from
+   * the client side), each with its own access level. Members not in the list
    * lose access to this realm; admins are unaffected since their access is
-   * role-based, not row-based.
+   * role-based, not row-based, and any row they hold is left as it is unless
+   * the list names them.
    */
   async setRealmAssignments(
     realmId: string,
     assignments: Array<{ userId: number; accessLevel: UserAccessLevel }>
   ): Promise<void> {
     const replaceAll = this.db.transaction((rows: Array<{ userId: number; accessLevel: UserAccessLevel }>) => {
-      this.db.prepare('DELETE FROM user_clients WHERE realm_id = ?').run(realmId);
+      // Only member rows are replaced. An admin's row is dormant (their
+      // access is by role) and callers list members only — deleting it here
+      // would silently cost them this company if they are ever made a member
+      // again.
+      this.db
+        .prepare("DELETE FROM user_clients WHERE realm_id = ? AND user_id NOT IN (SELECT id FROM users WHERE role = 'admin')")
+        .run(realmId);
       const insert = this.db.prepare(
         'INSERT OR REPLACE INTO user_clients (user_id, realm_id, access_level) VALUES (?, ?, ?)'
       );
@@ -484,16 +504,22 @@ export class ConnectionDatabase {
 
   // ── Upload tokens (REST attachments endpoint) ────────────────────────────
 
-  async insertUploadToken(tokenHash: string, realmId: string, issuedBy: string, expiresAtIso: string): Promise<void> {
-    this.db.prepare('INSERT INTO upload_tokens (token_hash, realm_id, issued_by, expires_at) VALUES (?, ?, ?, ?)')
-      .run(tokenHash, realmId, issuedBy, expiresAtIso);
+  async insertUploadToken(
+    tokenHash: string,
+    realmId: string,
+    issuedBy: string,
+    expiresAtIso: string,
+    userId: number | null = null
+  ): Promise<void> {
+    this.db.prepare('INSERT INTO upload_tokens (token_hash, realm_id, issued_by, expires_at, user_id) VALUES (?, ?, ?, ?, ?)')
+      .run(tokenHash, realmId, issuedBy, expiresAtIso, userId);
   }
 
-  /** Resolve an unexpired upload token hash to its realm binding. */
-  async getUploadToken(tokenHash: string): Promise<{ realm_id: string; expires_at: string } | null> {
+  /** Resolve an unexpired upload token hash to its realm binding and issuer. */
+  async getUploadToken(tokenHash: string): Promise<{ realm_id: string; expires_at: string; user_id: number | null } | null> {
     const row = this.db.prepare(
-      "SELECT realm_id, expires_at FROM upload_tokens WHERE token_hash = ? AND expires_at > datetime('now')"
-    ).get(tokenHash) as { realm_id: string; expires_at: string } | undefined;
+      "SELECT realm_id, expires_at, user_id FROM upload_tokens WHERE token_hash = ? AND expires_at > datetime('now')"
+    ).get(tokenHash) as { realm_id: string; expires_at: string; user_id: number | null } | undefined;
     return row ?? null;
   }
 

@@ -78,6 +78,16 @@ function parseUtcDate(value: string): Date {
 export const DEFAULT_ASSIGNMENT_LEVEL: UserAccessLevel = 'read_write';
 
 /**
+ * The level a new assignment gets when the caller doesn't choose one: read &
+ * write, unless the member is read-only everywhere. Storing 'read' for those
+ * means lifting the member-wide cap later doesn't quietly hand them write
+ * access to companies that were only ever added as read-only.
+ */
+function defaultLevelFor(memberLevel: UserAccessLevel | undefined): UserAccessLevel {
+  return memberLevel === 'read' ? 'read' : DEFAULT_ASSIGNMENT_LEVEL;
+}
+
+/**
  * What a user may actually do in one company: null when it isn't assigned to
  * them, otherwise the per-company level capped by the user-level ceiling.
  * Admins reach every company with full access.
@@ -163,7 +173,7 @@ export class UserService {
     });
     const assignments =
       input.assignments ??
-      (input.realmIds ?? []).map((realmId) => ({ realmId, accessLevel: DEFAULT_ASSIGNMENT_LEVEL }));
+      (input.realmIds ?? []).map((realmId) => ({ realmId, accessLevel: defaultLevelFor(input.accessLevel) }));
     if (assignments.length) {
       await this.db.setUserAssignments(id, assignments);
     }
@@ -204,14 +214,17 @@ export class UserService {
   /**
    * Replace the user's assigned companies with the given realm IDs. A company
    * that stays assigned keeps its access level; a newly assigned one gets the
-   * default (read & write). Use setAssignments to choose levels.
+   * default (read & write, or read-only for a read-only-everywhere member).
+   * Use setAssignments to choose levels.
    */
   async setClients(id: number, realmIds: string[]): Promise<User | null> {
-    if (!(await this.db.getUserById(id))) return null;
+    const record = await this.db.getUserById(id);
+    if (!record) return null;
     const current = new Map((await this.db.getUserAssignments(id)).map((a) => [a.realmId, a.accessLevel]));
+    const fallback = defaultLevelFor(record.access_level);
     await this.db.setUserAssignments(
       id,
-      realmIds.map((realmId) => ({ realmId, accessLevel: current.get(realmId) ?? DEFAULT_ASSIGNMENT_LEVEL }))
+      realmIds.map((realmId) => ({ realmId, accessLevel: current.get(realmId) ?? fallback }))
     );
     return this.get(id);
   }
@@ -227,14 +240,17 @@ export class UserService {
    * Replace the full set of users assigned to a company (edit access from
    * the client side). Members not in the list lose access to that realm; a
    * member who stays keeps their level, a newly added one gets the default
-   * (read & write). Use setClientAssignments to choose levels.
+   * (read & write, or read-only for a read-only-everywhere member). Use
+   * setClientAssignments to choose levels.
    */
   async setClientUsers(realmId: string, userIds: number[]): Promise<void> {
     const current = new Map((await this.db.getRealmAssignments(realmId)).map((a) => [a.userId, a.accessLevel]));
-    await this.db.setRealmAssignments(
-      realmId,
-      userIds.map((userId) => ({ userId, accessLevel: current.get(userId) ?? DEFAULT_ASSIGNMENT_LEVEL }))
-    );
+    const assignments = [];
+    for (const userId of userIds) {
+      const fallback = defaultLevelFor((await this.db.getUserById(userId))?.access_level);
+      assignments.push({ userId, accessLevel: current.get(userId) ?? fallback });
+    }
+    await this.db.setRealmAssignments(realmId, assignments);
   }
 
   /** Replace the users assigned to a company, each with an explicit access level. */
