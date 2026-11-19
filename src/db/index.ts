@@ -566,13 +566,6 @@ export class ConnectionDatabase {
     );
   }
 
-  /** The same person asking again: keep one row, with what they typed last. */
-  async refreshPendingAccessRequest(id: number, row: { name: string; email: string; company: string }): Promise<void> {
-    this.db
-      .prepare("UPDATE access_requests SET name = ?, email = ?, company = ? WHERE id = ? AND status = 'pending'")
-      .run(row.name, row.email, row.company, id);
-  }
-
   async listAccessRequests(status: AccessRequestStatus | 'decided', limit: number): Promise<AccessRequestRecord[]> {
     const sql =
       status === 'decided'

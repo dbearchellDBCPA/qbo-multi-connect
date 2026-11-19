@@ -211,8 +211,9 @@ and approval sends the ordinary invitation.
 - **The company is your choice.** What the requester typed is a hint for you;
   it never decides which books they see.
 - **It gives nothing away.** Everyone who submits gets the same answer,
-  whether or not the address is already a client's, and one address can only
-  have one request waiting.
+  whether or not the address is already a client's. One address can only
+  have one request waiting, and a later submission can't change it — so
+  nobody else can rewrite what a client asked for.
 - **It can't be flooded without limit.** Names can't carry links or markup.
   A hidden field and a timed form turn away simple scripts. Submissions are
   limited per network address (20 an hour), overall (100 an hour) and by how
@@ -267,9 +268,12 @@ They tick a box to continue. Where it happens:
   it signs in through the connector.
 
 The date is recorded on the login (**Team → the client → Accepted the
-risks**). If the wording is ever changed in a way that matters
-(`CLIENT_TERMS_VERSION` in `src/client-terms.ts`), every client is asked
-again at their next sign-in. Your own team is never asked.
+risks**). An assistant that was connected before a client accepted is
+disconnected the next time it renews its access (within the hour) and asks
+them to sign in again, which is where they accept. The same happens to every
+client if the wording is ever changed in a way that matters
+(`CLIENT_TERMS_VERSION` in `src/client-terms.ts`). Your own team is never
+asked.
 
 The fuller explanation is a public page on your server, **`/security`**, in
 your firm's name: how the connection is protected, AI providers and training

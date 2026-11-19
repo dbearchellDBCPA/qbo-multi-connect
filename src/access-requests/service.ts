@@ -297,13 +297,11 @@ export class AccessRequests {
     const input = cleanRequestInput(raw);
     if (!this.allowSource(source || 'unknown')) return 'busy';
 
-    // The same person asking again replaces their earlier, still-waiting
-    // request rather than adding a second one.
-    const waiting = await this.db.getPendingAccessRequestByEmail(input.emailKey);
-    if (waiting) {
-      await this.db.refreshPendingAccessRequest(waiting.id, input);
-      return 'received';
-    }
+    // One waiting request per address, and the first one stands. A later
+    // submission with the same address is answered the same way but changes
+    // nothing: the form is open to anyone, so it must not let a stranger
+    // rewrite the name or business a reviewer sees on someone else's request.
+    if (await this.db.getPendingAccessRequestByEmail(input.emailKey)) return 'received';
 
     const nowMs = this.now().getTime();
     if ((await this.db.countAccessRequests({ status: 'pending' })) >= MAX_PENDING_REQUESTS) return 'busy';

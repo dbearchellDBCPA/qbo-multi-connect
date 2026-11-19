@@ -439,6 +439,44 @@ describe('inviting a client by link', () => {
     expect(lastSignInPage.body).toContain('One more step before you connect');
   });
 
+  it('an assistant that is already connected cannot renew its way past the points', async () => {
+    const created = (await app.inject({ method: 'POST', url: '/api/users', headers: asMaster, payload: { name: 'Typed In', email: 'typed@client.example', username: 'typed@client.example', password: 'admin-chose-this-1', accountType: 'client', clients: [{ realmId: 'realm-1' }] } })).json();
+    const id = created.user.id;
+    // Connected before the points existed (or before they changed): tokens in hand, nothing accepted.
+    const client = (await app.inject({ method: 'POST', url: '/oauth/register', headers: HOST, payload: { client_name: 'Claude', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'none' } })).json();
+    const verifier = randomBytes(32).toString('base64url');
+    const code = await qbo.oauth.createAuthCode({ clientId: client.client_id, userId: id, redirectUri: REDIRECT, codeChallenge: createHash('sha256').update(verifier).digest('base64url'), scope: null, resource: null });
+    const first = (await app.inject({ method: 'POST', url: '/oauth/token', headers: HOST, payload: { grant_type: 'authorization_code', client_id: client.client_id, code, code_verifier: verifier, redirect_uri: REDIRECT } })).json();
+    expect(await tokenWorks(first.access_token)).toBe(true);
+    const renew = (refresh_token: string) => app.inject({ method: 'POST', url: '/oauth/token', headers: HOST, payload: { grant_type: 'refresh_token', client_id: client.client_id, refresh_token } });
+
+    const refused = await renew(first.refresh_token);
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json().error).toBe('invalid_grant'); // the assistant asks them to sign in again
+    expect(await tokenWorks(first.access_token)).toBe(false); // and what it held is gone
+
+    // They sign in, accept, and from then on renewing works as usual.
+    const token = await connectorSignIn('typed@client.example', 'admin-chose-this-1', { agree: 'on' });
+    expect(token).toBeTruthy();
+    expect((await qbo.users.get(id))!.acknowledgedVersion).toBe('1');
+    expect(await tokenWorks(token!)).toBe(true);
+  });
+
+  it('renewing is untouched for a client who has accepted', async () => {
+    await invite();
+    await accept(sender.lastLinkPath());
+    for (const [username, password] of [[EMAIL, CHOSEN]] as const) {
+      const client = (await app.inject({ method: 'POST', url: '/oauth/register', headers: HOST, payload: { client_name: 'Claude', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'none' } })).json();
+      const verifier = randomBytes(32).toString('base64url');
+      const authorize = await app.inject({ method: 'POST', url: '/oauth/authorize', headers: HOST, payload: { client_id: client.client_id, redirect_uri: REDIRECT, response_type: 'code', code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256', state: 's', username, password } });
+      const code = new URL(authorize.headers.location as string).searchParams.get('code')!;
+      const tokens = (await app.inject({ method: 'POST', url: '/oauth/token', headers: HOST, payload: { grant_type: 'authorization_code', client_id: client.client_id, code, code_verifier: verifier, redirect_uri: REDIRECT } })).json();
+      const renewed = await app.inject({ method: 'POST', url: '/oauth/token', headers: HOST, payload: { grant_type: 'refresh_token', client_id: client.client_id, refresh_token: tokens.refresh_token } });
+      expect(renewed.statusCode).toBe(200);
+      expect(await tokenWorks(renewed.json().access_token)).toBe(true);
+    }
+  });
+
   it('never asks the firm\'s own team', async () => {
     await app.inject({ method: 'POST', url: '/api/users', headers: asMaster, payload: { name: 'Staff Person', username: 'staff.person', password: 'a-staff-password-1', realmIds: ['realm-1'] } });
     expect(await connectorSignIn('staff.person', 'a-staff-password-1')).toBeTruthy();

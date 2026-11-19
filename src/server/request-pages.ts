@@ -10,6 +10,13 @@ import { clientPage } from './invite-pages.js';
 import { escapeHtml } from '../invites/setup-steps.js';
 import { SECURITY_PAGE_PATH } from '../client-terms.js';
 
+/**
+ * The field nobody sees. Its name is deliberately meaningless: a name like
+ * "website" or "phone" invites a browser's autofill to fill it in for a real
+ * person, whose request would then be thrown away.
+ */
+export const HIDDEN_FIELD = 'confirm_blank';
+
 export interface RequestFormDetails {
   firm: FirmBrand;
   /** The signed timestamp the form carries back. */
@@ -39,8 +46,8 @@ export function requestAccessPage(details: RequestFormDetails): string {
       <input type="text" id="company" name="company" value="${value(values.company)}" maxlength="${MAX_REQUEST_COMPANY_LENGTH}" autocomplete="organization" required${focus('company')}>
       <p class="hint">As it appears on your QuickBooks account, if you know it.</p>
       <div class="extra" aria-hidden="true">
-        <label for="website">Leave this empty</label>
-        <input type="text" id="website" name="website" tabindex="-1" autocomplete="off">
+        <label for="${HIDDEN_FIELD}">Leave this empty</label>
+        <input type="text" id="${HIDDEN_FIELD}" name="${HIDDEN_FIELD}" tabindex="-1" autocomplete="off">
       </div>
       <input type="hidden" name="t" value="${escapeHtml(token)}">
       <button type="submit">Request access</button>

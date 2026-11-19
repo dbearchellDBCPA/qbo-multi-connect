@@ -4,7 +4,7 @@ import type { QBOManager } from '../../index.js';
 import { authenticateRequest, requireAdmin } from '../middleware.js';
 import { AccessRequestInputError, MAX_PENDING_REQUESTS, suggestCompany } from '../../access-requests/service.js';
 import { clientFacingBaseUrl, createInviteIssuer, type InviteResult } from '../invite-issuer.js';
-import { requestAccessPage, requestBusyPage, requestClosedPage, requestReceivedPage } from '../request-pages.js';
+import { HIDDEN_FIELD, requestAccessPage, requestBusyPage, requestClosedPage, requestReceivedPage } from '../request-pages.js';
 
 /** Where the public request page lives. */
 export const REQUEST_ACCESS_PATH = '/request-access';
@@ -80,7 +80,7 @@ export async function accessRequestRoutes(
 
     // A person never sees this field. Something that fills it in is told the
     // same thing as everyone else, and nothing is kept.
-    if (text(body.website).trim()) return received();
+    if (text(body[HIDDEN_FIELD]).trim()) return received();
 
     const token = requests.checkFormToken(body.t);
     if (token !== 'ok') {

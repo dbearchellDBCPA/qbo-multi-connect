@@ -10,6 +10,8 @@ export const MAX_FIRM_NAME_LENGTH = 100;
 const FIRM_NAME_SETTING = 'firm_name';
 const SETUP_VIDEO_SETTING = 'setup_video_url';
 const LOGO_SETTING = 'firm_logo';
+/** The logo's type, version and shape — all a page needs to point at it — kept apart from the image itself. */
+const LOGO_META_SETTING = 'firm_logo_meta';
 
 /** Where the firm's logo is served from. Public: it appears on pages and in emails. */
 export const LOGO_PATH = '/brand/logo';
@@ -179,8 +181,8 @@ export class Branding {
    * else the display name of the invitation sender, else a neutral phrase.
    */
   async firm(): Promise<FirmBrand> {
-    const image = await this.logo();
-    const logo = image ? { path: `${LOGO_PATH}?v=${image.version}`, wide: image.wide } : null;
+    const meta = await this.logoMeta();
+    const logo = meta ? { path: `${LOGO_PATH}?v=${meta.version}`, wide: meta.wide } : null;
     const stored = (await this.db.getSetting(FIRM_NAME_SETTING))?.trim();
     if (stored) return { name: stored, configured: true, source: 'dashboard', displayName: stored, logo };
     const { firmName, firmNameSource } = this.invitesConfig;
@@ -188,19 +190,28 @@ export class Branding {
     return { name: firmName, configured, source: firmNameSource, displayName: configured ? firmName : APP_NAME, logo };
   }
 
-  /** The firm's logo, if one has been uploaded. */
-  async logo(): Promise<FirmLogo | null> {
-    const raw = await this.db.getSetting(LOGO_SETTING);
+  /** What is known about the logo without loading it. */
+  private async logoMeta(): Promise<{ type: string; version: string; wide: boolean } | null> {
+    const raw = await this.db.getSetting(LOGO_META_SETTING);
     if (!raw) return null;
     try {
-      const stored = JSON.parse(raw) as { type: string; data: string; version: string; wide: boolean };
-      const bytes = Buffer.from(stored.data, 'base64');
-      // Re-checked on the way out: only ever serve what is recognisably one of the allowed image formats.
-      if (!LOGO_FORMATS.some((f) => f.type === stored.type && f.matches(bytes))) return null;
-      return { type: stored.type, bytes, version: String(stored.version), wide: Boolean(stored.wide) };
+      const meta = JSON.parse(raw) as { type?: unknown; version?: unknown; wide?: unknown };
+      if (typeof meta.type !== 'string' || typeof meta.version !== 'string') return null;
+      return { type: meta.type, version: meta.version, wide: Boolean(meta.wide) };
     } catch {
       return null;
     }
+  }
+
+  /** The firm's logo, if one has been uploaded. */
+  async logo(): Promise<FirmLogo | null> {
+    const meta = await this.logoMeta();
+    const data = meta ? await this.db.getSetting(LOGO_SETTING) : null;
+    if (!meta || !data) return null;
+    const bytes = Buffer.from(data, 'base64');
+    // Re-checked on the way out: only ever serve what is recognisably one of the allowed image formats.
+    if (!LOGO_FORMATS.some((f) => f.type === meta.type && f.matches(bytes))) return null;
+    return { ...meta, bytes };
   }
 
   /**
@@ -214,11 +225,15 @@ export class Branding {
     const height = measured?.height ?? Number(size?.height);
     const wide = Number.isFinite(width) && Number.isFinite(height) && height > 0 && width / height >= WIDE_LOGO_RATIO;
     const version = createHash('sha256').update(bytes).digest('hex').slice(0, 12);
-    await this.db.setSetting(LOGO_SETTING, JSON.stringify({ type, data: bytes.toString('base64'), version, wide }));
+    // The description goes last: a page only points at the logo once the image it describes is stored.
+    await this.db.setSetting(LOGO_META_SETTING, null);
+    await this.db.setSetting(LOGO_SETTING, bytes.toString('base64'));
+    await this.db.setSetting(LOGO_META_SETTING, JSON.stringify({ type, version, wide }));
     return { type, bytes, version, wide };
   }
 
   async removeLogo(): Promise<void> {
+    await this.db.setSetting(LOGO_META_SETTING, null);
     await this.db.setSetting(LOGO_SETTING, null);
   }
 

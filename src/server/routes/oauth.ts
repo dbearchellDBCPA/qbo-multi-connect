@@ -363,6 +363,17 @@ export async function oauthRoutes(fastify: FastifyInstance, qboManager: QBOManag
         });
       } else if (body.grant_type === 'refresh_token') {
         tokens = await qboManager.oauth.refresh({ refreshToken: body.refresh_token, clientId });
+        // A client login that has not accepted the current "before you
+        // connect" points does not get to carry on by renewing: its tokens
+        // are dropped, the assistant asks it to sign in again, and the
+        // sign-in page shows the points. Without this, an assistant that
+        // was already connected would never be asked.
+        const owner = await qboManager.oauth.verifyAccessToken(tokens.accessToken);
+        const user = owner ? await qboManager.users.get(owner.userId) : null;
+        if (user && needsAcknowledgment(user)) {
+          await qboManager.oauth.revokeAllForUser(user.id);
+          throw new Error('invalid_grant: sign in again to continue');
+        }
       } else {
         await reply.code(400).send({ error: 'unsupported_grant_type' });
         return;

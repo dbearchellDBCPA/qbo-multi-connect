@@ -223,7 +223,9 @@ describe('asking for access', () => {
     expect(res.body).toContain('<strong>Example CPA</strong>');
     expect(res.body).toContain('Request access — Example CPA</title>');
     expect(res.body).toContain('read-only');
-    for (const field of ['name="name"', 'name="email"', 'name="company"', 'name="website"', 'name="t"']) expect(res.body).toContain(field);
+    for (const field of ['name="name"', 'name="email"', 'name="company"', 'name="confirm_blank"', 'name="t"']) expect(res.body).toContain(field);
+    // The hidden field's name must not be one a browser's autofill would fill in for a real person.
+    expect(res.body).not.toMatch(/name="(website|url|phone|address|fax|city|zip)"/);
     expect(res.body).not.toMatch(/<script/i);
     expect(res.body).not.toMatch(/(src|href|action)="https?:\/\//i);
     expect(res.headers['cache-control']).toBe('no-store');
@@ -276,14 +278,22 @@ describe('asking for access', () => {
     expect(again.body).toBe(stranger.body);
   });
 
-  it('keeps one waiting request per address, with what was typed last', async () => {
+  it('keeps one waiting request per address, and nobody else can rewrite it', async () => {
     await open();
-    await ask({ company: 'Rivera' });
-    await ask({ name: 'Jordan A. Rivera', email: EMAIL.toUpperCase(), company: 'Rivera Landscaping LLC' });
+    await ask();
+    // Someone who knows the address submits the form again with a different
+    // business — the one whose books they would like the reviewer to pick.
+    const again = await ask({ name: 'Someone Else', email: EMAIL.toUpperCase(), company: 'Other Client Inc' }, '203.0.113.99');
+    expect(again.statusCode).toBe(200); // answered like anyone else
     const { pending } = await list();
     expect(pending).toHaveLength(1);
-    expect(pending[0]).toMatchObject({ name: 'Jordan A. Rivera', company: 'Rivera Landscaping LLC' });
+    expect(pending[0]).toMatchObject({ name: 'Jordan Rivera', email: EMAIL, company: 'Rivera Landscaping', suggestedRealmId: 'realm-1' });
     expect(sender.sent).toHaveLength(1); // the firm is not told twice about one person
+
+    // Once it has been decided, the address can ask afresh.
+    await decline(pending[0].id);
+    await ask({ company: 'Other Client Inc' });
+    expect((await list()).pending[0]).toMatchObject({ company: 'Other Client Inc' });
   });
 
   it('asks for a correction, keeping what was typed and escaping it', async () => {
@@ -307,7 +317,7 @@ describe('asking for access', () => {
 
   it('quietly drops a submission that fills in the field people never see', async () => {
     await open();
-    const res = await ask({ website: 'https://spam.example' });
+    const res = await ask({ confirm_blank: 'https://spam.example' });
     expect(res.statusCode).toBe(200);
     expect(res.body).toContain('Thanks, Jordan Rivera'); // told the same as everyone else
     expect((await list()).pending).toEqual([]);
@@ -378,7 +388,7 @@ describe('asking for access', () => {
     const submit = (i: number) => qbo.accessRequests.submit({ name: 'Some Person', email: `p${i}@client.example`, company: 'Some Company' }, `10.1.${Math.floor(i / 250)}.${i % 250}`);
     for (let i = 0; i < MAX_REQUESTS_PER_HOUR; i++) expect(await submit(i)).toBe('received');
     expect(await submit(MAX_REQUESTS_PER_HOUR)).toBe('busy');
-    // Someone already waiting can still correct their details.
+    // Someone already waiting is still answered the same way.
     expect(await qbo.accessRequests.submit({ name: 'Renamed Person', email: 'p0@client.example', company: 'Some Company' }, '10.9.9.9')).toBe('received');
     expect(await qbo.accessRequests.pendingCount()).toBe(MAX_REQUESTS_PER_HOUR);
 
