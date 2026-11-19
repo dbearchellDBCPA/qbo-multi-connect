@@ -5,14 +5,13 @@ import { authenticateRequest, requireAdmin } from '../middleware.js';
 import { isRealmAllowed, canWriteRealm } from '../auth.js';
 import {
   MIN_PASSWORD_LENGTH,
+  USERNAME_RULE,
   effectiveAccessLevel,
-  generatePassword,
   isValidUsername,
   normalizeUsername,
 } from '../../users.js';
 import { bareAddress } from '../../alerts/config.js';
 import { publicBaseUrl, resolvePublicUrl } from '../public-url.js';
-import type { InviteContext } from '../../invites/client-invites.js';
 import type { User } from '../../db/models.js';
 
 const VALID_ROLES: UserRole[] = ['admin', 'member'];
@@ -35,9 +34,10 @@ interface UserBody {
   /** Assign these companies with an explicit access level each. Wins over realmIds. */
   clients?: Array<{ realmId?: unknown; accessLevel?: unknown }>;
   /**
-   * Client logins only: generate a strong password and email the client an
-   * invitation (address, username, setup steps) and, separately, the
-   * password. Leave `password` out — the server chooses it.
+   * Client logins only: invite them instead of choosing a password for them.
+   * They get a one-time link to a page where they set their own, plus the
+   * connector address and setup steps. `username` may be left out — it
+   * defaults to their email address. Leave `password` out.
    */
   sendInvite?: boolean;
 }
@@ -81,21 +81,62 @@ export async function usersRoutes(
   }
 
   /**
-   * What an invitation email needs to say where the login is used. The
-   * address is the one this request arrived on — the same one the dashboard
-   * shows the admin — unless that is a loopback name (a script or tunnel on
-   * the server itself), which would be useless in a client's inbox; then the
-   * deployment's own public address is used when it has one.
+   * The address invitation links and emails point at: the one this request
+   * arrived on — the same one the dashboard shows the admin — unless that is
+   * a loopback name (a script or tunnel on the server itself), which would
+   * be useless in a client's inbox; then the deployment's own public address
+   * is used when it has one.
    */
-  async function inviteContext(request: FastifyRequest, user: User): Promise<InviteContext> {
-    let base = publicBaseUrl(request);
-    if (isLoopback(base)) base = resolvePublicUrl().baseUrl ?? base;
-    const names = await realmNameMap();
-    return {
-      connectorUrl: `${base}/mcp`,
-      signInUrl: base,
-      companyNames: user.realmIds.map((realmId) => names.get(realmId)).filter((n): n is string => Boolean(n)),
-    };
+  function inviteBaseUrl(request: FastifyRequest): string {
+    const base = publicBaseUrl(request);
+    return isLoopback(base) ? (resolvePublicUrl().baseUrl ?? base) : base;
+  }
+
+  /** What the admin is told about an invitation. */
+  interface InviteResult {
+    to: string;
+    /** Whether the invitation email was accepted for delivery. */
+    sent: boolean;
+    /** Why it was not, when sending was attempted and failed. */
+    error: string | null;
+    /** When the link stops working. */
+    expiresAt: string;
+    /**
+     * The invitation link itself — present ONLY when the email did not go
+     * out (delivery failed, or email is not configured), so the admin can
+     * pass it on another way. When the email was sent, the link exists in
+     * the client's inbox and nowhere else.
+     */
+    link?: string;
+  }
+
+  /**
+   * Issue a fresh invitation link for a login and email it if we can. Any
+   * earlier link stops working; the login's current password, if it has one,
+   * keeps working until the new invitation is accepted.
+   */
+  async function issueInvite(request: FastifyRequest, user: User): Promise<InviteResult> {
+    const base = inviteBaseUrl(request);
+    const { token, expiresAt } = (await qboManager.users.createInvite(user.id))!;
+    const link = `${base}/invite/${token}`;
+    const result: InviteResult = { to: user.email!, sent: false, error: null, expiresAt: expiresAt.toISOString() };
+
+    if (qboManager.invites.enabled) {
+      const names = await realmNameMap();
+      const delivery = await qboManager.invites.deliver(
+        { name: user.name, email: user.email!, username: user.username! },
+        {
+          acceptUrl: link,
+          expiresAt,
+          connectorUrl: `${base}/mcp`,
+          companyNames: user.realmIds.map((realmId) => names.get(realmId)).filter((n): n is string => Boolean(n)),
+        }
+      );
+      result.sent = delivery.sent;
+      result.error = delivery.error;
+    }
+    if (!result.sent) result.link = link;
+    return result;
   }
 
   /**
@@ -114,7 +155,6 @@ export async function usersRoutes(
     // An invitation says "here are your books". With nothing assigned, the
     // client would follow every step and find an empty connector.
     if (login.companyCount === 0) return 'Assign a company to this login before sending an invitation';
-    if (!qboManager.invites.enabled) return qboManager.invites.whyDisabled();
     return null;
   }
 
@@ -145,7 +185,7 @@ export async function usersRoutes(
       return false;
     }
     if (body.username != null && body.username.trim() && !isValidUsername(normalizeUsername(body.username))) {
-      await reply.code(400).send({ error: 'Bad Request', message: 'Username must be 3-64 characters: letters, digits, @ . _ -' });
+      await reply.code(400).send({ error: 'Bad Request', message: USERNAME_RULE });
       return false;
     }
     if (body.password != null && body.password.length < MIN_PASSWORD_LENGTH) {
@@ -245,22 +285,27 @@ export async function usersRoutes(
     }
     if (!(await validateBody(body, reply))) return;
 
-    // With sendInvite the server picks the password and emails it; an admin
-    // who typed one as well has asked for two different things.
-    let generatedPassword: string | null = null;
+    // With sendInvite the person chooses their own password from a link, so
+    // an admin who typed one as well has asked for two different things. The
+    // username defaults to their email address: one less thing to invent, and
+    // the one thing they are sure to remember.
     if (body.sendInvite !== undefined && typeof body.sendInvite !== 'boolean') {
       await reply.code(400).send({ error: 'Bad Request', message: 'sendInvite must be true or false' });
       return;
     }
+    let username = body.username ?? null;
     if (body.sendInvite) {
+      if (!username?.trim()) username = bareAddress(body.email ?? '')?.toLowerCase() ?? null;
       const blocker = body.password
-        ? 'sendInvite generates the password — leave password out'
-        : inviteBlocker({ ...body, companyCount: (body.clients ?? body.realmIds ?? []).length });
+        ? 'sendInvite lets them choose their own password — leave password out'
+        : inviteBlocker({ ...body, username, companyCount: (body.clients ?? body.realmIds ?? []).length }) ??
+          (isValidUsername(normalizeUsername(username!))
+            ? null
+            : `That email address can't be used as a username. Enter a username for them. ${USERNAME_RULE}`);
       if (blocker) {
         await reply.code(400).send({ error: 'Bad Request', message: blocker });
         return;
       }
-      generatedPassword = generatePassword();
     }
 
     try {
@@ -270,28 +315,21 @@ export async function usersRoutes(
         role: body.role ?? 'member',
         accountType: body.accountType ?? 'staff',
         accessLevel: body.accessLevel ?? (body.accountType === 'client' ? 'read' : 'read_write'),
-        username: body.username ?? null,
-        password: generatedPassword ?? body.password ?? null,
+        username,
+        password: body.sendInvite ? null : (body.password ?? null),
+        pendingInvite: Boolean(body.sendInvite),
         realmIds: body.realmIds ?? [],
         assignments: assignmentsFromBody(body),
       });
 
-      // The login exists from here on. If the emails can't be sent it stays,
-      // and the response says so — "Send invitation" on the login retries
-      // with a fresh password. The generated password never appears in a
-      // response: only the client's inbox ever holds it.
-      let invite = null;
+      // The login exists from here on, with no password until the invitation
+      // is accepted. If the email can't be sent, the response carries the
+      // link so the admin can pass it on another way.
+      let invite: InviteResult | null = null;
       let created = user;
-      if (generatedPassword) {
-        invite = await qboManager.invites.deliver(
-          { name: user.name, email: user.email!, username: user.username! },
-          generatedPassword,
-          await inviteContext(request, user)
-        );
-        if (invite.sent) {
-          await qboManager.users.markInviteSent(user.id);
-          created = (await qboManager.users.get(user.id)) ?? user;
-        }
+      if (body.sendInvite) {
+        invite = await issueInvite(request, user);
+        created = (await qboManager.users.get(user.id)) ?? user;
       }
 
       // A client login's key is never accepted, so it is never handed out.
@@ -304,7 +342,7 @@ export async function usersRoutes(
       // "already taken" and validation messages from the service are client
       // errors, not server faults.
       const message = error instanceof Error ? error.message : 'Unknown error';
-      const clientError = /already taken|must be at least|must be 3-64|required|client login/i.test(message);
+      const clientError = /already taken|must be at least|must be 3|required|client login/i.test(message);
       await reply.code(clientError ? 400 : 500).send({
         error: clientError ? 'Bad Request' : 'Internal Server Error',
         message,
@@ -405,10 +443,11 @@ export async function usersRoutes(
     }
   );
 
-  // Send (or re-send) a client login its invitation and a NEW password, in
-  // two separate emails (admin only). The new password replaces the old one
-  // only after both emails have been accepted for delivery — if sending
-  // fails, nothing changes and the login keeps working as it was.
+  // Send (or re-send) a client login an invitation link (admin only). The
+  // link leads to a page where they choose a password, so this is also how a
+  // client who has forgotten theirs gets back in. Any earlier link stops
+  // working; their current password keeps working until they accept — to cut
+  // access off at once, disable the login instead.
   fastify.post<{ Params: { id: string } }>('/api/users/:id/invite', async (request, reply) => {
     const scope = await authenticateRequest(request, reply, qboManager, masterApiKey);
     if (!scope) return;
@@ -429,9 +468,9 @@ export async function usersRoutes(
       return;
     }
 
-    // One invitation per login at a time. Two overlapping ones would each
-    // email a different password and only the last to finish would be real —
-    // not necessarily the one in the client's newest email.
+    // One invitation per login at a time: each new link retires the last, so
+    // two overlapping requests would leave the client with a dead link in one
+    // of their two emails.
     if (invitesInFlight.has(id)) {
       await reply.code(409).send({
         error: 'Conflict',
@@ -441,42 +480,7 @@ export async function usersRoutes(
     }
     invitesInFlight.add(id);
     try {
-      const password = generatePassword();
-      const invite = await qboManager.invites.deliver(
-        { name: user.name, email: user.email!, username: user.username! },
-        password,
-        await inviteContext(request, user)
-      );
-      if (!invite.sent) {
-        await reply.code(502).send({
-          error: 'Bad Gateway',
-          message: `${invite.error} Nothing was changed: their current password still works.`,
-          invite,
-        });
-        return;
-      }
-
-      // Both emails are on their way: make the new password the real one,
-      // and end everything opened with the old one.
-      try {
-        await qboManager.users.setPassword(id, password);
-      } catch (error) {
-        // The client now holds a password that was never stored. Say so
-        // plainly — sending again is the fix.
-        await reply.code(500).send({
-          error: 'Internal Server Error',
-          message:
-            `The emails were sent, but the new password could not be saved (${error instanceof Error ? error.message : 'unknown error'}). ` +
-            'The password in those emails will not work — send a new invitation.',
-          invite,
-        });
-        return;
-      }
-      await qboManager.users.deleteSessions(id);
-      await qboManager.oauth.revokeAllForUser(id);
-      qboManager.users.clearLoginFailures(user.username);
-      await qboManager.users.markInviteSent(id);
-
+      const invite = await issueInvite(request, user);
       await reply.send({
         user: withClientNames((await qboManager.users.get(id))!, await realmNameMap()),
         invite,

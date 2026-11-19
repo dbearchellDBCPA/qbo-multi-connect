@@ -12,6 +12,8 @@ import { authRoutes } from './routes/auth.js';
 import { oauthRoutes } from './routes/oauth.js';
 import { alertsRoutes } from './routes/alerts.js';
 import { activityRoutes } from './routes/activity.js';
+import { inviteAcceptRoutes } from './routes/invite-accept.js';
+import { redactUrlForLog } from './log-redaction.js';
 import { registerMcpRoutes } from './mcp.js';
 import { renderCallbackPage } from './callback-page.js';
 import { exchangeCodeForTokens } from '../auth/oauth.js';
@@ -57,12 +59,13 @@ async function startServer() {
     logger: {
       level: 'info',
       serializers: {
-        // API keys ride in ?key= for Claude connectors — never let them
-        // reach the request log.
+        // API keys ride in ?key= for Claude connectors, and an invitation
+        // link's token rides in its path — never let either reach the
+        // request log.
         req(request) {
           return {
             method: request.method,
-            url: String(request.url).replace(/([?&]key=)[^&]*/gi, '$1[REDACTED]'),
+            url: redactUrlForLog(String(request.url)),
             remoteAddress: request.ip,
           };
         },
@@ -219,6 +222,8 @@ async function startServer() {
   // OAuth 2.1 authorization server: lets one shared workspace connector
   // authenticate each team member individually.
   await oauthRoutes(fastify, qboManager);
+  // Invitation links: where a client chooses their password.
+  await inviteAcceptRoutes(fastify, qboManager);
 
   // Register MCP server at /mcp
   await registerMcpRoutes(fastify, qboManager, apiKey, join(dirname(appConfig.db.path), 'attachments'), {

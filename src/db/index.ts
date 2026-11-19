@@ -63,6 +63,9 @@ export class ConnectionDatabase {
     if (!has('password_hash')) this.db.exec('ALTER TABLE users ADD COLUMN password_hash TEXT');
     if (!has('api_key_encrypted')) this.db.exec('ALTER TABLE users ADD COLUMN api_key_encrypted TEXT');
     if (!has('invite_sent_at')) this.db.exec('ALTER TABLE users ADD COLUMN invite_sent_at DATETIME');
+    if (!has('invite_token_hash')) this.db.exec('ALTER TABLE users ADD COLUMN invite_token_hash TEXT');
+    if (!has('invite_expires_at')) this.db.exec('ALTER TABLE users ADD COLUMN invite_expires_at DATETIME');
+    if (!has('invite_accepted_at')) this.db.exec('ALTER TABLE users ADD COLUMN invite_accepted_at DATETIME');
     // Client logins. Everyone already in the table is firm staff.
     if (!has('account_type')) {
       this.db.exec(
@@ -382,10 +385,42 @@ export class ConnectionDatabase {
   }
 
   /**
-   * Record that a client login's invitation emails were just sent
+   * Give a login a fresh invitation: store the new link's token hash and
+   * expiry (replacing any earlier link, which stops working) and note when.
    */
-  async markInviteSent(id: number): Promise<void> {
-    this.db.prepare("UPDATE users SET invite_sent_at = datetime('now') WHERE id = ?").run(id);
+  async setUserInvite(id: number, tokenHash: string, expiresAtIso: string): Promise<void> {
+    this.db
+      .prepare("UPDATE users SET invite_token_hash = ?, invite_expires_at = ?, invite_sent_at = datetime('now') WHERE id = ?")
+      .run(tokenHash, expiresAtIso, id);
+  }
+
+  /** The login an unexpired invitation token belongs to, if any. */
+  async getUserByInviteHash(tokenHash: string): Promise<UserRecord | null> {
+    const row = this.db
+      .prepare("SELECT * FROM users WHERE invite_token_hash = ? AND invite_expires_at > datetime('now')")
+      .get(tokenHash) as UserRecord | undefined;
+    return row ?? null;
+  }
+
+  /**
+   * Accept an invitation: set the chosen password and retire the link, in
+   * one statement that only succeeds while that exact link is still live —
+   * so a link can be used once, however many times it is submitted.
+   */
+  async acceptUserInvite(id: number, tokenHash: string, passwordHash: string): Promise<boolean> {
+    const result = this.db
+      .prepare(
+        `UPDATE users
+            SET password_hash = ?, invite_token_hash = NULL, invite_expires_at = NULL, invite_accepted_at = datetime('now')
+          WHERE id = ? AND invite_token_hash = ? AND invite_expires_at > datetime('now')`
+      )
+      .run(passwordHash, id, tokenHash);
+    return result.changes === 1;
+  }
+
+  /** Withdraw a login's outstanding invitation link, if it has one. */
+  async clearUserInvite(id: number): Promise<void> {
+    this.db.prepare('UPDATE users SET invite_token_hash = NULL, invite_expires_at = NULL WHERE id = ?').run(id);
   }
 
   /**
