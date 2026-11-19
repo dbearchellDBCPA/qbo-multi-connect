@@ -1,9 +1,19 @@
-import type { FastifyInstance, FastifyReply } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { QBOManager } from '../../index.js';
 import type { ClientAssignment, UserAccessLevel, UserAccountType, UserRole, UserStatus } from '../../db/models.js';
 import { authenticateRequest, requireAdmin } from '../middleware.js';
 import { isRealmAllowed, canWriteRealm } from '../auth.js';
-import { MIN_PASSWORD_LENGTH, effectiveAccessLevel, isValidUsername, normalizeUsername } from '../../users.js';
+import {
+  MIN_PASSWORD_LENGTH,
+  effectiveAccessLevel,
+  generatePassword,
+  isValidUsername,
+  normalizeUsername,
+} from '../../users.js';
+import { bareAddress } from '../../alerts/config.js';
+import { publicBaseUrl } from '../public-url.js';
+import type { InviteContext } from '../../invites/client-invites.js';
+import type { User } from '../../db/models.js';
 
 const VALID_ROLES: UserRole[] = ['admin', 'member'];
 const VALID_STATUSES: UserStatus[] = ['active', 'disabled'];
@@ -24,6 +34,12 @@ interface UserBody {
   realmIds?: string[];
   /** Assign these companies with an explicit access level each. Wins over realmIds. */
   clients?: Array<{ realmId?: unknown; accessLevel?: unknown }>;
+  /**
+   * Client logins only: generate a strong password and email the client an
+   * invitation (address, username, setup steps) and, separately, the
+   * password. Leave `password` out — the server chooses it.
+   */
+  sendInvite?: boolean;
 }
 
 export async function usersRoutes(
@@ -49,6 +65,29 @@ export async function usersRoutes(
         effectiveAccessLevel: effectiveAccessLevel(user, realmId) ?? accessLevel,
       })),
     };
+  }
+
+  /** What an invitation email needs to say where the login is used. */
+  async function inviteContext(request: FastifyRequest, user: User): Promise<InviteContext> {
+    const base = publicBaseUrl(request);
+    const names = await realmNameMap();
+    return {
+      connectorUrl: `${base}/mcp`,
+      signInUrl: base,
+      companyNames: user.realmIds.map((realmId) => names.get(realmId)).filter((n): n is string => Boolean(n)),
+    };
+  }
+
+  /**
+   * Why an invitation can't be sent for a login with these details, or null
+   * when it can. Shared by create-with-invite and re-invite.
+   */
+  function inviteBlocker(login: { accountType?: string; email?: string | null; username?: string | null }): string | null {
+    if (login.accountType !== 'client') return 'Invitations are for client logins (accountType "client")';
+    if (!login.email?.trim() || !bareAddress(login.email)) return 'A valid email address is required to send an invitation';
+    if (!login.username?.trim()) return 'A username is required to send an invitation';
+    if (!qboManager.invites.enabled) return qboManager.invites.whyDisabled();
+    return null;
   }
 
   /** The assignments a validated body asks for, or undefined when it names none. */
@@ -178,6 +217,24 @@ export async function usersRoutes(
     }
     if (!(await validateBody(body, reply))) return;
 
+    // With sendInvite the server picks the password and emails it; an admin
+    // who typed one as well has asked for two different things.
+    let generatedPassword: string | null = null;
+    if (body.sendInvite !== undefined && typeof body.sendInvite !== 'boolean') {
+      await reply.code(400).send({ error: 'Bad Request', message: 'sendInvite must be true or false' });
+      return;
+    }
+    if (body.sendInvite) {
+      const blocker = body.password
+        ? 'sendInvite generates the password — leave password out'
+        : inviteBlocker(body);
+      if (blocker) {
+        await reply.code(400).send({ error: 'Bad Request', message: blocker });
+        return;
+      }
+      generatedPassword = generatePassword();
+    }
+
     try {
       const { user, apiKey } = await qboManager.users.create({
         name: body.name,
@@ -186,14 +243,34 @@ export async function usersRoutes(
         accountType: body.accountType ?? 'staff',
         accessLevel: body.accessLevel ?? (body.accountType === 'client' ? 'read' : 'read_write'),
         username: body.username ?? null,
-        password: body.password ?? null,
+        password: generatedPassword ?? body.password ?? null,
         realmIds: body.realmIds ?? [],
         assignments: assignmentsFromBody(body),
       });
+
+      // The login exists from here on. If the emails can't be sent it stays,
+      // and the response says so — "Send invitation" on the login retries
+      // with a fresh password. The generated password never appears in a
+      // response: only the client's inbox ever holds it.
+      let invite = null;
+      let created = user;
+      if (generatedPassword) {
+        invite = await qboManager.invites.deliver(
+          { name: user.name, email: user.email!, username: user.username! },
+          generatedPassword,
+          await inviteContext(request, user)
+        );
+        if (invite.sent) {
+          await qboManager.users.markInviteSent(user.id);
+          created = (await qboManager.users.get(user.id)) ?? user;
+        }
+      }
+
       // A client login's key is never accepted, so it is never handed out.
       await reply.code(201).send({
-        user: withClientNames(user, await realmNameMap()),
-        apiKey: user.accountType === 'client' ? null : apiKey,
+        user: withClientNames(created, await realmNameMap()),
+        apiKey: created.accountType === 'client' ? null : apiKey,
+        ...(invite ? { invite } : {}),
       });
     } catch (error) {
       // "already taken" and validation messages from the service are client
@@ -299,6 +376,57 @@ export async function usersRoutes(
       await reply.send({ success: true });
     }
   );
+
+  // Send (or re-send) a client login its invitation and a NEW password, in
+  // two separate emails (admin only). The new password replaces the old one
+  // only after both emails have been accepted for delivery — if sending
+  // fails, nothing changes and the login keeps working as it was.
+  fastify.post<{ Params: { id: string } }>('/api/users/:id/invite', async (request, reply) => {
+    const scope = await authenticateRequest(request, reply, qboManager, masterApiKey);
+    if (!scope) return;
+    if (!(await requireAdmin(scope, reply))) return;
+
+    const id = Number.parseInt(request.params.id, 10);
+    const user = Number.isInteger(id) ? await qboManager.users.get(id) : null;
+    if (!user) {
+      await reply.code(404).send({ error: 'Not Found', message: `User ${request.params.id} not found` });
+      return;
+    }
+    const blocker =
+      user.status !== 'active' ? 'This login is disabled — enable it before sending an invitation' : inviteBlocker(user);
+    if (blocker) {
+      await reply.code(400).send({ error: 'Bad Request', message: blocker });
+      return;
+    }
+
+    const password = generatePassword();
+    const invite = await qboManager.invites.deliver(
+      { name: user.name, email: user.email!, username: user.username! },
+      password,
+      await inviteContext(request, user)
+    );
+    if (!invite.sent) {
+      await reply.code(502).send({
+        error: 'Bad Gateway',
+        message: `${invite.error} Nothing was changed: their current password still works.`,
+        invite,
+      });
+      return;
+    }
+
+    // Both emails are on their way: make the new password the real one, and
+    // end everything opened with the old one.
+    await qboManager.users.setPassword(id, password);
+    await qboManager.users.deleteSessions(id);
+    await qboManager.oauth.revokeAllForUser(id);
+    qboManager.users.clearLoginFailures(user.username);
+    await qboManager.users.markInviteSent(id);
+
+    await reply.send({
+      user: withClientNames((await qboManager.users.get(id))!, await realmNameMap()),
+      invite,
+    });
+  });
 
   // Rotate a user's API key (admin only). Returns the new key exactly once.
   fastify.post<{ Params: { id: string } }>('/api/users/:id/rotate-key', async (request, reply) => {

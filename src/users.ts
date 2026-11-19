@@ -1,4 +1,4 @@
-import { randomBytes, createHash, scryptSync, timingSafeEqual } from 'node:crypto';
+import { randomBytes, randomInt, createHash, scryptSync, timingSafeEqual } from 'node:crypto';
 import { encrypt, decrypt } from './crypto/encrypt.js';
 import type { ConnectionDatabase } from './db/index.js';
 import type { ClientAssignment, NewUser, User, UserAccessLevel, UserAccountType, UserRecord, UserUpdate } from './db/models.js';
@@ -67,6 +67,29 @@ export function hashApiKey(apiKey: string): string {
 
 export function generateApiKey(): string {
   return `qbo_${randomBytes(24).toString('hex')}`;
+}
+
+// Letters and digits that can't be mistaken for one another when read off a
+// screen or typed from an email: no 0/O, 1/l/I.
+const PASSWORD_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+const PASSWORD_GROUPS = 5;
+const PASSWORD_GROUP_LENGTH = 4;
+
+/**
+ * A strong random password for a login someone else will type or paste:
+ * 20 characters from an unambiguous alphabet (about 116 bits), in hyphenated
+ * groups of four so it survives being read, e.g. `Kp7m-Qx4R-Ln9t-Vb2s-Hc6d`.
+ */
+export function generatePassword(): string {
+  const groups: string[] = [];
+  for (let g = 0; g < PASSWORD_GROUPS; g++) {
+    let group = '';
+    for (let i = 0; i < PASSWORD_GROUP_LENGTH; i++) {
+      group += PASSWORD_ALPHABET[randomInt(PASSWORD_ALPHABET.length)];
+    }
+    groups.push(group);
+  }
+  return groups.join('-');
 }
 
 export function normalizeUsername(username: string): string {
@@ -167,6 +190,7 @@ function toUser(record: UserRecord, assignments: ClientAssignment[]): User {
     createdAt: parseUtcDate(record.created_at),
     updatedAt: parseUtcDate(record.updated_at),
     lastUsedAt: record.last_used_at ? parseUtcDate(record.last_used_at) : null,
+    inviteSentAt: record.invite_sent_at ? parseUtcDate(record.invite_sent_at) : null,
     realmIds,
     assignments,
   };
@@ -409,6 +433,11 @@ export class UserService {
     }
     await this.db.setUserPassword(id, password == null ? null : hashPassword(password));
     return true;
+  }
+
+  /** Note that the invitation and password emails were just sent to this login. */
+  async markInviteSent(id: number): Promise<void> {
+    await this.db.markInviteSent(id);
   }
 
   /** Check a password against a user's stored hash. */

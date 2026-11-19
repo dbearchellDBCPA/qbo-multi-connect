@@ -5,10 +5,11 @@ import { EmailSendError } from '../../alerts/email.js';
 import { authenticateRequest, requireAdmin } from '../middleware.js';
 
 /**
- * Email alerts for broken QuickBooks connections (admin only). Configuration
- * lives in the server environment; these routes let the dashboard show
- * whether it's on, who gets notified, and prove it works with a test send.
- * The Resend API key is never returned.
+ * Outbound email status (admin only): alerts for broken QuickBooks
+ * connections, and invitations for client logins. Configuration lives in the
+ * server environment; these routes let the dashboard show whether each is
+ * on, who is involved, and prove alerts work with a test send. The Resend
+ * API key is never returned.
  */
 export async function alertsRoutes(
   fastify: FastifyInstance,
@@ -28,6 +29,15 @@ export async function alertsRoutes(
         message: error instanceof Error ? error.message : 'Unknown error',
       });
     }
+  });
+
+  // Whether client invitation emails can be sent, and from whom — so the
+  // dashboard can offer the option, or say what is still missing.
+  fastify.get('/api/invites', async (request, reply) => {
+    const scope = await authenticateRequest(request, reply, qboManager, masterApiKey);
+    if (!scope) return;
+    if (!(await requireAdmin(scope, reply))) return;
+    await reply.send(qboManager.invites.status());
   });
 
   fastify.post('/api/alerts/test', async (request, reply) => {

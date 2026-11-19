@@ -51,7 +51,9 @@ CREATE TABLE IF NOT EXISTS users (
   status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'disabled')),
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  last_used_at DATETIME
+  last_used_at DATETIME,
+  -- When the invitation and password emails were last sent to a client login.
+  invite_sent_at DATETIME
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_api_key_hash ON users(api_key_hash);

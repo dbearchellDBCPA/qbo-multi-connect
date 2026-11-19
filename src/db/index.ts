@@ -62,6 +62,7 @@ export class ConnectionDatabase {
     if (!has('username')) this.db.exec('ALTER TABLE users ADD COLUMN username TEXT');
     if (!has('password_hash')) this.db.exec('ALTER TABLE users ADD COLUMN password_hash TEXT');
     if (!has('api_key_encrypted')) this.db.exec('ALTER TABLE users ADD COLUMN api_key_encrypted TEXT');
+    if (!has('invite_sent_at')) this.db.exec('ALTER TABLE users ADD COLUMN invite_sent_at DATETIME');
     // Client logins. Everyone already in the table is firm staff.
     if (!has('account_type')) {
       this.db.exec(
@@ -378,6 +379,13 @@ export class ConnectionDatabase {
    */
   async setUserKeyEncrypted(id: number, apiKeyEncrypted: string): Promise<void> {
     this.db.prepare('UPDATE users SET api_key_encrypted = ? WHERE id = ?').run(apiKeyEncrypted, id);
+  }
+
+  /**
+   * Record that a client login's invitation emails were just sent
+   */
+  async markInviteSent(id: number): Promise<void> {
+    this.db.prepare("UPDATE users SET invite_sent_at = datetime('now') WHERE id = ?").run(id);
   }
 
   /**
