@@ -536,6 +536,13 @@ export class ConnectionDatabase {
     return this.db.prepare("DELETE FROM activity_log WHERE at < datetime('now', ?)").run(`-${Math.floor(days)} days`).changes;
   }
 
+  /** Keep only the newest `maxRows` entries. Returns how many went. */
+  async trimActivityTo(maxRows: number): Promise<number> {
+    return this.db
+      .prepare('DELETE FROM activity_log WHERE id <= (SELECT MAX(id) FROM activity_log) - ?')
+      .run(Math.floor(maxRows)).changes;
+  }
+
   // ── Sessions (dashboard sign-in) ─────────────────────────────────────────
 
   async insertSession(userId: number, tokenHash: string, expiresAtIso: string): Promise<void> {

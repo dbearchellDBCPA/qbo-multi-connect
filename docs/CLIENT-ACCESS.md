@@ -17,6 +17,7 @@ switched off:
 | Access level | Read & write or read-only, per client | **Always read-only** |
 | Can be an admin | Yes | **Never** |
 | API key | Yes | **None** — signs in through the connector only |
+| REST API | Yes | **None** — the connector is the only way to the data |
 | Tools | All tools their access allows | A fixed list of 46 read-only tools about their own books |
 | Sees | Assigned clients | Assigned clients (normally just their own) |
 
@@ -32,8 +33,9 @@ list; a test fails until that decision is made.
 ## Set up a client
 
 1. On the dashboard, open **Team**. Under **Client logins**, click **+ Add**.
-2. Enter their name, a **username**, and a **password** (both required — a
-   client login has no API key to fall back on).
+2. Enter their name, a **username**, and a **password**. Both are required —
+   a client login has no API key to fall back on, so the server refuses to
+   create one that couldn't sign in.
 3. Check **their company**. Usually exactly one.
 4. Click **Create client login**. The confirmation shows the connector
    address to send them.
@@ -62,8 +64,14 @@ activity log shows who did what.
 ## Keep an eye on it
 
 Every tool call and sign-in is recorded: who, which tool, which company, and
-whether it worked or was blocked. What was asked and what came back are
-**not** recorded — that is the client's financial data.
+whether it worked, failed, or was blocked. That includes an assistant trying
+a tool the login was never offered, and asking for a company the login can't
+see (logged with the name it asked for, marked "not found"). What was asked
+and what came back are **not** recorded — that is the client's financial data.
+
+Wrong passwords and lockouts are recorded against the login they were aimed
+at. Attempts on usernames that don't exist are not recorded: they are nobody's
+activity, and logging whatever strangers type would let them fill the log.
 
 - **Team → select a login** shows that login's recent activity.
 - **Clients** shows recent activity across everyone.
@@ -71,7 +79,8 @@ whether it worked or was blocked. What was asked and what came back are
   have done, for export or review. Entries are kept for 180 days.
 
 Things worth a look: a login that has never connected (they may be stuck), a
-burst of activity at odd hours, or a "Locked out after failed sign-ins" entry.
+burst of activity at odd hours, blocked or "not found" calls, or a "Locked out
+after failed sign-ins" entry.
 
 ## Sign-in protection
 
@@ -82,11 +91,23 @@ between the dashboard and the connector sign-in page.
 If a client locks themselves out, **Reset password** on their login clears
 the lock immediately.
 
+The lock is on the username, not on where the attempts come from (network
+addresses are too easy to fake for that to be a real lock). The trade-off:
+someone who knows a client's username could keep it locked by failing on
+purpose. You would see it in the activity log as repeated lockouts; the fix is
+to give that login a new username. Your own way in is never at risk — the
+master key does not go through this lock.
+
+**Reset password** also signs out any assistant that is already connected,
+as does the client changing their own password. They sign in to the connector
+again with the new one. So a reset is the right response to "I think someone
+else has my password" — it cuts off whoever connected with the old one.
+
 ## Turn it off
 
-- **Disable** on the login stops it on the next request — including an
+- **Disable** on the login stops it on the next request and signs out any
   assistant that is already connected. Their assignments are kept, so
-  **Enable** restores it.
+  **Enable** restores the login — they sign in to the connector again.
 - **Remove** deletes the login.
 - Unchecking their company under **Edit assignments** leaves the login in
   place with nothing to read.

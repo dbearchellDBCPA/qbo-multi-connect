@@ -249,17 +249,10 @@ export async function oauthRoutes(fastify: FastifyInstance, qboManager: QBOManag
     // at one username are slowed, then stopped.
     const result = username && password
       ? await qboManager.users.login(username, password)
-      : ({ status: 'invalid' } as const);
+      : ({ status: 'invalid', account: null } as const);
     if (result.status !== 'ok') {
       const locked = result.status === 'locked';
-      await qboManager.activity.record({
-        userId: null,
-        userName: username || '(blank)',
-        accountType: 'staff',
-        event: locked ? 'locked_out' : 'sign_in_failed',
-        tool: 'connector',
-        outcome: 'denied',
-      });
+      await qboManager.activity.recordSignInFailure(result, 'connector');
       await reply.code(locked ? 429 : 401).type('text/html').send(
         signInPage({
           clientName: client.clientName || 'An MCP client',

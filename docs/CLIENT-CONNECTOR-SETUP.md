@@ -123,7 +123,8 @@ or ask your assistant to draft the request and forward it.
 
 To change your password, sign in at `[SIGN-IN ADDRESS]` with the same username
 and password, open **Settings**, and choose **Change password** — or ask us to
-reset it.
+reset it. Either way your assistant is signed out as a precaution: click
+**Connect** on the connector and sign in with the new password.
 
 ## Other AI assistants
 
@@ -142,7 +143,7 @@ you use and we'll help you get connected.
 | "Incorrect username or password" | Check for typos and make sure you're using the login we sent for this connector. Still stuck? Ask us to reset your password. |
 | "Too many failed sign-ins" | For your protection the login pauses after several wrong passwords. Wait the time shown and try again, or ask us to reset your password — that clears it right away. |
 | Sign-in page says "Unknown or missing client_id" | Remove the connector and add it again. When asked about the OAuth client, choose **Register automatically**. |
-| It worked before and now asks you to sign in | Normal after a long gap. Click **Connect** on the connector and sign in again. |
+| It worked before and now asks you to sign in | Normal after a long gap or a password change. Click **Connect** on the connector and sign in again. |
 | "Unauthorized" or "access denied" errors | Your login may have been switched off, or your company isn't assigned to it. Contact us. |
 | Your company can't be reached, or errors mention QuickBooks authorization | Our link to your QuickBooks file needs renewing. Contact us — it takes a minute to fix. |
 | A report is slow or cut off | Ask for a shorter date range or a summary. |

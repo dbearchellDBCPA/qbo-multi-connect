@@ -27,11 +27,39 @@ export const LOGIN_LOCKOUT_MS = 60_000;
 /** …up to this ceiling, so a determined guesser gets a handful of tries an hour. */
 export const MAX_LOGIN_LOCKOUT_MS = 15 * 60_000;
 
-/** The result of a password sign-in attempt. */
+/** A failure count that has seen no new failure for this long starts over. */
+export const LOGIN_FAILURE_MEMORY_MS = 24 * 60 * 60_000;
+
+/** Most usernames-that-don't-exist the lock will remember at once. */
+const MAX_UNKNOWN_LOGIN_ENTRIES = 5_000;
+
+/** The real account a sign-in attempt named, for attributing it in the activity log. */
+export interface LoginAccount {
+  id: number;
+  name: string;
+  accountType: UserAccountType;
+}
+
+/**
+ * The result of a password sign-in attempt. `account` is set when the
+ * username belongs to a real login (whatever the password was). `firstNotice`
+ * is true for the first refused attempt of each lock, so callers can log a
+ * lockout once rather than once per attempt.
+ */
 export type LoginResult =
   | { status: 'ok'; user: User }
-  | { status: 'invalid' }
-  | { status: 'locked'; retryAfterMs: number };
+  | { status: 'invalid'; account: LoginAccount | null }
+  | { status: 'locked'; retryAfterMs: number; account: LoginAccount | null; firstNotice: boolean };
+
+interface LoginFailureEntry {
+  fails: number;
+  lockedUntil: number;
+  lastFailure: number;
+  /** Whether the username belongs to a real login (those entries are never evicted). */
+  known: boolean;
+  /** Whether a refused attempt has already been reported for the current lock. */
+  noticed: boolean;
+}
 
 export function hashApiKey(apiKey: string): string {
   return createHash('sha256').update(apiKey, 'utf8').digest('hex');
@@ -152,7 +180,7 @@ function toUser(record: UserRecord, assignments: ClientAssignment[]): User {
  */
 export class UserService {
   /** Failed sign-ins per username. In memory: a restart clears every lock. */
-  private loginFailures = new Map<string, { fails: number; lockedUntil: number }>();
+  private loginFailures = new Map<string, LoginFailureEntry>();
 
   constructor(
     private db: ConnectionDatabase,
@@ -189,6 +217,10 @@ export class UserService {
     }
     if (isClient && input.accessLevel === 'read_write') {
       throw new Error('A client login is always read-only');
+    }
+    if (isClient && (!input.username?.trim() || !input.password)) {
+      // Its API key is never accepted, so without these it could never sign in.
+      throw new Error('A client login requires a username and password');
     }
     if (isClient) {
       // Stored read-only as well as enforced read-only, so the data itself
@@ -249,6 +281,10 @@ export class UserService {
       }
       if (fields.accessLevel === 'read_write') {
         throw new Error('A client login is always read-only');
+      }
+      const keepsUsername = fields.username === undefined ? existing.username != null : Boolean(fields.username?.trim());
+      if (!keepsUsername || existing.password_hash == null) {
+        throw new Error('A client login requires a username and password');
       }
       fields = { ...fields, accessLevel: 'read' };
     }
@@ -363,7 +399,11 @@ export class UserService {
 
   /** Set (or clear, with null) a user's dashboard password. */
   async setPassword(id: number, password: string | null): Promise<boolean> {
-    if (!(await this.db.getUserById(id))) return false;
+    const record = await this.db.getUserById(id);
+    if (!record) return false;
+    if (password == null && record.account_type === 'client') {
+      throw new Error('A client login requires a username and password');
+    }
     if (password != null && password.length < MIN_PASSWORD_LENGTH) {
       throw new Error(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`);
     }
@@ -402,13 +442,40 @@ export class UserService {
    * LOGIN_LOCKOUT_MS, doubling with each further failure up to
    * MAX_LOGIN_LOCKOUT_MS. A locked username is refused without checking the
    * password — even the right one — and a successful sign-in clears the count.
+   *
+   * The lock is per username, not per network address: addresses are easy to
+   * forge behind a proxy, and a forgeable key would be no lock at all. The
+   * cost is that someone who knows a username can keep it locked by failing
+   * on purpose. The remedies are an admin's "Reset password" (clears the lock
+   * at once) and, for an admin's own account, the master key, which never
+   * goes through this path.
    */
   async login(username: string, password: string): Promise<LoginResult> {
     const key = normalizeUsername(username);
-    const entry = this.loginFailures.get(key);
+    // Nothing shaped unlike a username can be a login, so it is refused
+    // without being remembered — the failure table only ever holds strings
+    // that could name an account.
+    if (!isValidUsername(key)) {
+      verifyPassword(password, DUMMY_PASSWORD_HASH); // same cost as a real miss
+      return { status: 'invalid', account: null };
+    }
+
     const now = Date.now();
+    let entry = this.loginFailures.get(key);
+    if (entry && entry.lockedUntil <= now && now - entry.lastFailure > LOGIN_FAILURE_MEMORY_MS) {
+      this.loginFailures.delete(key); // stale: start over rather than escalate forever
+      entry = undefined;
+    }
+
+    const record = await this.db.getUserByUsername(key);
+    const account: LoginAccount | null = record
+      ? { id: record.id, name: record.name, accountType: record.account_type ?? 'staff' }
+      : null;
+
     if (entry && entry.lockedUntil > now) {
-      return { status: 'locked', retryAfterMs: entry.lockedUntil - now };
+      const firstNotice = !entry.noticed;
+      entry.noticed = true;
+      return { status: 'locked', retryAfterMs: entry.lockedUntil - now, account, firstNotice };
     }
 
     const user = await this.verifyLogin(key, password);
@@ -420,17 +487,43 @@ export class UserService {
     const fails = (entry?.fails ?? 0) + 1;
     const overBy = fails - MAX_LOGIN_FAILURES;
     const lockMs = overBy < 0 ? 0 : Math.min(LOGIN_LOCKOUT_MS * 2 ** overBy, MAX_LOGIN_LOCKOUT_MS);
-    this.loginFailures.set(key, { fails, lockedUntil: lockMs ? now + lockMs : 0 });
-    // Usernames are attacker-chosen, so the table is bounded: once it grows
-    // large, entries that are neither locked nor recent are dropped.
-    if (this.loginFailures.size > 10_000) {
-      for (const [name, e] of this.loginFailures) {
-        if (e.lockedUntil <= now) this.loginFailures.delete(name);
-      }
-    }
+    // Unknown usernames are counted exactly like real ones, so the lock never
+    // reveals which usernames exist.
+    this.loginFailures.delete(key); // re-insert at the end: Map order = recency
+    this.loginFailures.set(key, {
+      fails,
+      lockedUntil: lockMs ? now + lockMs : 0,
+      lastFailure: now,
+      known: record != null,
+      noticed: false,
+    });
+    this.pruneLoginFailures();
     // The attempt that trips the lock is still just "wrong password"; the
     // lock is what the NEXT attempt meets.
-    return { status: 'invalid' };
+    return { status: 'invalid', account };
+  }
+
+  /**
+   * Keep the failure table bounded without ever forgetting a real account.
+   * Usernames are attacker-chosen, so someone can pour made-up names in; only
+   * those made-up entries are evicted (oldest first). Entries for real logins
+   * — at most one per user — stay, so flooding the table cannot reset the
+   * count on an account being guessed at.
+   */
+  private pruneLoginFailures(): void {
+    let unknown = 0;
+    for (const e of this.loginFailures.values()) if (!e.known) unknown++;
+    if (unknown <= MAX_UNKNOWN_LOGIN_ENTRIES) return;
+    // Map iteration is insertion order, and an entry is re-inserted on each
+    // failure, so the first unknown entries met are the oldest.
+    let toDrop = unknown - Math.floor(MAX_UNKNOWN_LOGIN_ENTRIES / 2);
+    for (const [name, e] of this.loginFailures) {
+      if (toDrop <= 0) break;
+      if (!e.known) {
+        this.loginFailures.delete(name);
+        toDrop--;
+      }
+    }
   }
 
   /** Clear a username's failed sign-in count (an admin resetting the password). */

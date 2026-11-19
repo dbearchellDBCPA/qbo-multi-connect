@@ -249,6 +249,13 @@ export async function usersRoutes(
       return;
     }
 
+    // Disabling ends what the login had open, not just what it can start: an
+    // assistant connected before would otherwise resume if re-enabled later.
+    if (body.status === 'disabled') {
+      await qboManager.users.deleteSessions(id);
+      await qboManager.oauth.revokeAllForUser(id);
+    }
+
     const assignments = assignmentsFromBody(body);
     const finalUser = assignments !== undefined
       ? (await qboManager.users.setAssignments(id, assignments))!
@@ -282,6 +289,10 @@ export async function usersRoutes(
         return;
       }
       await qboManager.users.deleteSessions(id);
+      // …and signs out every AI assistant connected with the old password.
+      // For a client login that is the whole point of a reset: the connector
+      // is the only way they sign in.
+      await qboManager.oauth.revokeAllForUser(id);
       // A reset is how a locked-out person gets back in — don't leave them
       // waiting out the lock on a password that no longer exists.
       qboManager.users.clearLoginFailures((await qboManager.users.get(id))?.username);

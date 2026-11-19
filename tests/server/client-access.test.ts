@@ -8,20 +8,21 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { QBOManager } from '../../src/index.js';
 import {
   effectiveAccessLevel,
+  LOGIN_FAILURE_MEMORY_MS,
   LOGIN_LOCKOUT_MS,
   MAX_LOGIN_FAILURES,
   MAX_LOGIN_LOCKOUT_MS,
 } from '../../src/users.js';
 import { resolveAuth, canWriteRealm, isRealmAllowed } from '../../src/server/auth.js';
 import { CLIENT_TOOLS, CLIENT_EXCLUDED_READ_TOOLS } from '../../src/server/client-tools.js';
-import { ACTIVITY_RETENTION_DAYS } from '../../src/activity.js';
+import { ACTIVITY_RETENTION_DAYS, MAX_ACTIVITY_ROWS } from '../../src/activity.js';
 import { usersRoutes } from '../../src/server/routes/users.js';
 import { connectionsRoutes } from '../../src/server/routes/connections.js';
 import { companyRoutes } from '../../src/server/routes/company.js';
 import { authRoutes } from '../../src/server/routes/auth.js';
 import { oauthRoutes } from '../../src/server/routes/oauth.js';
 import { activityRoutes } from '../../src/server/routes/activity.js';
-import { registerMcpRoutes } from '../../src/server/mcp.js';
+import { registerMcpRoutes, toolResultFailed } from '../../src/server/mcp.js';
 
 // A client login is handed to someone OUTSIDE the firm so their own AI
 // assistant can read their own books. These tests pin down what that login
@@ -77,10 +78,13 @@ describe('client logins — what the account can be', () => {
   });
   afterEach(() => qbo.close());
 
+  const CREDS = { username: 'acme', password: PASSWORD };
+
   it('is always stored and resolved read-only', async () => {
     const { user } = await qbo.users.create({
       name: 'Acme Owner',
       accountType: 'client',
+      ...CREDS,
       // Even an explicit request for write access is stored as read.
       assignments: [{ realmId: 'realm-1', accessLevel: 'read_write' }],
     });
@@ -93,12 +97,28 @@ describe('client logins — what the account can be', () => {
   });
 
   it('cannot be created as an admin or with write access', async () => {
-    await expect(qbo.users.create({ name: 'X', accountType: 'client', role: 'admin' })).rejects.toThrow(/cannot be an admin/);
-    await expect(qbo.users.create({ name: 'X', accountType: 'client', accessLevel: 'read_write' })).rejects.toThrow(/always read-only/);
+    await expect(qbo.users.create({ name: 'X', accountType: 'client', role: 'admin', ...CREDS })).rejects.toThrow(/cannot be an admin/);
+    await expect(qbo.users.create({ name: 'X', accountType: 'client', accessLevel: 'read_write', ...CREDS })).rejects.toThrow(/always read-only/);
+  });
+
+  it('must be able to sign in — it has no API key to fall back on', async () => {
+    const needs = /requires a username and password/;
+    await expect(qbo.users.create({ name: 'X', accountType: 'client' })).rejects.toThrow(needs);
+    await expect(qbo.users.create({ name: 'X', accountType: 'client', username: 'x.owner' })).rejects.toThrow(needs);
+    await expect(qbo.users.create({ name: 'X', accountType: 'client', password: PASSWORD })).rejects.toThrow(needs);
+
+    // …and can't be edited into a state where it can't.
+    const { user } = await qbo.users.create({ name: 'Acme Owner', accountType: 'client', ...CREDS });
+    await expect(qbo.users.update(user.id, { username: '' })).rejects.toThrow(needs);
+    await expect(qbo.users.setPassword(user.id, null)).rejects.toThrow(needs);
+
+    // A staff account with no password can't become a client login either.
+    const keyOnly = (await qbo.users.create({ name: 'Script', realmIds: ['realm-1'] })).user;
+    await expect(qbo.users.update(keyOnly.id, { accountType: 'client' })).rejects.toThrow(needs);
   });
 
   it('cannot be edited into an admin or given write access', async () => {
-    const { user } = await qbo.users.create({ name: 'Acme Owner', accountType: 'client', realmIds: ['realm-1'] });
+    const { user } = await qbo.users.create({ name: 'Acme Owner', accountType: 'client', ...CREDS, realmIds: ['realm-1'] });
     await expect(qbo.users.update(user.id, { role: 'admin' })).rejects.toThrow(/cannot be an admin/);
     await expect(qbo.users.update(user.id, { accessLevel: 'read_write' })).rejects.toThrow(/always read-only/);
 
@@ -110,12 +130,12 @@ describe('client logins — what the account can be', () => {
   });
 
   it('turning a staff account into a client login drops it to read-only; an admin cannot be converted', async () => {
-    const staff = (await qbo.users.create({ name: 'Temp', realmIds: ['realm-1'] })).user;
+    const staff = (await qbo.users.create({ name: 'Temp', username: 'temp', password: PASSWORD, realmIds: ['realm-1'] })).user;
     const converted = await qbo.users.update(staff.id, { accountType: 'client' });
     expect(converted?.accessLevel).toBe('read');
     expect(effectiveAccessLevel(converted!, 'realm-1')).toBe('read');
 
-    const admin = (await qbo.users.create({ name: 'Boss', role: 'admin' })).user;
+    const admin = (await qbo.users.create({ name: 'Boss', role: 'admin', username: 'boss', password: PASSWORD })).user;
     await expect(qbo.users.update(admin.id, { accountType: 'client' })).rejects.toThrow(/cannot be an admin/);
   });
 
@@ -143,7 +163,7 @@ describe('client logins — what the account can be', () => {
   });
 
   it('has no usable API key', async () => {
-    const { user, apiKey } = await qbo.users.create({ name: 'Acme Owner', accountType: 'client', realmIds: ['realm-1'] });
+    const { user, apiKey } = await qbo.users.create({ name: 'Acme Owner', accountType: 'client', ...CREDS, realmIds: ['realm-1'] });
     expect(await qbo.users.findByApiKey(apiKey)).toBeNull();
     expect(await resolveAuth(qbo, MASTER_KEY, `Bearer ${apiKey}`)).toBeNull();
     expect(await resolveAuth(qbo, MASTER_KEY, undefined, apiKey)).toBeNull(); // ?key= URL form
@@ -245,6 +265,49 @@ describe('sign-in lockout', () => {
       expect((await qbo.users.login('nobody', 'x')).status).toBe('invalid');
     }
     expect((await qbo.users.login('nobody', 'x')).status).toBe('locked');
+  });
+
+  it('says which real login an attempt named, and reports each lock once', async () => {
+    const miss = await qbo.users.login('acme', 'wrong-password');
+    expect(miss).toMatchObject({ status: 'invalid', account: { name: 'Acme Owner', accountType: 'client' } });
+    expect(await qbo.users.login('nobody', 'x')).toEqual({ status: 'invalid', account: null });
+
+    await failTimes(MAX_LOGIN_FAILURES - 1);
+    const first = await qbo.users.login('acme', PASSWORD);
+    const second = await qbo.users.login('acme', PASSWORD);
+    expect(first).toMatchObject({ status: 'locked', firstNotice: true, account: { name: 'Acme Owner' } });
+    expect(second).toMatchObject({ status: 'locked', firstNotice: false });
+  });
+
+  it('flooding the lock with made-up usernames cannot reset a real account', async () => {
+    await failTimes(MAX_LOGIN_FAILURES + 2); // locked, and escalated
+    // Pour in far more junk usernames than the table keeps.
+    const hashSpy = vi.spyOn(qbo.users, 'verifyLogin').mockResolvedValue(null); // skip scrypt: 12k attempts
+    for (let i = 0; i < 12_000; i++) await qbo.users.login(`junk-${i}`, 'x');
+    hashSpy.mockRestore();
+    const table = (qbo.users as any).loginFailures as Map<string, unknown>;
+    expect(table.size).toBeLessThan(6_000); // bounded…
+    expect(table.has('acme')).toBe(true); // …without forgetting the real one
+    expect((await qbo.users.login('acme', PASSWORD)).status).toBe('locked');
+  });
+
+  it('remembers nothing that could not be a username', async () => {
+    const table = (qbo.users as any).loginFailures as Map<string, unknown>;
+    for (const junk of ['x', 'has spaces in it', 'a'.repeat(5_000), '<script>']) {
+      for (let i = 0; i <= MAX_LOGIN_FAILURES; i++) {
+        expect(await qbo.users.login(junk, 'x')).toEqual({ status: 'invalid', account: null });
+      }
+    }
+    expect(table.size).toBe(0);
+  });
+
+  it('an old failure count starts over instead of escalating forever', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    await failTimes(MAX_LOGIN_FAILURES - 1);
+    vi.advanceTimersByTime(LOGIN_FAILURE_MEMORY_MS + 1);
+    // Four more misses a day later: a fresh count, so still not locked.
+    await failTimes(MAX_LOGIN_FAILURES - 1);
+    expect((await qbo.users.login('acme', PASSWORD)).status).toBe('ok');
   });
 });
 
@@ -440,7 +503,12 @@ describe('client logins — over the connector, REST, and the activity log', () 
     };
     await expectStatus('POST', '/api/company/realm-1/journal-entries', 403, { Line: [] });
     await expectStatus('PUT', '/api/company/realm-1/bills', 403, { Id: '1', SyncToken: '0' });
-    await expectStatus('GET', '/api/company/realm-2/info', 404);
+    // The REST data API is closed to client logins altogether — reads too —
+    // so there is no way to their books that skips the tool list and the log.
+    await expectStatus('GET', '/api/company/realm-1/info', 403);
+    await expectStatus('GET', '/api/company/realm-1/query?q=SELECT%20*%20FROM%20Employee', 403);
+    await expectStatus('GET', '/api/company/realm-1/reports/trial-balance', 403);
+    await expectStatus('GET', '/api/company/realm-2/info', 403);
     await expectStatus('GET', '/api/users', 403);
     await expectStatus('POST', '/api/users', 403, { name: 'Sneaky', role: 'admin' });
     await expectStatus('PATCH', `/api/users/${clientId}`, 403, { accountType: 'staff' });
@@ -532,11 +600,98 @@ describe('client logins — over the connector, REST, and the activity log', () 
     expect(JSON.stringify(raw)).not.toContain('Stub Co');
   });
 
-  it('records failed sign-ins and lockouts', async () => {
-    for (let i = 0; i <= MAX_LOGIN_FAILURES; i++) await connectorSignIn('acme.owner', 'wrong-password');
-    const events = (await qbo.activity.list()).map((e) => [e.event, e.tool, e.userName, e.outcome]);
-    expect(events[0]).toEqual(['locked_out', 'connector', 'acme.owner', 'denied']);
-    expect(events.filter((e) => e[0] === 'sign_in_failed')).toHaveLength(MAX_LOGIN_FAILURES);
+  it('records failed sign-ins and lockouts against the login they targeted', async () => {
+    // Five misses trip the lock; three more attempts meet it.
+    for (let i = 0; i < MAX_LOGIN_FAILURES + 3; i++) await connectorSignIn('acme.owner', 'wrong-password');
+    // The dashboard door, same username: also refused, also not re-logged.
+    await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'acme.owner', password: PASSWORD } });
+
+    const mine = await qbo.activity.list({ userId: clientId });
+    expect(mine.map((e) => [e.event, e.tool, e.userName, e.accountType, e.outcome])).toEqual([
+      ['locked_out', 'connector', 'Acme Owner', 'client', 'denied'], // once per lock, not per attempt
+      ...Array.from({ length: MAX_LOGIN_FAILURES }, () => ['sign_in_failed', 'connector', 'Acme Owner', 'client', 'denied']),
+    ]);
+    // So it shows where an admin looks: under the login, and under "client logins".
+    const viaApi = await app.inject({ method: 'GET', url: '/api/activity?accountType=client', headers: asMaster });
+    expect(viaApi.json().filter((e: any) => e.event === 'locked_out')).toHaveLength(1);
+  });
+
+  it('records wrong passwords on the dashboard sign-in too', async () => {
+    await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'jordan', password: 'nope-nope' } });
+    expect((await qbo.activity.list()).map((e) => [e.event, e.tool, e.userName, e.userId])).toEqual([
+      ['sign_in_failed', 'dashboard', 'Jordan Staff', staffId],
+    ]);
+  });
+
+  it('strangers cannot write to the log', async () => {
+    // Made-up usernames, absurdly long ones, and repeats against a locked
+    // made-up name: none of it is anybody's activity, none of it is stored.
+    for (const username of ['nobody', 'x'.repeat(100_000), 'nobody', 'nobody', 'nobody', 'nobody', 'nobody', 'nobody']) {
+      await connectorSignIn(username, 'wrong-password');
+      await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username, password: 'wrong-password' } });
+    }
+    expect(await qbo.activity.list()).toEqual([]);
+  });
+
+  it('logs a failed call as failed, and names the company that was asked for', async () => {
+    const { accessToken } = await connectorSignIn('acme.owner', PASSWORD);
+    await mcp(accessToken!, 'tools/call', { name: 'get_company_info', arguments: { client_name: 'Beta LLC' } });
+    const [entry] = await qbo.activity.list({ limit: 1 });
+    // Beta LLC exists, but not for this login — so it is logged as typed, not resolved.
+    expect(entry).toMatchObject({ tool: 'get_company_info', outcome: 'error', realmId: null, clientName: 'Beta LLC (not found)' });
+
+    expect(toolResultFailed({ content: [{ type: 'text', text: 'Client not found: "X". Use list_clients…' }] })).toBe(true);
+    expect(toolResultFailed({ content: [{ type: 'text', text: 'Error fetching company info: token expired' }] })).toBe(true);
+    expect(toolResultFailed({ isError: true, content: [] })).toBe(true);
+    expect(toolResultFailed({ content: [{ type: 'text', text: 'PROFIT & LOSS — Acme Corp' }] })).toBe(false);
+    expect(toolResultFailed({ content: [{ type: 'text', text: 'Errors & Omissions Insurance — $1,200' }] })).toBe(false);
+  });
+
+  it('logs an attempt to call a tool the login was never offered', async () => {
+    const { accessToken } = await connectorSignIn('acme.owner', PASSWORD);
+    for (const name of ['create_journal_entry', 'get_server_info', 'DROP TABLE users; --', 'x'.repeat(5_000)]) {
+      await mcp(accessToken!, 'tools/call', { name, arguments: { client_name: 'Acme Corp' } });
+    }
+    const attempts = (await qbo.activity.list({ userId: clientId })).filter((e) => e.event === 'tool_call');
+    expect(attempts.map((e) => [e.tool, e.writes, e.outcome])).toEqual([
+      ['(unrecognized tool name)', true, 'denied'],
+      ['(unrecognized tool name)', true, 'denied'],
+      ['get_server_info', false, 'denied'],
+      ['create_journal_entry', true, 'denied'],
+    ]);
+    // A tool that IS offered is logged once, by the tool wrapper, not twice.
+    await mcp(accessToken!, 'tools/call', { name: 'list_clients', arguments: {} });
+    expect((await qbo.activity.list({ userId: clientId })).filter((e) => e.tool === 'list_clients')).toHaveLength(1);
+  });
+
+  it('resetting or changing a password disconnects assistants already connected', async () => {
+    const first = (await connectorSignIn('acme.owner', PASSWORD)).accessToken!;
+    expect((await mcp(first, 'tools/list', {})).result).toBeTruthy();
+
+    // Admin reset: the old connection is dead; the new password connects.
+    await app.inject({ method: 'POST', url: `/api/users/${clientId}/password`, headers: asMaster, payload: { password: 'second-password-1' } });
+    expect((await mcp(first, 'tools/list', {})).httpStatus).toBe(401);
+    const second = (await connectorSignIn('acme.owner', 'second-password-1')).accessToken!;
+    expect((await mcp(second, 'tools/list', {})).result).toBeTruthy();
+
+    // The client changing their own password does the same.
+    const session = (await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'acme.owner', password: 'second-password-1' } })).json().token;
+    const changed = await app.inject({
+      method: 'POST',
+      url: '/api/me/password',
+      headers: { authorization: `Bearer ${session}` },
+      payload: { currentPassword: 'second-password-1', newPassword: 'third-password-12' },
+    });
+    expect(changed.statusCode).toBe(200);
+    expect((await mcp(second, 'tools/list', {})).httpStatus).toBe(401);
+  });
+
+  it('disabling a login ends its connections for good — re-enabling does not revive them', async () => {
+    const { accessToken } = await connectorSignIn('acme.owner', PASSWORD);
+    await app.inject({ method: 'PATCH', url: `/api/users/${clientId}`, headers: asMaster, payload: { status: 'disabled' } });
+    await app.inject({ method: 'PATCH', url: `/api/users/${clientId}`, headers: asMaster, payload: { status: 'active' } });
+    expect((await mcp(accessToken!, 'tools/list', {})).httpStatus).toBe(401);
+    expect((await connectorSignIn('acme.owner', PASSWORD)).accessToken).toBeTruthy(); // signing in again works
   });
 
   it('a logging failure never fails the call being logged', async () => {
@@ -587,5 +742,21 @@ describe('client logins — over the connector, REST, and the activity log', () 
     // The first record after startup also sweeps.
     await qbo.activity.record({ userId: null, userName: 'new', accountType: 'master', event: 'sign_in', outcome: 'ok' });
     expect((await qbo.activity.list()).map((e) => e.userName)).toEqual(['new', 'old']);
+  });
+
+  it('never grows past its row ceiling, and clips long text', async () => {
+    const db = (qbo as any).db;
+    for (let i = 0; i < 12; i++) {
+      await qbo.activity.record({ userId: null, userName: `n${i}`, accountType: 'master', event: 'sign_in', outcome: 'ok' });
+    }
+    expect(await db.trimActivityTo(5)).toBe(7);
+    expect((await qbo.activity.list()).map((e) => e.userName)).toEqual(['n11', 'n10', 'n9', 'n8', 'n7']);
+    expect(MAX_ACTIVITY_ROWS).toBeGreaterThan(10_000);
+
+    await qbo.activity.record({ userId: null, userName: 'u'.repeat(500), accountType: 'master', event: 'tool_call', tool: 't'.repeat(500), clientName: 'c'.repeat(500), outcome: 'ok' });
+    const [long] = await qbo.activity.list({ limit: 1 });
+    expect(long.userName.length).toBeLessThanOrEqual(81);
+    expect(long.tool!.length).toBeLessThanOrEqual(81);
+    expect(long.clientName!.length).toBeLessThanOrEqual(81);
   });
 });

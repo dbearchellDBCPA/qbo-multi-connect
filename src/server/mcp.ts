@@ -378,6 +378,18 @@ function annotationsForTool(name: string): ToolAnnotations {
 }
 
 /**
+ * Whether a tool result reports a failure, for the activity log. Most tools
+ * here answer a failed call with ordinary text ("Client not found: …",
+ * "Error fetching …: …") rather than the protocol's isError flag, so both are
+ * recognized. Best-effort: it reads the opening words, nothing else.
+ */
+export function toolResultFailed(result: any): boolean {
+  if (result?.isError) return true;
+  const first = Array.isArray(result?.content) ? result.content.find((c: any) => c?.type === 'text')?.text : undefined;
+  return typeof first === 'string' && /^(Client not found\b|Error\b|Access denied\b|Read-only access\b)/.test(first.trimStart());
+}
+
+/**
  * Build a strict argument schema from a raw shape. Unknown keys are rejected
  * with a message that names them (see the registration shim below).
  */
@@ -465,6 +477,9 @@ export async function registerMcpRoutes(
   // Each request builds a server scoped to the caller's API key. The tools
   // below close over `qboManager`, which is the scoped view — member keys
   // only ever see and reach their assigned companies.
+  // Tools each per-request server offered its caller, keyed by that server.
+  const offeredTools = new WeakMap<McpServer, Set<string>>();
+
   function createMcpServer(scope: AuthScope, baseUrl: string | null = null): McpServer {
     const qboManager = createScopedManager(qboRoot, scope);
     const server = new McpServer({
@@ -517,7 +532,12 @@ export async function registerMcpRoutes(
         let clientName: string | null = null;
         if (typeof args?.client_name === 'string' && args.client_name.trim()) {
           realmId = await findRealmId(qboManager, args.client_name);
-          clientName = realmId ? ((await qboManager.getConnection(realmId))?.clientName ?? null) : null;
+          // A name that resolves is logged as the company's real name. One
+          // that doesn't is logged as typed, marked — a login asking for
+          // companies it can't see is exactly what an admin wants to notice.
+          clientName = realmId
+            ? ((await qboManager.getConnection(realmId))?.clientName ?? null)
+            : `${args.client_name.trim()} (not found)`;
         }
         await qboRoot.activity.record({
           userId: scope.userId,
@@ -535,6 +555,11 @@ export async function registerMcpRoutes(
       }
     };
 
+    // The names this caller was actually offered — see the /mcp handler, which
+    // logs an attempt to call anything else.
+    const offered = new Set<string>();
+    offeredTools.set(server, offered);
+
     const registerToolRaw = server.tool.bind(server);
     (server as any).tool = (name: string, ...rest: any[]) => {
       // Keys that can't write anywhere never see write tools at all —
@@ -548,6 +573,7 @@ export async function registerMcpRoutes(
       // and nothing else, including any tool added after that list was
       // written. See client-tools.ts.
       if (scope.accountType === 'client' && (isWriteTool || !CLIENT_TOOLS.has(name))) return undefined;
+      offered.add(name);
       if (rest.length > 0 && typeof rest[rest.length - 1] === 'function') {
         const rawCb = rest[rest.length - 1];
         // Blanket credential redaction: no tool may echo a URL whose query
@@ -565,7 +591,7 @@ export async function registerMcpRoutes(
               }
             }
             const result = await rawCb(...cbArgs);
-            if (result?.isError) outcome = 'error';
+            if (toolResultFailed(result)) outcome = 'error';
             return isSensitiveUrlAllowed(result) ? result : redactToolResult(result);
           } catch (err) {
             outcome = 'error';
@@ -5873,6 +5899,26 @@ export async function registerMcpRoutes(
     const { baseUrl } = resolvePublicUrl(request);
 
     const mcpServer = createMcpServer(scope, baseUrl);
+
+    // A call to a tool this caller was never offered — a write tool for a
+    // read-only login, anything off the list for a client — is answered "not
+    // found" by the SDK before any tool code runs, so it is logged here. The
+    // name is the caller's text: only a plausible tool name is recorded.
+    const offered = offeredTools.get(mcpServer);
+    const messages = Array.isArray(request.body) ? request.body : [request.body];
+    for (const message of messages as any[]) {
+      const toolName = message?.method === 'tools/call' ? message?.params?.name : undefined;
+      if (typeof toolName !== 'string' || !offered || offered.has(toolName)) continue;
+      await qboRoot.activity.record({
+        userId: scope.userId,
+        userName: scope.userName,
+        accountType: scope.accountType,
+        event: 'tool_call',
+        tool: /^[a-z][a-z0-9_]{0,63}$/.test(toolName) ? toolName : '(unrecognized tool name)',
+        writes: !isReadOnlyTool(toolName),
+        outcome: 'denied',
+      });
+    }
 
     // Clean up the per-request server/transport once the response is done.
     reply.raw.on('close', () => {

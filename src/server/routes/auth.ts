@@ -34,11 +34,8 @@ export async function authRoutes(
       // The lock lives in UserService and is shared with the connector
       // sign-in page, so failures on either count against the same username.
       const result = await qboManager.users.login(username, password);
+      if (result.status !== 'ok') await qboManager.activity.recordSignInFailure(result, 'dashboard');
       if (result.status === 'locked') {
-        await qboManager.activity.record({
-          userId: null, userName: username, accountType: 'staff',
-          event: 'locked_out', tool: 'dashboard', outcome: 'denied',
-        });
         await reply
           .code(429)
           .header('Retry-After', String(Math.ceil(result.retryAfterMs / 1000)))
@@ -141,9 +138,12 @@ export async function authRoutes(
 
       await qboManager.users.setPassword(scope.userId, newPassword);
       // Changing the password ends every other session for this user; the
-      // session that made the change (if any) stays signed in.
+      // session that made the change (if any) stays signed in. Connected AI
+      // assistants are signed out too — a password is changed because the old
+      // one may be known, and whoever knew it may have connected one.
       const [presented] = credentials(request);
       await qboManager.users.deleteSessions(scope.userId, presented);
+      await qboManager.oauth.revokeAllForUser(scope.userId);
       await reply.send({ success: true });
     }
   );

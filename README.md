@@ -869,10 +869,16 @@ and [Docker](#running-it-elsewhere-docker)). Details worth knowing:
   read-only caller
 - Client logins are read-only by account type, cannot hold the admin role,
   cannot authenticate with an API key, and see an explicit tool allow-list
+- Client logins have no REST data API: `/api/company/*` answers `403`, so the
+  connector — with its tool list and activity log — is the only way in
 - Sign-in lockout shared by the dashboard and the connector sign-in page:
-  five failures lock a username for a minute, doubling to fifteen
+  five failures lock a username for a minute, doubling to fifteen. Flooding
+  it with made-up usernames cannot reset the count on a real account
+- Resetting or changing a password, or disabling a login, revokes its
+  connector tokens — an assistant connected with the old password is cut off
 - Activity log of every tool call and sign-in (who, tool, company, outcome —
-  never arguments or results), kept 180 days
+  never arguments or results), including attempts on tools a login was not
+  offered; kept 180 days and capped by row count
 - Master key compared with a timing-safe equality check
 - No tokens in log output
 - Scopes limited to `com.intuit.quickbooks.accounting` (no payments, no payroll)
