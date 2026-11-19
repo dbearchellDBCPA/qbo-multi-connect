@@ -281,3 +281,22 @@ export interface ConnectionAlertRecord {
   provider_id: string | null;
   sent_at: string;
 }
+
+/** Where a request for access stands. */
+export type AccessRequestStatus = 'pending' | 'approved' | 'declined';
+
+/** A row of access_requests, as stored. */
+export interface AccessRequestRecord {
+  id: number;
+  name: string;
+  email: string;
+  email_key: string;
+  company: string;
+  status: AccessRequestStatus;
+  created_at: string;
+  notified_at: string | null;
+  decided_at: string | null;
+  decided_by: string | null;
+  user_id: number | null;
+  realm_id: string | null;
+}

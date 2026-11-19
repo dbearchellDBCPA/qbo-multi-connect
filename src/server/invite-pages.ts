@@ -37,7 +37,7 @@ ${BRAND_BASE}
   .lead { margin-bottom:22px; }
   .lead strong, li strong { color:var(--text); }
   label { display:block; font-size:13px; font-weight:600; color:var(--text-secondary); margin-bottom:6px; }
-  input[type=password], input[type=text] {
+  input[type=password], input[type=text], input[type=email] {
     width:100%; padding:10px 12px; border:1px solid var(--border-input); border-radius:8px;
     background:var(--surface-2); color:var(--text); font-size:14px; margin-bottom:16px; font-family:inherit;
   }
@@ -78,6 +78,8 @@ ${BRAND_BASE}
     color:var(--on-primary); font-size:14px; font-weight:600; text-decoration:none;
   }
   a { color:var(--primary); }
+  /* A field people never see; anything typed in it marks an automated submission. */
+  .extra { position:absolute; left:-9999px; top:auto; width:1px; height:1px; overflow:hidden; }
 `;
 
 /**
@@ -102,7 +104,7 @@ function videoSection(video: SetupVideo | null | undefined): string {
  * software, giving this person access — with the app credited in small print
  * underneath. Until a firm name has been set, the app's own name stands in.
  */
-function page(title: string, body: string, firm: FirmBrand): string {
+export function clientPage(title: string, body: string, firm: FirmBrand): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -139,7 +141,7 @@ export interface AcceptPageDetails {
 export function acceptInvitePage(details: AcceptPageDetails): string {
   const { firm, name, username, companyNames, minPasswordLength, error } = details;
   const firmName = firm.name;
-  return page(
+  return clientPage(
     'Choose your password',
     `<h1>Welcome, ${escapeHtml(name)}</h1>
     <p class="lead"><strong>${escapeHtml(firmName)}</strong> has invited you to connect your AI assistant to the QuickBooks books for <strong>${escapeHtml(companyPhrase(companyNames))}</strong>. It is read-only: your assistant can look things up and run reports, and cannot change anything. Choose a password to get started.</p>
@@ -173,7 +175,7 @@ export function inviteAcceptedPage(details: AcceptedPageDetails): string {
   const { firm, username, connectorUrl, signInUrl, video } = details;
   const firmName = firm.name;
   const ol = (steps: string[]) => `<ol>${steps.map((s) => `<li>${rich(s)}</li>`).join('')}</ol>`;
-  return page(
+  return clientPage(
     'You are set up',
     `<h1>Your password is set</h1>
     <div class="ok">One step left: add the connector to your AI assistant. You'll sign in there with the username and password below — that is the only place the password is used.</div>
@@ -199,7 +201,7 @@ export function inviteAcceptedPage(details: AcceptedPageDetails): string {
 /** The link is used, replaced, expired, or was never real. */
 export function inviteInvalidPage(firm: FirmBrand): string {
   const firmName = firm.name;
-  return page(
+  return clientPage(
     'Invitation link no longer valid',
     `<h1>This invitation link can't be used</h1>
     <p class="lead">It may have expired, already been used to set a password, or been replaced by a newer invitation. Check your inbox for a more recent one, or ask <strong>${escapeHtml(firmName)}</strong> to send a new invitation.</p>

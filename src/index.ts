@@ -10,6 +10,8 @@ import { disabledAlertsConfig, type AlertsConfig } from './alerts/config.js';
 import { ResendEmailSender, type EmailSender } from './alerts/email.js';
 import { ClientInvites } from './invites/client-invites.js';
 import { Branding } from './branding.js';
+import { AccessRequests } from './access-requests/service.js';
+import { bareAddress } from './alerts/config.js';
 import { disabledInvitesConfig, type InvitesConfig } from './invites/config.js';
 import type { OAuthConfig, Connection } from './db/models.js';
 
@@ -60,6 +62,7 @@ export class QBOManager {
   public readonly alerts: ConnectionAlerts;
   public readonly invites: ClientInvites;
   public readonly branding: Branding;
+  public readonly accessRequests: AccessRequests;
 
   constructor(config: QBOManagerConfig) {
     // Validate config
@@ -111,11 +114,22 @@ export class QBOManager {
       ? alertsConfig.resendApiKey
       : invitesConfig.enabled
         ? invitesConfig.resendApiKey
-        : null;
+        : // Neither is fully set up, but a key alone is enough for the notice
+          // that someone has asked for access — it has its own recipients.
+          alertsConfig.resendApiKey || invitesConfig.resendApiKey || null;
     const emailSender = config.emailSender ?? (resendApiKey ? new ResendEmailSender(resendApiKey) : null);
     this.alerts = new ConnectionAlerts(this.db, alertsConfig, emailSender, config.dashboardUrl);
     this.invites = new ClientInvites(invitesConfig, emailSender);
     this.branding = new Branding(this.db, invitesConfig);
+    // Requests for access from the public page. Notices about them are staff
+    // mail: sent from the alert sender when there is one, else the invitation
+    // sender, to an address set in the dashboard (else the alert recipients).
+    this.accessRequests = new AccessRequests(this.db, {
+      sender: emailSender,
+      from: [alertsConfig.from, invitesConfig.from].find((from) => from && bareAddress(from)) ?? null,
+      fallbackRecipients: alertsConfig.recipients.filter((recipient) => bareAddress(recipient)),
+      dashboardUrl: config.dashboardUrl,
+    });
   }
 
   /**
@@ -232,6 +246,9 @@ export class QBOManager {
    */
   async close(): Promise<void> {
     this.stopRefreshDaemon();
+    // Let a notice that is mid-send finish before the database goes away.
+    this.accessRequests.stop();
+    await this.accessRequests.idle();
     await this.db.close();
   }
 }

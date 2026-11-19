@@ -13,6 +13,7 @@ import { oauthRoutes } from './routes/oauth.js';
 import { alertsRoutes } from './routes/alerts.js';
 import { activityRoutes } from './routes/activity.js';
 import { inviteAcceptRoutes } from './routes/invite-accept.js';
+import { accessRequestRoutes } from './routes/access-requests.js';
 import { redactUrlForLog } from './log-redaction.js';
 import { registerMcpRoutes } from './mcp.js';
 import { renderCallbackPage } from './callback-page.js';
@@ -53,6 +54,10 @@ async function startServer() {
   // Start token refresh daemon (check every 5 minutes)
   qboManager.startRefreshDaemon(5 * 60 * 1000);
   console.log('✅ Token refresh daemon started (interval: 5 minutes)');
+
+  // Requests for access that arrived just before a restart may not have been
+  // reported to the firm yet. (Does nothing when there are none.)
+  qboManager.accessRequests.scheduleNotice();
 
   // Initialize Fastify
   const fastify = Fastify({
@@ -224,6 +229,8 @@ async function startServer() {
   await oauthRoutes(fastify, qboManager);
   // Invitation links: where a client chooses their password.
   await inviteAcceptRoutes(fastify, qboManager);
+  // The public page where a client asks for access, and the admin's review of those requests.
+  await accessRequestRoutes(fastify, qboManager, apiKey);
 
   // Register MCP server at /mcp
   await registerMcpRoutes(fastify, qboManager, apiKey, join(dirname(appConfig.db.path), 'attachments'), {
