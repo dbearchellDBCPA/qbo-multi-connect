@@ -11,7 +11,7 @@ import {
   normalizeUsername,
 } from '../../users.js';
 import { bareAddress } from '../../alerts/config.js';
-import { publicBaseUrl } from '../public-url.js';
+import { publicBaseUrl, resolvePublicUrl } from '../public-url.js';
 import type { InviteContext } from '../../invites/client-invites.js';
 import type { User } from '../../db/models.js';
 
@@ -67,9 +67,29 @@ export async function usersRoutes(
     };
   }
 
-  /** What an invitation email needs to say where the login is used. */
+  /** Logins with an invitation being sent right now — see POST /api/users/:id/invite. */
+  const invitesInFlight = new Set<number>();
+
+  /** Whether a hostname only means something on the machine that used it. */
+  function isLoopback(baseUrl: string): boolean {
+    try {
+      const host = new URL(baseUrl).hostname.replace(/^\[|\]$/g, '');
+      return host === 'localhost' || host === '::1' || host.endsWith('.localhost') || /^127\./.test(host);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * What an invitation email needs to say where the login is used. The
+   * address is the one this request arrived on — the same one the dashboard
+   * shows the admin — unless that is a loopback name (a script or tunnel on
+   * the server itself), which would be useless in a client's inbox; then the
+   * deployment's own public address is used when it has one.
+   */
   async function inviteContext(request: FastifyRequest, user: User): Promise<InviteContext> {
-    const base = publicBaseUrl(request);
+    let base = publicBaseUrl(request);
+    if (isLoopback(base)) base = resolvePublicUrl().baseUrl ?? base;
     const names = await realmNameMap();
     return {
       connectorUrl: `${base}/mcp`,
@@ -82,10 +102,18 @@ export async function usersRoutes(
    * Why an invitation can't be sent for a login with these details, or null
    * when it can. Shared by create-with-invite and re-invite.
    */
-  function inviteBlocker(login: { accountType?: string; email?: string | null; username?: string | null }): string | null {
+  function inviteBlocker(login: {
+    accountType?: string;
+    email?: string | null;
+    username?: string | null;
+    companyCount: number;
+  }): string | null {
     if (login.accountType !== 'client') return 'Invitations are for client logins (accountType "client")';
     if (!login.email?.trim() || !bareAddress(login.email)) return 'A valid email address is required to send an invitation';
     if (!login.username?.trim()) return 'A username is required to send an invitation';
+    // An invitation says "here are your books". With nothing assigned, the
+    // client would follow every step and find an empty connector.
+    if (login.companyCount === 0) return 'Assign a company to this login before sending an invitation';
     if (!qboManager.invites.enabled) return qboManager.invites.whyDisabled();
     return null;
   }
@@ -227,7 +255,7 @@ export async function usersRoutes(
     if (body.sendInvite) {
       const blocker = body.password
         ? 'sendInvite generates the password — leave password out'
-        : inviteBlocker(body);
+        : inviteBlocker({ ...body, companyCount: (body.clients ?? body.realmIds ?? []).length });
       if (blocker) {
         await reply.code(400).send({ error: 'Bad Request', message: blocker });
         return;
@@ -393,39 +421,69 @@ export async function usersRoutes(
       return;
     }
     const blocker =
-      user.status !== 'active' ? 'This login is disabled — enable it before sending an invitation' : inviteBlocker(user);
+      user.status !== 'active'
+        ? 'This login is disabled — enable it before sending an invitation'
+        : inviteBlocker({ ...user, companyCount: user.realmIds.length });
     if (blocker) {
       await reply.code(400).send({ error: 'Bad Request', message: blocker });
       return;
     }
 
-    const password = generatePassword();
-    const invite = await qboManager.invites.deliver(
-      { name: user.name, email: user.email!, username: user.username! },
-      password,
-      await inviteContext(request, user)
-    );
-    if (!invite.sent) {
-      await reply.code(502).send({
-        error: 'Bad Gateway',
-        message: `${invite.error} Nothing was changed: their current password still works.`,
-        invite,
+    // One invitation per login at a time. Two overlapping ones would each
+    // email a different password and only the last to finish would be real —
+    // not necessarily the one in the client's newest email.
+    if (invitesInFlight.has(id)) {
+      await reply.code(409).send({
+        error: 'Conflict',
+        message: 'An invitation for this login is already being sent — wait a moment before sending another',
       });
       return;
     }
+    invitesInFlight.add(id);
+    try {
+      const password = generatePassword();
+      const invite = await qboManager.invites.deliver(
+        { name: user.name, email: user.email!, username: user.username! },
+        password,
+        await inviteContext(request, user)
+      );
+      if (!invite.sent) {
+        await reply.code(502).send({
+          error: 'Bad Gateway',
+          message: `${invite.error} Nothing was changed: their current password still works.`,
+          invite,
+        });
+        return;
+      }
 
-    // Both emails are on their way: make the new password the real one, and
-    // end everything opened with the old one.
-    await qboManager.users.setPassword(id, password);
-    await qboManager.users.deleteSessions(id);
-    await qboManager.oauth.revokeAllForUser(id);
-    qboManager.users.clearLoginFailures(user.username);
-    await qboManager.users.markInviteSent(id);
+      // Both emails are on their way: make the new password the real one,
+      // and end everything opened with the old one.
+      try {
+        await qboManager.users.setPassword(id, password);
+      } catch (error) {
+        // The client now holds a password that was never stored. Say so
+        // plainly — sending again is the fix.
+        await reply.code(500).send({
+          error: 'Internal Server Error',
+          message:
+            `The emails were sent, but the new password could not be saved (${error instanceof Error ? error.message : 'unknown error'}). ` +
+            'The password in those emails will not work — send a new invitation.',
+          invite,
+        });
+        return;
+      }
+      await qboManager.users.deleteSessions(id);
+      await qboManager.oauth.revokeAllForUser(id);
+      qboManager.users.clearLoginFailures(user.username);
+      await qboManager.users.markInviteSent(id);
 
-    await reply.send({
-      user: withClientNames((await qboManager.users.get(id))!, await realmNameMap()),
-      invite,
-    });
+      await reply.send({
+        user: withClientNames((await qboManager.users.get(id))!, await realmNameMap()),
+        invite,
+      });
+    } finally {
+      invitesInFlight.delete(id);
+    }
   });
 
   // Rotate a user's API key (admin only). Returns the new key exactly once.

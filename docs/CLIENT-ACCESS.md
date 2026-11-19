@@ -38,7 +38,8 @@ client everything they need:
 1. On the dashboard, open **Team**. Under **Client logins**, click **+ Add**.
 2. Enter their name, their **email address**, and a **username**.
 3. Leave **Email them an invitation and a generated password** checked.
-4. Check **their company**. Usually exactly one.
+4. Check **their company**. Usually exactly one — an invitation is not sent
+   for a login with no company assigned.
 5. Click **Create and send invitation**. They receive two emails; there is
    nothing else for you to send.
 
@@ -87,7 +88,7 @@ Set these on the server (the same place as the other settings), then restart:
 | Variable | Required | What it is |
 |---|---|---|
 | `RESEND_API_KEY` | Yes | A Resend API key with *Sending access*. The same key the connection alerts use. |
-| `QBO_INVITE_FROM` | Yes* | What clients see in their inbox: `Your Firm <hello@yourfirm.com>`, on a domain you have verified in Resend. *If unset, `QBO_ALERT_FROM` is used. |
+| `QBO_INVITE_FROM` | Yes | What clients see in their inbox: `Your Firm <hello@yourfirm.com>`, on a domain you have verified in Resend. The alert sender is never used in its place — client email only goes out once you have chosen who it comes from. |
 | `QBO_INVITE_REPLY_TO` | No | Where a client's reply goes — your real inbox — when the sender address isn't one you read. |
 | `QBO_FIRM_NAME` | No | How the emails name the firm. Defaults to the display name in the sender. |
 
@@ -96,11 +97,12 @@ invitations are on and, if not, which setting is missing.
 
 ### Things to know
 
-- **A password in an email is only as private as the inbox.** Splitting the
-  two messages helps, but both go to the same address. The password email
-  tells the client to change it after their first sign-in; if a client's
-  mailbox is shared, choose the password yourself and give it to them another
-  way.
+- **A password in an email is only as private as the inbox — and the outbox.**
+  Splitting the two messages helps, but both go to the same address, and
+  Resend keeps a copy of what it sent, readable by anyone with access to your
+  Resend account. The emails ask the client to change the password, but
+  nothing forces them to. If a client's mailbox is shared, choose the password
+  yourself and give it to them another way.
 - **Check the address before you send.** The invitation goes to whatever is in
   the email field, and it names their company. A typo sends a working login
   to a stranger. If that happens, **Disable** the login at once.

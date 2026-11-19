@@ -32,7 +32,6 @@ export interface InvitesStatus {
   enabled: boolean;
   provider: 'resend';
   from: string | null;
-  usingAlertSender: boolean;
   replyTo: string | null;
   firmName: string;
   missing: string[];
@@ -70,7 +69,6 @@ export class ClientInvites {
       enabled: this.enabled,
       provider: 'resend',
       from: this.config.from || null,
-      usingAlertSender: this.config.usingAlertSender,
       replyTo: this.config.replyTo,
       firmName: this.config.firmName,
       missing: this.config.missing,

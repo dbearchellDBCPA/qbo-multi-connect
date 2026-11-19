@@ -276,7 +276,11 @@ export class UserService {
     if (assignments.length) {
       await this.db.setUserAssignments(id, assignments);
     }
-    return { user: (await this.get(id))!, apiKey };
+    const user = (await this.get(id))!;
+    // Failed sign-ins against this username from before it existed (a guess,
+    // a test, someone early) must not lock the real owner out on day one.
+    this.clearLoginFailures(user.username);
+    return { user, apiKey };
   }
 
   async get(id: number): Promise<User | null> {
@@ -324,6 +328,8 @@ export class UserService {
       email: fields.email === undefined ? undefined : fields.email?.trim() || null,
       username,
     });
+    // Same for a username this login has just taken on.
+    if (typeof username === 'string' && username !== existing.username) this.clearLoginFailures(username);
     return this.get(id);
   }
 

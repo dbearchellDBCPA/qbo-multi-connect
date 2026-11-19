@@ -6,7 +6,10 @@ import { bareAddress } from '../alerts/config.js';
  *   RESEND_API_KEY       — the same Resend key the connection alerts use.
  *   QBO_INVITE_FROM      — the sender clients see, on a domain verified in
  *                          Resend, e.g. "Your Firm <hello@yourfirm.com>".
- *                          Falls back to QBO_ALERT_FROM when unset.
+ *                          Deliberately NOT defaulted from QBO_ALERT_FROM:
+ *                          mail to clients must be something the firm chose
+ *                          to send, from an address it chose, not a side
+ *                          effect of having alerts set up.
  *   QBO_INVITE_REPLY_TO  — optional: where a client's reply goes (your real
  *                          inbox), when the sender address isn't monitored.
  *   QBO_FIRM_NAME        — optional: how the firm is named in the email.
@@ -20,8 +23,6 @@ export interface InvitesConfig {
   enabled: boolean;
   resendApiKey: string;
   from: string;
-  /** True when `from` came from QBO_ALERT_FROM because QBO_INVITE_FROM is unset. */
-  usingAlertSender: boolean;
   replyTo: string | null;
   firmName: string;
   /** Variables that must be set before invitations turn on. */
@@ -40,9 +41,7 @@ function displayName(sender: string): string | null {
 
 export function parseInvitesConfig(env: NodeJS.ProcessEnv = process.env): InvitesConfig {
   const resendApiKey = env.RESEND_API_KEY?.trim() || '';
-  const inviteFrom = env.QBO_INVITE_FROM?.trim() || '';
-  const alertFrom = env.QBO_ALERT_FROM?.trim() || '';
-  const from = inviteFrom || alertFrom;
+  const from = env.QBO_INVITE_FROM?.trim() || '';
   const replyTo = env.QBO_INVITE_REPLY_TO?.trim() || null;
 
   const missing: string[] = [];
@@ -51,7 +50,7 @@ export function parseInvitesConfig(env: NodeJS.ProcessEnv = process.env): Invite
 
   const problems: string[] = [];
   if (from && !bareAddress(from)) {
-    problems.push(`${inviteFrom ? 'QBO_INVITE_FROM' : 'QBO_ALERT_FROM'} is not a valid sender address: ${from}`);
+    problems.push(`QBO_INVITE_FROM is not a valid sender address: ${from}`);
   }
   if (replyTo && !bareAddress(replyTo)) {
     problems.push(`QBO_INVITE_REPLY_TO is not a valid address: ${replyTo}`);
@@ -61,7 +60,6 @@ export function parseInvitesConfig(env: NodeJS.ProcessEnv = process.env): Invite
     enabled: missing.length === 0 && problems.length === 0,
     resendApiKey,
     from,
-    usingAlertSender: !inviteFrom && Boolean(alertFrom),
     replyTo,
     firmName: env.QBO_FIRM_NAME?.trim() || (from ? displayName(from) : null) || DEFAULT_FIRM_NAME,
     missing,

@@ -764,7 +764,7 @@ curl -H "Authorization: Bearer YOUR_API_KEY" \
 | `RESEND_API_KEY` | No | — | Resend API key for email alerts ("sending access" is enough) |
 | `QBO_ALERT_EMAIL` | No | — | Who to email when a connection breaks; comma-separated for several |
 | `QBO_ALERT_FROM` | No | — | Sender for alert emails, on a domain verified in Resend |
-| `QBO_INVITE_FROM` | No | `QBO_ALERT_FROM` | Sender clients see on invitation emails, e.g. `Your Firm <hello@yourfirm.com>` |
+| `QBO_INVITE_FROM` | No | — | Sender clients see on invitation emails, e.g. `Your Firm <hello@yourfirm.com>`. Invitations are off until it is set |
 | `QBO_INVITE_REPLY_TO` | No | — | Where a client's reply to an invitation goes |
 | `QBO_FIRM_NAME` | No | sender's display name | How invitation emails name the firm |
 

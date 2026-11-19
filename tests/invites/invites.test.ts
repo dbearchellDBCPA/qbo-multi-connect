@@ -45,14 +45,19 @@ describe('invites config', () => {
   });
 
   it('takes the firm name from the sender unless one is given', () => {
-    expect(CONFIGURED).toMatchObject({ enabled: true, from: 'Example CPA <hello@example-cpa.com>', firmName: 'Example CPA', replyTo: 'pat@example-cpa.com', usingAlertSender: false });
+    expect(CONFIGURED).toMatchObject({ enabled: true, from: 'Example CPA <hello@example-cpa.com>', firmName: 'Example CPA', replyTo: 'pat@example-cpa.com' });
     expect(parseInvitesConfig({ RESEND_API_KEY: 'k', QBO_INVITE_FROM: 'hello@example-cpa.com' }).firmName).toBe('Your accounting firm');
     expect(parseInvitesConfig({ RESEND_API_KEY: 'k', QBO_INVITE_FROM: 'X <a@b.com>', QBO_FIRM_NAME: 'Rivera & Co.' }).firmName).toBe('Rivera & Co.');
   });
 
-  it('falls back to the alert sender, and flags that it did', () => {
-    const config = parseInvitesConfig({ RESEND_API_KEY: 'k', QBO_ALERT_FROM: 'QBO Alerts <alerts@example-cpa.com>' });
-    expect(config).toMatchObject({ enabled: true, from: 'QBO Alerts <alerts@example-cpa.com>', usingAlertSender: true, replyTo: null });
+  it('never borrows the alert sender: having alerts set up does not turn client email on', () => {
+    const config = parseInvitesConfig({
+      RESEND_API_KEY: 'k',
+      QBO_ALERT_EMAIL: 'ops@example-cpa.com',
+      QBO_ALERT_FROM: 'QBO Multi-Connect <alerts@example-cpa.com>',
+    });
+    expect(config).toMatchObject({ enabled: false, from: '', missing: ['QBO_INVITE_FROM'] });
+    expect(config.firmName).not.toContain('QBO Multi-Connect');
   });
 
   it('refuses malformed addresses rather than sending from them', () => {
@@ -148,6 +153,13 @@ describe('invitation and password emails', () => {
     }
   });
 
+  it('warns that changing the password signs the assistant out', () => {
+    for (const body of [invitation.text, invitation.html]) {
+      expect(body).toMatch(/before you connect your assistant/);
+      expect(body).toMatch(/signs the assistant out/);
+    }
+  });
+
   it('names several companies readably, and copes with none', () => {
     const many = renderClientInvitationEmail({ ...INVITATION, companyNames: ['Acme', 'Beta', 'Gamma'] });
     expect(many.text).toContain('Acme, Beta and Gamma');
@@ -230,7 +242,6 @@ describe('ClientInvites.deliver', () => {
       enabled: true,
       provider: 'resend',
       from: 'Example CPA <hello@example-cpa.com>',
-      usingAlertSender: false,
       replyTo: 'pat@example-cpa.com',
       firmName: 'Example CPA',
       missing: [],

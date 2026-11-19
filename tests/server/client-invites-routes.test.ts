@@ -168,6 +168,8 @@ describe('client invitation emails over HTTP', () => {
       [{ email: 'not-an-address' }, /valid email address/],
       [{ username: null }, /username is required/],
       [{ password: 'they-typed-one-too' }, /leave password out/],
+      [{ clients: [] }, /Assign a company/],
+      [{ clients: undefined }, /Assign a company/],
       [{ sendInvite: 'yes' }, /true or false/],
     ];
     for (const [overrides, message] of cases) {
@@ -255,9 +257,46 @@ describe('client invitation emails over HTTP', () => {
     expect((await qbo.users.get(id))!.inviteSentAt).toEqual(before);
   });
 
+  it('sends one invitation per login at a time', async () => {
+    const id = (await createClient()).json().user.id;
+    const invite = () => app.inject({ method: 'POST', url: `/api/users/${id}/invite`, headers: asMaster });
+    const [a, b] = await Promise.all([invite(), invite()]);
+    expect([a.statusCode, b.statusCode].sort()).toEqual([200, 409]);
+    expect(sender.sent).toHaveLength(4); // the original pair + exactly one new pair
+    // …and the one password that went out is the one that works.
+    expect(await connectorSignIn('jordan.rivera', sender.lastPassword())).toBeTruthy();
+    // Once it has finished, another can be sent.
+    expect((await invite()).statusCode).toBe(200);
+  });
+
+  it('a username someone failed to sign in with before it existed is not locked on day one', async () => {
+    for (let i = 0; i <= MAX_LOGIN_FAILURES; i++) await connectorSignIn('jordan.rivera', 'guess');
+    await createClient();
+    expect(await connectorSignIn('jordan.rivera', sender.lastPassword())).toBeTruthy();
+  });
+
+  it('never tells a client to use an address that only works on the server', async () => {
+    const local = { host: 'localhost:3456', authorization: `Bearer ${MASTER_KEY}` };
+    const saved = { url: process.env.QBO_PUBLIC_URL, hosts: process.env.QBO_ALLOWED_HOSTS, railway: process.env.RAILWAY_PUBLIC_DOMAIN };
+    delete process.env.QBO_PUBLIC_URL;
+    delete process.env.QBO_ALLOWED_HOSTS;
+    process.env.RAILWAY_PUBLIC_DOMAIN = 'qbo.example-cpa.com';
+    try {
+      await app.inject({ method: 'POST', url: '/api/users', headers: local, payload: NEW_CLIENT });
+      expect(sender.sent[0].text).toContain('Connector address: https://qbo.example-cpa.com/mcp');
+      expect(sender.sent[0].text).not.toContain('localhost');
+    } finally {
+      for (const [key, value] of [['QBO_PUBLIC_URL', saved.url], ['QBO_ALLOWED_HOSTS', saved.hosts], ['RAILWAY_PUBLIC_DOMAIN', saved.railway]] as const) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
   it('only invites logins it makes sense to invite', async () => {
     const staff = (await qbo.users.create({ name: 'Staff', email: 'staff@example-cpa.com', username: 'staff', password: 'a-typed-password-1' })).user;
-    const noEmail = (await qbo.users.create({ name: 'No Email', accountType: 'client', username: 'no.email', password: 'a-typed-password-1' })).user;
+    const noEmail = (await qbo.users.create({ name: 'No Email', accountType: 'client', username: 'no.email', password: 'a-typed-password-1', realmIds: ['realm-1'] })).user;
+    const noCompany = (await qbo.users.create({ name: 'No Company', email: 'nc@example.com', accountType: 'client', username: 'no.company', password: 'a-typed-password-1' })).user;
     const disabled = (await createClient()).json().user;
     await qbo.users.update(disabled.id, { status: 'disabled' });
     sender.sent.length = 0;
@@ -266,7 +305,8 @@ describe('client invitation emails over HTTP', () => {
     expect((await invite(staff.id)).json().message).toMatch(/client logins/);
     expect((await invite(noEmail.id)).json().message).toMatch(/valid email address/);
     expect((await invite(disabled.id)).json().message).toMatch(/disabled/);
-    for (const id of [staff.id, noEmail.id, disabled.id]) expect((await invite(id)).statusCode).toBe(400);
+    expect((await invite(noCompany.id)).json().message).toMatch(/Assign a company/);
+    for (const id of [staff.id, noEmail.id, disabled.id, noCompany.id]) expect((await invite(id)).statusCode).toBe(400);
     expect((await invite(99999)).statusCode).toBe(404);
     expect((await invite('abc')).statusCode).toBe(404);
     expect(sender.sent).toEqual([]);

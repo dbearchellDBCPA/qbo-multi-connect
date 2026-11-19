@@ -15,7 +15,7 @@ let serverUrl = null;
 // breaks, who it tells, and the last alert it sent. Null until loaded (or for
 // non-admins / a server without the feature).
 let alertsInfo = null;
-let invitesInfo = null; // { enabled, from, firmName, replyTo, usingAlertSender, missing, problems } — admins only
+let invitesInfo = null; // { enabled, from, firmName, replyTo, missing, problems } — admins only
 let connections = [];
 let users = [];
 let connectionsLoaded = false;
@@ -1019,6 +1019,9 @@ function clientInviteControlsHtml(user, idAttr) {
   if (user.status === 'disabled') {
     return `${note}<p class="field-hint">Enable this login to send an invitation.</p>`;
   }
+  if (user.realmIds.length === 0) {
+    return `${note}<p class="field-hint">Assign their company under Edit assignments to send an invitation.</p>`;
+  }
   return `<button type="button" class="btn btn-ghost btn-card" data-action="send-invite" data-id="${idAttr}">${
     user.inviteSentAt ? 'Send a new invitation' : 'Send invitation'
   }</button>${note}`;
@@ -1628,9 +1631,7 @@ function inviteOptionHtml() {
           <input type="checkbox" name="sendInvite" checked>
           <span>Email them an invitation and a generated password</span>
         </label>
-        <span class="field-hint">Two emails go to the address above from ${escapeHtml(invitesInfo.from || '')}: one with the connector address, their username, and setup steps for Claude and ChatGPT; a second with a strong password the server generates. The password is never shown here.${
-          invitesInfo.usingAlertSender ? ' This is your alert sender — set QBO_INVITE_FROM for a client-facing address.' : ''
-        }</span>
+        <span class="field-hint">Two emails go to the address above from ${escapeHtml(invitesInfo.from || '')}: one with the connector address, their username, and setup steps for Claude and ChatGPT; a second with a strong password the server generates. The password is never shown here.</span>
       </div>`;
 }
 

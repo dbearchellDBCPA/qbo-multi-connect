@@ -252,10 +252,7 @@ async function startServer() {
     }
     const invites = appConfig.invites;
     if (invites.enabled) {
-      console.log(
-        `✉️  Invites:    on — client invitations go out from ${invites.from}` +
-          (invites.usingAlertSender ? ' (the alert sender; set QBO_INVITE_FROM for a client-facing address)' : '')
-      );
+      console.log(`✉️  Invites:    on — client invitations go out from ${invites.from}`);
     } else if (invites.problems.length > 0) {
       console.log(`⚠️  Invites:    off — ${invites.problems.join('; ')}`);
     } else {

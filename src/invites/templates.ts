@@ -111,6 +111,11 @@ const GOOD_TO_KNOW = [
   'A login can see everything in the file, including payroll and owner transactions.',
 ];
 
+// Changing a password signs out anything connected with the old one — worth
+// saying, since the password email asks them to change it.
+const CHANGE_PASSWORD_NOTE =
+  'It is easiest to do this before you connect your assistant: changing it later signs the assistant out, and you connect again with the new password.';
+
 /** `**bold**` markers → plain text for the text part. */
 function plain(text: string): string {
   return text.replace(/\*\*(.+?)\*\*/g, '$1');
@@ -130,7 +135,7 @@ export function renderClientInvitationEmail(details: InvitationDetails): Rendere
     `straight from the QuickBooks Online books for ${company}. Ask in plain English — "Who owes me money?" — ` +
     `and it pulls the answer from your books.`;
   const passwordNote = 'Your password is arriving in a separate email.';
-  const changePassword = `To change your password, sign in at ${signInUrl} with the same username and password, open Settings, and choose Change password.`;
+  const changePassword = `To change your password, sign in at ${signInUrl} with the same username and password, open Settings, and choose Change password. ${CHANGE_PASSWORD_NOTE}`;
   const contact = contactLine(firmName, canReply);
 
   const numbered = (steps: string[]) => steps.map((step, i) => `${i + 1}. ${plain(step)}`);
@@ -187,7 +192,7 @@ ${ol(CHATGPT_STEPS)}
 ${ul(TRY_ASKING)}
 <h2 style="${STYLE.h2}">Good to know</h2>
 ${ul(GOOD_TO_KNOW)}
-<p style="${STYLE.p}">To change your password, sign in at <a href="${escapeHtml(signInUrl)}" style="color:#117c75;">${escapeHtml(signInUrl)}</a> with the same username and password, open Settings, and choose Change password.</p>
+<p style="${STYLE.p}">To change your password, sign in at <a href="${escapeHtml(signInUrl)}" style="color:#117c75;">${escapeHtml(signInUrl)}</a> with the same username and password, open Settings, and choose Change password. ${escapeHtml(CHANGE_PASSWORD_NOTE)}</p>
 <p style="${STYLE.muted}">${escapeHtml(contact)} Sent by ${escapeHtml(firmName)}.</p>
 </div></body></html>`;
 
@@ -200,7 +205,7 @@ export function renderClientPasswordEmail(details: PasswordDetails): RenderedEma
   const intro = `Here is the password for the QuickBooks connector ${firmName} set up for you. Your username and the setup steps are in a separate email.`;
   const howTo = 'Copy it exactly as shown, including the hyphens.';
   const advice = [
-    'Change it after you first sign in — the other email says how.',
+    'Change it to one of your own — the other email says how, and when is easiest.',
     'Do not forward this email. We will never ask you for this password.',
     `If you were not expecting this, delete it and let ${firmName} know.`,
   ];
