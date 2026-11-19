@@ -6,6 +6,10 @@ import { acceptInvitePage, inviteAcceptedPage, inviteInvalidPage } from '../../s
 import { redactUrlForLog } from '../../src/server/log-redaction.js';
 import { ResendEmailSender, EmailSendError, type EmailSender, type OutboundEmail } from '../../src/alerts/email.js';
 import { isValidUsername } from '../../src/users.js';
+import { APP_NAME, cleanFirmName, cleanVideoUrl, senderWithFirmName, videoEmbedUrl, type FirmBrand } from '../../src/branding.js';
+
+const FIRM: FirmBrand = { name: 'Example CPA', configured: true, source: 'dashboard', displayName: 'Example CPA' };
+const NO_FIRM: FirmBrand = { name: 'Your accounting firm', configured: false, source: 'default', displayName: APP_NAME };
 
 class FakeSender implements EmailSender {
   sent: OutboundEmail[] = [];
@@ -165,7 +169,7 @@ describe('the invitation email', () => {
 
 describe('the accept pages', () => {
   const form = acceptInvitePage({
-    firmName: 'Example CPA',
+    firm: FIRM,
     name: 'Jordan Rivera',
     username: 'jordan@rivera-landscaping.example',
     companyNames: ['Rivera Landscaping LLC'],
@@ -181,8 +185,25 @@ describe('the accept pages', () => {
     expect(form).toMatch(/<form method="POST">/); // posts back to the same link
   });
 
+  it('is in the firm\'s name: the firm is the brand, the app gets the small print', () => {
+    for (const html of [form, inviteInvalidPage(FIRM), inviteAcceptedPage({ firm: FIRM, username: 'j@x.example', connectorUrl: 'https://q.example/mcp', signInUrl: 'https://q.example' })]) {
+      expect(html).toContain('<span class="brand-name">Example CPA</span>');
+      expect(html).toMatch(/<title>[^<]+ — Example CPA<\/title>/);
+      expect(html).toContain(`Secure access from Example CPA, provided through ${APP_NAME}.`);
+      // The app's name appears in that one credit line and nowhere else.
+      expect(html.split(APP_NAME)).toHaveLength(2);
+    }
+  });
+
+  it('falls back to the app\'s name until a firm name is set', () => {
+    const page = acceptInvitePage({ firm: NO_FIRM, name: 'Jordan', username: 'j@x.example', companyNames: [], minPasswordLength: 8 });
+    expect(page).toContain(`<span class="brand-name">${APP_NAME}</span>`);
+    expect(page).toContain('<strong>Your accounting firm</strong> has invited you');
+    expect(page).not.toContain('provided through');
+  });
+
   it('loads nothing from anywhere else and sends no referrer', () => {
-    for (const html of [form, inviteInvalidPage('Example CPA'), inviteAcceptedPage({ firmName: 'Example CPA', username: 'j@x.example', connectorUrl: 'https://q.example/mcp', signInUrl: 'https://q.example' })]) {
+    for (const html of [form, inviteInvalidPage(FIRM), inviteAcceptedPage({ firm: FIRM, username: 'j@x.example', connectorUrl: 'https://q.example/mcp', signInUrl: 'https://q.example' })]) {
       expect(html).toContain('<meta name="referrer" content="no-referrer">');
       expect(html).not.toMatch(/<script/i);
       expect(html).not.toMatch(/(src|href)="https?:\/\//i);
@@ -191,7 +212,7 @@ describe('the accept pages', () => {
 
   it('escapes what it shows', () => {
     const hostile = acceptInvitePage({
-      firmName: '<b>Firm</b>',
+      firm: { name: '<b>Firm</b>', configured: true, source: 'environment', displayName: '<b>Firm</b>' },
       name: '<script>x</script>',
       username: '"><input name=evil>',
       companyNames: ['A <i>B</i>'],
@@ -205,7 +226,7 @@ describe('the accept pages', () => {
 
   it('after accepting, shows the connector address, the username, and both sets of steps — but no password', () => {
     const done = inviteAcceptedPage({
-      firmName: 'Example CPA',
+      firm: FIRM,
       username: 'jordan@rivera-landscaping.example',
       connectorUrl: 'https://qbo.example-cpa.com/mcp',
       signInUrl: 'https://qbo.example-cpa.com',
@@ -215,6 +236,112 @@ describe('the accept pages', () => {
     expect(done).toMatch(/Add custom connector/);
     expect(done).toMatch(/Add custom MCP server/);
     expect(done).toContain('The one you just chose');
+  });
+});
+
+describe('firm name', () => {
+  it('is cleaned up to something safe for a subject line and a From header', () => {
+    expect(cleanFirmName('  David   Example\tCPA LLC ')).toBe('David Example CPA LLC');
+    expect(cleanFirmName("O'Neil & Sons, P.C.")).toBe("O'Neil & Sons, P.C.");
+    for (const bad of ['', '   ', 'x'.repeat(101), 'Firm <evil@example.com>', 'Line\u0000break', 42, null]) {
+      expect(() => cleanFirmName(bad as any), JSON.stringify(bad)).toThrow();
+    }
+    // A newline can't smuggle a second header in: whitespace collapses to one space.
+    expect(cleanFirmName('Firm\r\nBcc: x@example.com')).toBe('Firm Bcc: x@example.com');
+  });
+
+  it('is added to a bare sender address; a name set in the dashboard also replaces the sender\'s own', () => {
+    const fromEnv: FirmBrand = { ...FIRM, source: 'environment' };
+    expect(senderWithFirmName('hello@example-cpa.com', FIRM)).toBe('"Example CPA" <hello@example-cpa.com>');
+    expect(senderWithFirmName('hello@example-cpa.com', fromEnv)).toBe('"Example CPA" <hello@example-cpa.com>');
+    // Both written in the server settings: the sender stays as written.
+    expect(senderWithFirmName('Someone Else <hello@example-cpa.com>', fromEnv)).toBe('Someone Else <hello@example-cpa.com>');
+    // Chosen in the dashboard: the inbox shows the same name as the subject.
+    expect(senderWithFirmName('Someone Else <hello@example-cpa.com>', FIRM)).toBe('"Example CPA" <hello@example-cpa.com>');
+    expect(senderWithFirmName('"Quoted, Name" <hello@example-cpa.com>', FIRM)).toBe('"Example CPA" <hello@example-cpa.com>');
+    expect(senderWithFirmName('Example CPA <hello@example-cpa.com>', FIRM)).toBe('Example CPA <hello@example-cpa.com>'); // already right
+    expect(senderWithFirmName('<hello@example-cpa.com>', fromEnv)).toBe('"Example CPA" <hello@example-cpa.com>');
+    expect(senderWithFirmName('Someone Else <hello@example-cpa.com>', NO_FIRM)).toBe('Someone Else <hello@example-cpa.com>');
+    expect(senderWithFirmName('hello@example-cpa.com', NO_FIRM)).toBe('hello@example-cpa.com');
+    const quoted: FirmBrand = { ...FIRM, name: 'The "Best" CPA \\ Co' };
+    expect(senderWithFirmName('a@b.com', quoted)).toBe('"The Best CPA  Co" <a@b.com>');
+  });
+
+  it('records where the configured name came from', () => {
+    expect(parseInvitesConfig({ QBO_FIRM_NAME: 'Env Firm', QBO_INVITE_FROM: 'Sender Firm <a@b.com>' })).toMatchObject({ firmName: 'Env Firm', firmNameSource: 'environment' });
+    expect(parseInvitesConfig({ QBO_INVITE_FROM: 'Sender Firm <a@b.com>' })).toMatchObject({ firmName: 'Sender Firm', firmNameSource: 'sender' });
+    expect(parseInvitesConfig({})).toMatchObject({ firmName: 'Your accounting firm', firmNameSource: 'default' });
+    // The environment's name is held to the same shape as the dashboard's.
+    expect(parseInvitesConfig({ QBO_FIRM_NAME: '  Env\tFirm\n<b> ' }).firmName).toBe('Env Firm b');
+    expect(parseInvitesConfig({ QBO_FIRM_NAME: 'x'.repeat(300) }).firmName).toHaveLength(100);
+    expect(parseInvitesConfig({ QBO_FIRM_NAME: ' \t ' })).toMatchObject({ firmNameSource: 'default' });
+  });
+});
+
+describe('setup walkthrough video', () => {
+  const LOOM = 'https://www.loom.com/share/0123456789abcdef0123456789abcdef';
+  const EMBED = 'https://www.loom.com/embed/0123456789abcdef0123456789abcdef';
+
+  it('accepts an https link and nothing else', () => {
+    expect(cleanVideoUrl(`  ${LOOM}?sid=abc  `)).toBe(`${LOOM}?sid=abc`);
+    expect(cleanVideoUrl('https://example.com/videos/setup')).toBe('https://example.com/videos/setup');
+    // The limit applies to the link as stored, after it is normalised.
+    expect(() => cleanVideoUrl(`https://example.com/${'é'.repeat(200)}`)).toThrow(/at most 500/);
+    for (const bad of ['http://www.loom.com/share/abc12345', 'javascript:alert(1)', 'loom.com/share/abc', 'not a link', 'https://user:pw@example.com/v', `https://example.com/${'x'.repeat(500)}`, 7, null]) {
+      expect(() => cleanVideoUrl(bad as any), JSON.stringify(bad)).toThrow();
+    }
+  });
+
+  it('only ever embeds Loom, from its share or embed link', () => {
+    expect(videoEmbedUrl(LOOM)).toBe(EMBED);
+    expect(videoEmbedUrl(`${LOOM}?sid=1234-abcd`)).toBe(EMBED);
+    expect(videoEmbedUrl(EMBED)).toBe(EMBED);
+    expect(videoEmbedUrl('https://loom.com/share/0123456789abcdef')).toBe('https://www.loom.com/embed/0123456789abcdef');
+    for (const link of [
+      'https://example.com/share/0123456789abcdef',
+      'https://www.loom.com.evil.example/share/0123456789abcdef',
+      'https://evil.example/?x=https://www.loom.com/share/0123456789abcdef',
+      'https://www.loom.com/share/../../login',
+      'https://www.loom.com/looms/videos',
+      'https://www.youtube.com/watch?v=abc',
+      'nonsense',
+    ]) {
+      expect(videoEmbedUrl(link), link).toBeNull();
+    }
+  });
+
+  it('plays on the page after the password is set, never on the page with the password form', () => {
+    const done = inviteAcceptedPage({ firm: FIRM, username: 'j@x.example', connectorUrl: 'https://q.example/mcp', signInUrl: 'https://q.example', video: { url: LOOM, embedUrl: EMBED } });
+    expect(done).toContain(`<iframe src="${EMBED}"`);
+    expect(done).toContain('referrerpolicy="no-referrer"');
+    expect(done).toContain('sandbox="allow-scripts allow-same-origin allow-presentation allow-popups"');
+    expect(done).toContain(`href="${LOOM}"`); // and a plain link, in case the player is blocked
+    expect(done).not.toMatch(/<script/i);
+    // Before the video, the things they need; after it, the written steps.
+    expect(done.indexOf('Connector address')).toBeLessThan(done.indexOf('<iframe'));
+    expect(done.indexOf('<iframe')).toBeLessThan(done.indexOf('<h2>In Claude</h2>'));
+
+    const form = acceptInvitePage({ firm: FIRM, name: 'J', username: 'j@x.example', companyNames: [], minPasswordLength: 8 });
+    expect(form).not.toContain('<iframe');
+    expect(form).not.toMatch(/(src|href)="https?:\/\//i);
+  });
+
+  it('is only linked when it is not a Loom video, and absent when there is none', () => {
+    const other = inviteAcceptedPage({ firm: FIRM, username: 'j@x.example', connectorUrl: 'https://q.example/mcp', signInUrl: 'https://q.example', video: { url: 'https://example.com/v/setup', embedUrl: null } });
+    expect(other).not.toContain('<iframe');
+    expect(other).toContain('href="https://example.com/v/setup"');
+    expect(other).toContain('rel="noopener noreferrer"');
+    const none = inviteAcceptedPage({ firm: FIRM, username: 'j@x.example', connectorUrl: 'https://q.example/mcp', signInUrl: 'https://q.example' });
+    expect(none).not.toContain('Watch');
+    expect(none).not.toContain('<iframe');
+  });
+
+  it('is linked from the invitation email, and escaped', () => {
+    const withVideo = renderClientInvitationEmail({ ...INVITATION, videoUrl: `${LOOM}?a=1&b=2` });
+    expect(withVideo.text).toContain(`Prefer to watch? This short video walks through it: ${LOOM}?a=1&b=2`);
+    expect(withVideo.html).toContain(`href="${LOOM}?a=1&amp;b=2"`);
+    expect(renderClientInvitationEmail(INVITATION).text).not.toContain('Prefer to watch');
+    expect(renderClientInvitationEmail({ ...INVITATION, videoUrl: null }).html).not.toContain('Watch the walkthrough');
   });
 });
 
@@ -230,7 +357,7 @@ describe('request log redaction', () => {
 
 describe('ClientInvites.deliver', () => {
   const recipient = { name: 'Jordan Rivera', email: 'jordan@rivera-landscaping.example', username: 'jordan@rivera-landscaping.example' };
-  const context = { acceptUrl: ACCEPT_URL, expiresAt: INVITATION.expiresAt, connectorUrl: 'https://qbo.example-cpa.com/mcp', companyNames: ['Rivera Landscaping LLC'] };
+  const context = { acceptUrl: ACCEPT_URL, expiresAt: INVITATION.expiresAt, connectorUrl: 'https://qbo.example-cpa.com/mcp', companyNames: ['Rivera Landscaping LLC'], firm: FIRM };
 
   it('sends one email, with the link, from the configured sender', async () => {
     const sender = new FakeSender();
@@ -243,6 +370,19 @@ describe('ClientInvites.deliver', () => {
     expect(email.replyTo).toBe('pat@example-cpa.com');
     expect(email.text).toContain(ACCEPT_URL);
     expect(email.idempotencyKey).toMatch(/^client-invite\/.+/);
+  });
+
+  it('goes out in the firm\'s name, whatever the firm is called', async () => {
+    const sender = new FakeSender();
+    const bareSender = parseInvitesConfig({ RESEND_API_KEY: 'k', QBO_INVITE_FROM: 'hello@example-cpa.com' });
+    const firm: FirmBrand = { name: 'Rivera & Stone CPA LLC', configured: true, source: 'dashboard', displayName: 'Rivera & Stone CPA LLC' };
+    await new ClientInvites(bareSender, sender).deliver(recipient, { ...context, firm });
+    const [email] = sender.sent;
+    expect(email.from).toBe('"Rivera & Stone CPA LLC" <hello@example-cpa.com>'); // a bare address gains the firm's name
+    expect(email.subject).toBe('Rivera & Stone CPA LLC invited you to connect your AI assistant to QuickBooks');
+    expect(email.text).toContain('Rivera & Stone CPA LLC has set up a secure, read-only connection');
+    expect(email.text).not.toContain(APP_NAME);
+    expect(email.html).not.toContain(APP_NAME);
   });
 
   it('a re-send is a new send, never deduplicated against the last one', async () => {

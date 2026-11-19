@@ -1,10 +1,15 @@
 /**
  * The pages a client sees when they follow an invitation link: choose a
- * password, then how to connect their assistant. Server-rendered and
- * self-contained, like the connector sign-in page — no scripts, no outside
- * resources, so the link in the address bar is never sent anywhere else.
+ * password, then how to connect their assistant. Server-rendered, no
+ * scripts, and no referrer is ever sent.
+ *
+ * The page with the password form loads nothing from anywhere else — the
+ * link in its address bar is still a live credential. The page after it,
+ * shown once that link has been used up, may embed the firm's walkthrough
+ * video.
  */
 import { BRAND_BASE, BRAND_FONT_FACES, BRAND_MARK, BRAND_TOKENS } from './brand-css.js';
+import { APP_NAME, type FirmBrand, type SetupVideo } from '../branding.js';
 import {
   CHATGPT_NOTE,
   CHATGPT_STEPS,
@@ -62,9 +67,42 @@ ${BRAND_BASE}
   }
   ol, ul { padding-left:20px; margin-bottom:12px; }
   li { margin-bottom:6px; }
+  .powered { max-width:560px; margin:14px auto 0; text-align:center; font-size:11.5px; color:var(--text-faint); }
+  .video {
+    position:relative; height:0; padding-bottom:56.25%; margin:4px 0 8px;
+    border:1px solid var(--border); border-radius:10px; overflow:hidden; background:var(--surface-2);
+  }
+  .video iframe { position:absolute; top:0; left:0; width:100%; height:100%; border:0; }
+  .watch {
+    display:inline-block; margin:4px 0 8px; padding:10px 16px; border-radius:8px; background:var(--primary);
+    color:var(--on-primary); font-size:14px; font-weight:600; text-decoration:none;
+  }
+  a { color:var(--primary); }
 `;
 
-function page(title: string, body: string): string {
+/**
+ * The firm's walkthrough video: its player when it is a kind we embed, a
+ * plain link otherwise — and always a link as well, for when the player is
+ * blocked. The frame is sandboxed and is sent no referrer.
+ */
+function videoSection(video: SetupVideo | null | undefined): string {
+  if (!video) return '';
+  const link = `<a href="${escapeHtml(video.url)}" target="_blank" rel="noopener noreferrer">`;
+  if (!video.embedUrl) {
+    return `<h2>Watch how to connect</h2>
+    <p>${link.replace('<a ', '<a class="watch" ')}Watch the walkthrough video</a></p>`;
+  }
+  return `<h2>Watch how to connect</h2>
+    <div class="video"><iframe src="${escapeHtml(video.embedUrl)}" title="How to connect your AI assistant" loading="lazy" allowfullscreen referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-presentation allow-popups"></iframe></div>
+    <p class="hint" style="margin:0 0 4px">Video not showing? ${link}Open it in a new tab</a>.</p>`;
+}
+
+/**
+ * The page shell. The firm's name is the brand — it is the firm, not the
+ * software, giving this person access — with the app credited in small print
+ * underneath. Until a firm name has been set, the app's own name stands in.
+ */
+function page(title: string, body: string, firm: FirmBrand): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -72,20 +110,23 @@ function page(title: string, body: string): string {
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="robots" content="noindex, nofollow">
 <meta name="referrer" content="no-referrer">
-<title>${escapeHtml(title)}</title>
+<title>${escapeHtml(title)} — ${escapeHtml(firm.displayName)}</title>
 <style>${STYLES}</style>
 </head>
 <body>
-  <div class="card">
-    <div class="brand">${BRAND_MARK}<span class="brand-name">QBO Multi-Connect</span></div>
-    ${body}
+  <div>
+    <div class="card">
+      <div class="brand">${BRAND_MARK}<span class="brand-name">${escapeHtml(firm.displayName)}</span></div>
+      ${body}
+    </div>
+    ${firm.configured ? `<p class="powered">Secure access from ${escapeHtml(firm.name)}, provided through ${APP_NAME}.</p>` : ''}
   </div>
 </body>
 </html>`;
 }
 
 export interface AcceptPageDetails {
-  firmName: string;
+  firm: FirmBrand;
   name: string;
   username: string;
   companyNames: string[];
@@ -96,7 +137,8 @@ export interface AcceptPageDetails {
 
 /** Step 1: the invited person chooses their password. */
 export function acceptInvitePage(details: AcceptPageDetails): string {
-  const { firmName, name, username, companyNames, minPasswordLength, error } = details;
+  const { firm, name, username, companyNames, minPasswordLength, error } = details;
+  const firmName = firm.name;
   return page(
     'Choose your password',
     `<h1>Welcome, ${escapeHtml(name)}</h1>
@@ -112,20 +154,24 @@ export function acceptInvitePage(details: AcceptPageDetails): string {
       <input type="password" id="confirm" name="confirm" autocomplete="new-password" minlength="${minPasswordLength}" required>
       <button type="submit">Set password and continue</button>
     </form>
-    <p class="note">Only you will know this password. You'll type it once, on a sign-in page like this one, when you add the connector to your assistant.</p>`
+    <p class="note">Only you will know this password. You'll type it once, on a sign-in page like this one, when you add the connector to your assistant.</p>`,
+    firm
   );
 }
 
 export interface AcceptedPageDetails {
-  firmName: string;
+  firm: FirmBrand;
   username: string;
   connectorUrl: string;
   signInUrl: string;
+  /** The firm's walkthrough video, when it has recorded one. */
+  video?: SetupVideo | null;
 }
 
 /** Step 2: the password is set — here is how to connect. */
 export function inviteAcceptedPage(details: AcceptedPageDetails): string {
-  const { firmName, username, connectorUrl, signInUrl } = details;
+  const { firm, username, connectorUrl, signInUrl, video } = details;
+  const firmName = firm.name;
   const ol = (steps: string[]) => `<ol>${steps.map((s) => `<li>${rich(s)}</li>`).join('')}</ol>`;
   return page(
     'You are set up',
@@ -136,6 +182,7 @@ export function inviteAcceptedPage(details: AcceptedPageDetails): string {
       <dt>Your username</dt><dd>${escapeHtml(username)}</dd>
       <dt>Your password</dt><dd style="font-family:inherit;user-select:auto">The one you just chose</dd>
     </dl>
+    ${videoSection(video)}
     <h2>In Claude</h2>
     ${ol(CLAUDE_STEPS)}
     <p>${escapeHtml(CLAUDE_NOTE)}</p>
@@ -144,16 +191,19 @@ export function inviteAcceptedPage(details: AcceptedPageDetails): string {
     <p>${escapeHtml(CHATGPT_NOTE)}</p>
     <h2>Then try asking</h2>
     <ul>${TRY_ASKING.map((q) => `<li>${escapeHtml(q)}</li>`).join('')}</ul>
-    <p class="note">These steps are also in your invitation email. To change your password later, sign in at ${escapeHtml(signInUrl)} and open Settings. Questions? Contact ${escapeHtml(firmName)}.</p>`
+    <p class="note">These steps are also in your invitation email. To change your password later, sign in at ${escapeHtml(signInUrl)} and open Settings. Questions? Contact ${escapeHtml(firmName)}.</p>`,
+    firm
   );
 }
 
 /** The link is used, replaced, expired, or was never real. */
-export function inviteInvalidPage(firmName: string): string {
+export function inviteInvalidPage(firm: FirmBrand): string {
+  const firmName = firm.name;
   return page(
     'Invitation link no longer valid',
     `<h1>This invitation link can't be used</h1>
     <p class="lead">It may have expired, already been used to set a password, or been replaced by a newer invitation. Check your inbox for a more recent one, or ask <strong>${escapeHtml(firmName)}</strong> to send a new invitation.</p>
-    <p class="note">If you have already chosen a password, you don't need this link — add the connector to your assistant and sign in with your email address and that password.</p>`
+    <p class="note">If you have already chosen a password, you don't need this link — add the connector to your assistant and sign in with your email address and that password.</p>`,
+    firm
   );
 }

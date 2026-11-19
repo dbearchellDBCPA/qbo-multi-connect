@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { EmailSender } from '../alerts/email.js';
 import type { InvitesConfig } from './config.js';
 import { renderClientInvitationEmail } from './templates.js';
+import { senderWithFirmName, type FirmBrand } from '../branding.js';
 
 /** Who an invitation is for. */
 export interface InviteRecipient {
@@ -17,6 +18,10 @@ export interface InviteContext {
   expiresAt: Date;
   connectorUrl: string;
   companyNames: string[];
+  /** Whose name the invitation goes out in. */
+  firm: FirmBrand;
+  /** The firm's walkthrough video, when it has one. */
+  videoUrl?: string | null;
 }
 
 /** What happened when an invitation email was sent. Never contains the link. */
@@ -63,11 +68,6 @@ export class ClientInvites {
     return this.config.enabled && this.sender !== null;
   }
 
-  /** How the firm is named in emails and on the accept page. */
-  get firmName(): string {
-    return this.config.firmName;
-  }
-
   status(): InvitesStatus {
     return {
       enabled: this.enabled,
@@ -95,7 +95,7 @@ export class ClientInvites {
     const delivery: InviteDelivery = { to: recipient.email, sent: false, error: null };
     try {
       const email = renderClientInvitationEmail({
-        firmName: this.config.firmName,
+        firmName: context.firm.name,
         name: recipient.name,
         username: recipient.username,
         acceptUrl: context.acceptUrl,
@@ -103,9 +103,10 @@ export class ClientInvites {
         connectorUrl: context.connectorUrl,
         companyNames: context.companyNames,
         canReply: this.config.replyTo !== null,
+        videoUrl: context.videoUrl ?? null,
       });
       await this.sender.send({
-        from: this.config.from,
+        from: senderWithFirmName(this.config.from, context.firm),
         to: [recipient.email],
         ...(this.config.replyTo ? { replyTo: this.config.replyTo } : {}),
         ...email,

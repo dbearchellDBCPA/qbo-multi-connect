@@ -41,6 +41,8 @@ export interface InvitationDetails {
   companyNames: string[];
   /** Whether replying to the email reaches someone. */
   canReply: boolean;
+  /** The firm's walkthrough video, when it has recorded one. */
+  videoUrl?: string | null;
 }
 
 // These strings are dropped into style="…" attributes: no double quotes inside.
@@ -67,7 +69,8 @@ function formatDay(date: Date): string {
 }
 
 export function renderClientInvitationEmail(details: InvitationDetails): RenderedEmail {
-  const { firmName, name, username, acceptUrl, expiresAt, connectorUrl, companyNames, canReply } = details;
+  const { firmName, name, username, acceptUrl, expiresAt, connectorUrl, companyNames, canReply, videoUrl } = details;
+  const videoLine = 'Prefer to watch? This short video walks through it:';
   const company = companyPhrase(companyNames);
   const subject = `${firmName} invited you to connect your AI assistant to QuickBooks`;
   const intro =
@@ -93,6 +96,7 @@ export function renderClientInvitationEmail(details: InvitationDetails): Rendere
     '',
     'STEP 2 — CONNECT YOUR ASSISTANT',
     stepTwoIntro,
+    ...(videoUrl ? [`${videoLine} ${videoUrl}`] : []),
     `Connector address: ${connectorUrl}`,
     `Your username: ${username}`,
     '',
@@ -129,6 +133,7 @@ export function renderClientInvitationEmail(details: InvitationDetails): Rendere
 <p style="${STYLE.p}">${escapeHtml(linkNote)}</p>
 <h2 style="${STYLE.h2}">Step 2 — Connect your assistant</h2>
 <p style="${STYLE.p}">${escapeHtml(stepTwoIntro)}</p>
+${videoUrl ? `<p style="${STYLE.p}">${escapeHtml(videoLine)} <a href="${escapeHtml(videoUrl)}" style="color:#117c75;font-weight:600;">Watch the walkthrough</a></p>` : ''}
 <table style="${STYLE.table}">
 <tr><th style="${STYLE.th}">Connector address</th><td style="${STYLE.td}"><span style="${STYLE.code}">${escapeHtml(connectorUrl)}</span></td></tr>
 <tr><th style="${STYLE.th}">Your username</th><td style="${STYLE.td}"><span style="${STYLE.code}">${escapeHtml(username)}</span></td></tr>

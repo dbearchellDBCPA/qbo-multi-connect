@@ -3,6 +3,7 @@ import type { QBOManager } from '../../index.js';
 import { AlertsNotConfiguredError } from '../../alerts/connection-alerts.js';
 import { EmailSendError } from '../../alerts/email.js';
 import { authenticateRequest, requireAdmin } from '../middleware.js';
+import { cleanFirmName, cleanVideoUrl } from '../../branding.js';
 
 /**
  * Outbound email status (admin only): alerts for broken QuickBooks
@@ -16,6 +17,20 @@ export async function alertsRoutes(
   qboManager: QBOManager,
   masterApiKey: string
 ): Promise<void> {
+  /** The firm's name and video as clients see them, wherever each was set. */
+  async function brandingState() {
+    const firm = await qboManager.branding.firm();
+    const video = await qboManager.branding.setupVideo();
+    return {
+      firmName: firm.name,
+      firmNameConfigured: firm.configured,
+      firmNameSource: firm.source,
+      setupVideoUrl: video?.url ?? null,
+      /** Whether the video will play on the page, or only be linked. */
+      setupVideoEmbedded: Boolean(video?.embedUrl),
+    };
+  }
+
   fastify.get('/api/alerts', async (request, reply) => {
     const scope = await authenticateRequest(request, reply, qboManager, masterApiKey);
     if (!scope) return;
@@ -37,7 +52,36 @@ export async function alertsRoutes(
     const scope = await authenticateRequest(request, reply, qboManager, masterApiKey);
     if (!scope) return;
     if (!(await requireAdmin(scope, reply))) return;
-    await reply.send(qboManager.invites.status());
+    await reply.send({ ...qboManager.invites.status(), ...(await brandingState()) });
+  });
+
+  // What clients see that is the firm's own: its name — on the invitation
+  // email, the page where they choose a password, and the sign-in page — and
+  // its walkthrough video. Send only the fields being changed; a blank value
+  // clears that one (the name then falls back to the environment's).
+  fastify.put<{ Body: { firmName?: unknown; setupVideoUrl?: unknown } }>('/api/branding', async (request, reply) => {
+    const scope = await authenticateRequest(request, reply, qboManager, masterApiKey);
+    if (!scope) return;
+    if (!(await requireAdmin(scope, reply))) return;
+
+    const body = request.body ?? {};
+    for (const key of ['firmName', 'setupVideoUrl'] as const) {
+      if (body[key] != null && typeof body[key] !== 'string') {
+        await reply.code(400).send({ error: 'Bad Request', message: `${key} must be text` });
+        return;
+      }
+    }
+    try {
+      // Validate both before saving either, so a bad link doesn't leave a
+      // half-applied change behind.
+      if (typeof body.firmName === 'string' && body.firmName.trim()) cleanFirmName(body.firmName);
+      if (typeof body.setupVideoUrl === 'string' && body.setupVideoUrl.trim()) cleanVideoUrl(body.setupVideoUrl);
+      if ('firmName' in body) await qboManager.branding.setFirmName((body.firmName as string | null) ?? null);
+      if ('setupVideoUrl' in body) await qboManager.branding.setSetupVideoUrl((body.setupVideoUrl as string | null) ?? null);
+      await reply.send(await brandingState());
+    } catch (error) {
+      await reply.code(400).send({ error: 'Bad Request', message: error instanceof Error ? error.message : 'Invalid value' });
+    }
   });
 
   fastify.post('/api/alerts/test', async (request, reply) => {

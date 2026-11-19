@@ -9,8 +9,10 @@
   for when you want something to attach, print, or adapt. To use it, fill in
   the four placeholders: [FIRM NAME], [CONNECTOR ADDRESS] (your deployment's
   URL ending in /mcp), [SIGN-IN ADDRESS] (the same URL without /mcp), and
-  [SUPPORT CONTACT]. Do a dry run with a test client login before the first
-  real one — menu names in Claude change from time to time.
+  [SUPPORT CONTACT]. If you have recorded a walkthrough video, replace
+  [VIDEO LINK] below with its link; otherwise delete that line. Do a dry run
+  with a test client login before the first real one — menu names in Claude
+  change from time to time.
 -->
 
 [FIRM NAME] can give your AI assistant a secure, **read-only** window into your
@@ -36,6 +38,8 @@ reports. It cannot create, change, or delete anything in QuickBooks.
 
 Set this up from a computer (the Claude website or desktop app). It takes
 about five minutes.
+
+**Prefer to watch?** This short video walks through it: [VIDEO LINK]
 
 ## Set up in Claude
 

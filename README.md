@@ -772,7 +772,7 @@ curl -H "Authorization: Bearer YOUR_API_KEY" \
 | `QBO_ALERT_FROM` | No | — | Sender for alert emails, on a domain verified in Resend |
 | `QBO_INVITE_FROM` | No | — | Sender clients see on invitation emails, e.g. `Your Firm <hello@yourfirm.com>`. Until it is set, invitations are produced as links for you to send yourself |
 | `QBO_INVITE_REPLY_TO` | No | — | Where a client's reply to an invitation goes |
-| `QBO_FIRM_NAME` | No | sender's display name | How invitation emails and the accept page name the firm |
+| `QBO_FIRM_NAME` | No | sender's display name | Your firm's name as clients see it (email, accept page, sign-in page). A name set in the dashboard under Settings wins over this |
 
 ### Public URL & custom domains
 

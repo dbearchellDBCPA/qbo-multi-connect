@@ -19,6 +19,7 @@ import { BRAND_BASE, BRAND_FONT_FACES, BRAND_MARK, BRAND_TOKENS } from '../brand
 // works without touching this file — see ../public-url.ts.
 import { publicBaseUrl } from '../public-url.js';
 import { waitText } from './auth.js';
+import { APP_NAME, type FirmBrand } from '../../branding.js';
 export { publicBaseUrl };
 
 const SIGN_IN_STYLES = `
@@ -55,11 +56,20 @@ ${BRAND_BASE}
     border-radius:8px; padding:10px 12px; font-size:13.5px; font-weight:500; margin-bottom:16px;
   }
   .note { margin-top:18px; font-size:12.5px; color:var(--text-faint); line-height:1.6; }
+  .powered { max-width:420px; margin:14px auto 0; text-align:center; font-size:11.5px; color:var(--text-faint); }
 `;
+
+/** Small print under the card: the firm is the brand, the app gets the credit line. */
+function poweredBy(firm: FirmBrand): string {
+  return firm.configured
+    ? `<p class="powered">Secure access from ${escapeHtml(firm.name)}, provided through ${APP_NAME}.</p>`
+    : '';
+}
 
 function signInPage(opts: {
   clientName: string;
   params: Record<string, string>;
+  firm: FirmBrand;
   error?: string;
 }): string {
   const hidden = Object.entries(opts.params)
@@ -70,12 +80,13 @@ function signInPage(opts: {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Sign in — QBO Multi-Connect</title>
+<title>Sign in — ${escapeHtml(opts.firm.displayName)}</title>
 <style>${SIGN_IN_STYLES}</style>
 </head>
 <body>
+  <div>
   <div class="card">
-    <div class="brand">${BRAND_MARK}<span class="brand-name">QBO Multi-Connect</span></div>
+    <div class="brand">${BRAND_MARK}<span class="brand-name">${escapeHtml(opts.firm.displayName)}</span></div>
     <h1>Sign in to connect</h1>
     <p class="lead"><strong>${escapeHtml(opts.clientName)}</strong> is requesting access to QuickBooks on your behalf. Sign in with your email or username and your password — you'll only reach the companies assigned to you.</p>
     ${opts.error ? `<div class="err">${escapeHtml(opts.error)}</div>` : ''}
@@ -87,7 +98,9 @@ function signInPage(opts: {
       <input type="password" id="password" name="password" autocomplete="current-password" required>
       <button type="submit">Sign in and allow access</button>
     </form>
-    <p class="note">Trouble signing in? Contact the person who set up your access — they can check your username or reset your password.</p>
+    <p class="note">Trouble signing in? Contact ${opts.firm.configured ? escapeHtml(opts.firm.name) : 'the person who set up your access'} — they can check your username or reset your password.</p>
+  </div>
+  ${poweredBy(opts.firm)}
   </div>
 </body>
 </html>`;
@@ -205,12 +218,12 @@ export async function oauthRoutes(fastify: FastifyInstance, qboManager: QBOManag
     // must be shown directly rather than bounced to an unverified URI.
     const client = params.client_id ? await qboManager.oauth.getClient(params.client_id) : null;
     if (!client) {
-      await reply.code(400).type('text/html').send(errorPage('Unknown or missing client_id. The connector may need to be re-added in Claude.'));
+      await reply.code(400).type('text/html').send(errorPage('Unknown or missing client_id. The connector may need to be re-added in Claude.', await qboManager.branding.firm()));
       return;
     }
     const redirectUri = params.redirect_uri ?? (client.redirectUris.length === 1 ? client.redirectUris[0] : undefined);
     if (!redirectUri || !client.redirectUris.includes(redirectUri)) {
-      await reply.code(400).type('text/html').send(errorPage('The redirect_uri was not registered for this client.'));
+      await reply.code(400).type('text/html').send(errorPage('The redirect_uri was not registered for this client.', await qboManager.branding.firm()));
       return;
     }
     params.redirect_uri = redirectUri;
@@ -230,7 +243,7 @@ export async function oauthRoutes(fastify: FastifyInstance, qboManager: QBOManag
     }
 
     await reply.type('text/html').send(
-      signInPage({ clientName: client.clientName || 'An MCP client', params })
+      signInPage({ clientName: client.clientName || 'An MCP client', params, firm: await qboManager.branding.firm() })
     );
   });
 
@@ -240,7 +253,7 @@ export async function oauthRoutes(fastify: FastifyInstance, qboManager: QBOManag
     const params = pickParams(body);
     const client = params.client_id ? await qboManager.oauth.getClient(params.client_id) : null;
     if (!client || !params.redirect_uri || !client.redirectUris.includes(params.redirect_uri)) {
-      await reply.code(400).type('text/html').send(errorPage('This sign-in request is no longer valid. Start again from Claude.'));
+      await reply.code(400).type('text/html').send(errorPage('This sign-in request is no longer valid. Start again from Claude.', await qboManager.branding.firm()));
       return;
     }
 
@@ -259,6 +272,7 @@ export async function oauthRoutes(fastify: FastifyInstance, qboManager: QBOManag
         signInPage({
           clientName: client.clientName || 'An MCP client',
           params,
+          firm: await qboManager.branding.firm(),
           error: locked
             ? `Too many failed sign-ins. Wait ${waitText(result.retryAfterMs)} and try again, or ask for a password reset.`
             : 'Incorrect username or password. Try again.',
@@ -341,12 +355,12 @@ export async function oauthRoutes(fastify: FastifyInstance, qboManager: QBOManag
   });
 }
 
-function errorPage(message: string): string {
+function errorPage(message: string, firm: FirmBrand): string {
   return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Sign-in error — QBO Multi-Connect</title><style>${SIGN_IN_STYLES}</style></head>
+<title>Sign-in error — ${escapeHtml(firm.displayName)}</title><style>${SIGN_IN_STYLES}</style></head>
 <body><div class="card">
-  <div class="brand">${BRAND_MARK}<span class="brand-name">QBO Multi-Connect</span></div>
+  <div class="brand">${BRAND_MARK}<span class="brand-name">${escapeHtml(firm.displayName)}</span></div>
   <h1>Can't complete sign-in</h1>
   <p class="lead">${escapeHtml(message)}</p>
 </div></body></html>`;

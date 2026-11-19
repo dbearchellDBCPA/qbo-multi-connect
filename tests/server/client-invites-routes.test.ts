@@ -504,6 +504,117 @@ describe('inviting a client by link', () => {
     }
   });
 
+  // ── In the firm's name ─────────────────────────────────────────────────────
+
+  it('everything a client sees is in the firm\'s name once it is set in the dashboard', async () => {
+    const set = await app.inject({ method: 'PUT', url: '/api/branding', headers: asMaster, payload: { firmName: 'David Example CPA LLC' } });
+    expect(set.statusCode).toBe(200);
+    expect(set.json()).toMatchObject({ firmName: 'David Example CPA LLC', firmNameConfigured: true, firmNameSource: 'dashboard' });
+
+    await invite();
+    const [email] = sender.sent;
+    expect(email.subject).toBe('David Example CPA LLC invited you to connect your AI assistant to QuickBooks');
+    expect(email.text).toContain('David Example CPA LLC has set up a secure, read-only connection');
+    expect(email.text).not.toContain('QBO Multi-Connect');
+
+    const link = sender.lastLinkPath();
+    const page = await openLink(link);
+    expect(page.body).toContain('<span class="brand-name">David Example CPA LLC</span>');
+    expect(page.body).toContain('<strong>David Example CPA LLC</strong> has invited you');
+    expect((await accept(link)).body).toContain('<span class="brand-name">David Example CPA LLC</span>');
+    expect((await openLink(link)).body).toContain('ask <strong>David Example CPA LLC</strong> to send a new invitation');
+
+    // The page they sign in on when they add the connector, too.
+    const client = (await app.inject({ method: 'POST', url: '/oauth/register', headers: HOST, payload: { client_name: 'Claude', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'none' } })).json();
+    const signIn = await app.inject({
+      method: 'GET',
+      url: `/oauth/authorize?client_id=${client.client_id}&redirect_uri=${encodeURIComponent(REDIRECT)}&response_type=code&code_challenge=abc&code_challenge_method=S256&state=s`,
+      headers: HOST,
+    });
+    expect(signIn.body).toContain('<span class="brand-name">David Example CPA LLC</span>');
+    expect(signIn.body).toContain('<title>Sign in — David Example CPA LLC</title>');
+
+    // And the dashboard, if they sign in to it.
+    const session = (await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: EMAIL, password: CHOSEN } })).json().token;
+    expect((await app.inject({ method: 'GET', url: '/api/me', headers: { authorization: `Bearer ${session}` } })).json().firmName).toBe('David Example CPA LLC');
+  });
+
+  it('the dashboard\'s firm name wins over the server settings, and clearing it falls back', async () => {
+    const status = async () => (await app.inject({ method: 'GET', url: '/api/invites', headers: asMaster })).json();
+    expect(await status()).toMatchObject({ firmName: 'Example CPA', firmNameConfigured: true, firmNameSource: 'sender' });
+
+    await app.inject({ method: 'PUT', url: '/api/branding', headers: asMaster, payload: { firmName: '  Rivera   CPA  ' } });
+    expect(await status()).toMatchObject({ firmName: 'Rivera CPA', firmNameSource: 'dashboard' });
+
+    for (const firmName of ['', null]) {
+      await app.inject({ method: 'PUT', url: '/api/branding', headers: asMaster, payload: { firmName: 'Temp' } });
+      const cleared = await app.inject({ method: 'PUT', url: '/api/branding', headers: asMaster, payload: { firmName } });
+      expect(cleared.json()).toMatchObject({ firmName: 'Example CPA', firmNameSource: 'sender' });
+    }
+  });
+
+  it('a walkthrough video set in the dashboard is linked in the email and played after the password is set', async () => {
+    const LOOM = 'https://www.loom.com/share/0123456789abcdef0123456789abcdef';
+    const set = await app.inject({ method: 'PUT', url: '/api/branding', headers: asMaster, payload: { setupVideoUrl: LOOM } });
+    expect(set.json()).toMatchObject({ setupVideoUrl: LOOM, setupVideoEmbedded: true, firmName: 'Example CPA' }); // the name was left alone
+    expect((await app.inject({ method: 'GET', url: '/api/invites', headers: asMaster })).json()).toMatchObject({ setupVideoUrl: LOOM });
+
+    await invite();
+    expect(sender.sent[0].text).toContain(LOOM);
+    const link = sender.lastLinkPath();
+    expect((await openLink(link)).body).not.toContain('loom.com'); // not on the page with the live link
+    const done = await accept(link);
+    expect(done.body).toContain('<iframe src="https://www.loom.com/embed/0123456789abcdef0123456789abcdef"');
+    expect(done.headers['referrer-policy']).toBe('no-referrer');
+
+    // The client's own dashboard gets the link too.
+    const session = (await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: EMAIL, password: CHOSEN } })).json().token;
+    expect((await app.inject({ method: 'GET', url: '/api/me', headers: { authorization: `Bearer ${session}` } })).json().setupVideoUrl).toBe(LOOM);
+
+    // A non-Loom link is kept, but only ever linked.
+    const other = await app.inject({ method: 'PUT', url: '/api/branding', headers: asMaster, payload: { setupVideoUrl: 'https://example.com/setup-video' } });
+    expect(other.json()).toMatchObject({ setupVideoUrl: 'https://example.com/setup-video', setupVideoEmbedded: false });
+
+    // Clearing it removes it everywhere.
+    const cleared = await app.inject({ method: 'PUT', url: '/api/branding', headers: asMaster, payload: { setupVideoUrl: '' } });
+    expect(cleared.json()).toMatchObject({ setupVideoUrl: null, setupVideoEmbedded: false });
+    await reinvite((await qbo.users.list())[0].id);
+    expect(sender.sent[sender.sent.length - 1].text).not.toContain('Prefer to watch');
+  });
+
+  it('refuses a video link that is not a plain https address, and saves nothing when it does', async () => {
+    for (const setupVideoUrl of ['http://www.loom.com/share/0123456789abcdef', 'javascript:alert(1)', 'watch this', 12]) {
+      const res = await app.inject({ method: 'PUT', url: '/api/branding', headers: asMaster, payload: { firmName: 'Should Not Stick', setupVideoUrl } });
+      expect(res.statusCode, JSON.stringify(setupVideoUrl)).toBe(400);
+    }
+    const state = (await app.inject({ method: 'GET', url: '/api/invites', headers: asMaster })).json();
+    expect(state).toMatchObject({ firmName: 'Example CPA', setupVideoUrl: null });
+  });
+
+  it('only an admin can set the firm name, and only to something safe to send', async () => {
+    const member = await qbo.users.create({ name: 'Member' });
+    const put = (payload: unknown, headers: Record<string, string> = asMaster) => app.inject({ method: 'PUT', url: '/api/branding', headers, payload: payload as any });
+    expect((await put({ firmName: 'Mine Now' }, { ...HOST, authorization: `Bearer ${member.apiKey}` })).statusCode).toBe(403);
+    expect((await put({ firmName: 'Mine Now' }, HOST)).statusCode).toBe(401);
+    for (const firmName of ['x'.repeat(101), 'Firm <evil@example.com>', 42, ['a']]) {
+      expect((await put({ firmName })).statusCode, JSON.stringify(firmName)).toBe(400);
+    }
+    expect((await app.inject({ method: 'GET', url: '/api/invites', headers: asMaster })).json().firmName).toBe('Example CPA');
+  });
+
+  it('with no firm name anywhere, pages carry the app\'s name and say "Your accounting firm"', async () => {
+    await app.close();
+    await qbo.close();
+    await build(disabledInvitesConfig());
+    const result = (await invite()).json().invite;
+    const page = await openLink(new URL(result.link).pathname);
+    expect(page.body).toContain('<span class="brand-name">QBO Multi-Connect</span>');
+    expect(page.body).toContain('<strong>Your accounting firm</strong> has invited you');
+    // Setting it takes effect at once — no restart, and for links already sent.
+    await app.inject({ method: 'PUT', url: '/api/branding', headers: asMaster, payload: { firmName: 'David Example CPA LLC' } });
+    expect((await openLink(new URL(result.link).pathname)).body).toContain('<span class="brand-name">David Example CPA LLC</span>');
+  });
+
   // ── Who may do what ────────────────────────────────────────────────────────
 
   it('only admins can invite; the accept page needs nothing but the link', async () => {

@@ -100,13 +100,46 @@ server (the same place as the other settings), then restart:
 | `RESEND_API_KEY` | Yes | A Resend API key with *Sending access*. The same key the connection alerts use. |
 | `QBO_INVITE_FROM` | Yes | What clients see in their inbox: `Your Firm <hello@yourfirm.com>`, on a domain you have verified in Resend. The alert sender is never used in its place — client email only goes out once you have chosen who it comes from. |
 | `QBO_INVITE_REPLY_TO` | No | Where a client's reply goes — your real inbox — when the sender address isn't one you read. |
-| `QBO_FIRM_NAME` | No | How the email and the accept page name the firm. Defaults to the display name in the sender. |
+| `QBO_FIRM_NAME` | No | Your firm's name as clients see it — see below. Easier to set in the dashboard. Defaults to the display name in the sender. |
 
 **You don't need email to invite someone.** Until it is set up — or if an
 email is rejected — the dashboard gives you the invitation link itself to
 send however you like. It is the same link, and behaves the same way. The
 link is only ever shown to you in that case; when the email goes out, the
 link exists in the client's inbox and nowhere else.
+
+### It comes from you, not from the software
+
+Clients are getting access from your firm, so everything they see is in your
+firm's name: the sender and subject of the invitation, the page where they
+choose a password, the sign-in page their assistant opens, and their own
+dashboard. QBO Multi-Connect is mentioned once, in small print, as the thing
+that provides it.
+
+Set the name under **Settings (the gear) → What clients see → Firm name**.
+Nothing needs restarting. A name set there wins over `QBO_FIRM_NAME`; with
+neither, the display name in `QBO_INVITE_FROM` is used. The inbox shows it
+too: the email goes out as `Your Firm <hello@yourfirm.com>` even if the
+sender setting is a bare address, and a name set in Settings replaces
+whatever display name the sender setting carries.
+
+### A walkthrough video
+
+If you record yourself doing the setup — [Loom](https://www.loom.com) works
+well — paste the share link under **Settings → What clients see → Setup
+walkthrough video**. From then on:
+
+- the **invitation email** links to it ("Prefer to watch?"),
+- the **page a client lands on after choosing their password** plays it,
+  above the written steps, and
+- the client's own dashboard links to it.
+
+A Loom link plays right on the page. Any other `https://` link is shown as a
+button that opens it in a new tab. The video is never loaded on the page with
+the password form, so the one-time link is not passed to the video host.
+Make sure the video's sharing is set so anyone with the link can watch, and
+don't show a real client's books or a real password while recording — use a
+sample company. Clear the box to remove it.
 
 ### Choosing the password yourself
 

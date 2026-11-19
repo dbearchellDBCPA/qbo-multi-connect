@@ -515,6 +515,27 @@ export class ConnectionDatabase {
     this.db.prepare('DELETE FROM user_clients WHERE realm_id = ?').run(realmId);
   }
 
+  // ── Settings ─────────────────────────────────────────────────────────────
+
+  async getSetting(key: string): Promise<string | null> {
+    const row = this.db.prepare('SELECT value FROM app_settings WHERE key = ?').get(key) as { value: string } | undefined;
+    return row?.value ?? null;
+  }
+
+  /** Store a setting, or remove it with null. */
+  async setSetting(key: string, value: string | null): Promise<void> {
+    if (value == null) {
+      this.db.prepare('DELETE FROM app_settings WHERE key = ?').run(key);
+      return;
+    }
+    this.db
+      .prepare(
+        `INSERT INTO app_settings (key, value) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`
+      )
+      .run(key, value);
+  }
+
   // ── Activity log ─────────────────────────────────────────────────────────
 
   async insertActivity(entry: NewActivityEntry): Promise<void> {

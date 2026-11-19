@@ -9,6 +9,7 @@ import { ConnectionAlerts } from './alerts/connection-alerts.js';
 import { disabledAlertsConfig, type AlertsConfig } from './alerts/config.js';
 import { ResendEmailSender, type EmailSender } from './alerts/email.js';
 import { ClientInvites } from './invites/client-invites.js';
+import { Branding } from './branding.js';
 import { disabledInvitesConfig, type InvitesConfig } from './invites/config.js';
 import type { OAuthConfig, Connection } from './db/models.js';
 
@@ -58,6 +59,7 @@ export class QBOManager {
   public readonly activity: ActivityLog;
   public readonly alerts: ConnectionAlerts;
   public readonly invites: ClientInvites;
+  public readonly branding: Branding;
 
   constructor(config: QBOManagerConfig) {
     // Validate config
@@ -113,6 +115,7 @@ export class QBOManager {
     const emailSender = config.emailSender ?? (resendApiKey ? new ResendEmailSender(resendApiKey) : null);
     this.alerts = new ConnectionAlerts(this.db, alertsConfig, emailSender, config.dashboardUrl);
     this.invites = new ClientInvites(invitesConfig, emailSender);
+    this.branding = new Branding(this.db, invitesConfig);
   }
 
   /**
