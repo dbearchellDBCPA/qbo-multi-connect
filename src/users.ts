@@ -1,4 +1,4 @@
-import { randomBytes, randomInt, createHash, scryptSync, timingSafeEqual } from 'node:crypto';
+import { randomBytes, createHash, scryptSync, timingSafeEqual } from 'node:crypto';
 import { encrypt, decrypt } from './crypto/encrypt.js';
 import type { ConnectionDatabase } from './db/index.js';
 import type { ClientAssignment, NewUser, User, UserAccessLevel, UserAccountType, UserRecord, UserUpdate } from './db/models.js';
@@ -15,8 +15,29 @@ const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 /** Session tokens are prefixed so they can never be confused with API keys. */
 const SESSION_TOKEN_PREFIX = 'qbos_';
 
-/** Lowercase letters, digits and @._- (so an email works as a username). */
-const USERNAME_RE = /^[a-z0-9@._-]{3,64}$/;
+/**
+ * Lowercase letters, digits and @ . _ + - — so an email address works as a
+ * username, including plus-addressed ones. 254 is the longest an address can be.
+ */
+const USERNAME_RE = /^[a-z0-9@._+-]{3,254}$/;
+/**
+ * …and any well-formed email address at all, whatever legal characters it
+ * holds (o'brien@…, a&b@…): a person's email is their username when they are
+ * invited, so an address that can receive the invitation must be able to
+ * sign in with it. No whitespace or angle brackets, one @, a dotted domain.
+ */
+const EMAIL_USERNAME_RE = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
+const MAX_USERNAME_LENGTH = 254;
+export const USERNAME_RULE = 'Username must be an email address, or 3–254 characters: letters, digits, @ . _ + -';
+
+/** An invitation link works for this long, then a new one has to be sent. */
+export const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Invitation tokens are prefixed so they can never be confused with other credentials. */
+const INVITE_TOKEN_PREFIX = 'qboi_';
+
+/** Longest password accepted from a public form — nobody types more, and hashing is not free. */
+export const MAX_PASSWORD_LENGTH = 256;
 
 export const MIN_PASSWORD_LENGTH = 8;
 
@@ -69,35 +90,13 @@ export function generateApiKey(): string {
   return `qbo_${randomBytes(24).toString('hex')}`;
 }
 
-// Letters and digits that can't be mistaken for one another when read off a
-// screen or typed from an email: no 0/O, 1/l/I.
-const PASSWORD_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
-const PASSWORD_GROUPS = 5;
-const PASSWORD_GROUP_LENGTH = 4;
-
-/**
- * A strong random password for a login someone else will type or paste:
- * 20 characters from an unambiguous alphabet (about 116 bits), in hyphenated
- * groups of four so it survives being read, e.g. `Kp7m-Qx4R-Ln9t-Vb2s-Hc6d`.
- */
-export function generatePassword(): string {
-  const groups: string[] = [];
-  for (let g = 0; g < PASSWORD_GROUPS; g++) {
-    let group = '';
-    for (let i = 0; i < PASSWORD_GROUP_LENGTH; i++) {
-      group += PASSWORD_ALPHABET[randomInt(PASSWORD_ALPHABET.length)];
-    }
-    groups.push(group);
-  }
-  return groups.join('-');
-}
-
 export function normalizeUsername(username: string): string {
   return username.trim().toLowerCase();
 }
 
 export function isValidUsername(username: string): boolean {
-  return USERNAME_RE.test(username);
+  if (USERNAME_RE.test(username)) return true;
+  return username.length <= MAX_USERNAME_LENGTH && username === username.toLowerCase() && EMAIL_USERNAME_RE.test(username);
 }
 
 // ── Passwords (scrypt, node built-in — no external hashing dependency) ──────
@@ -191,6 +190,8 @@ function toUser(record: UserRecord, assignments: ClientAssignment[]): User {
     updatedAt: parseUtcDate(record.updated_at),
     lastUsedAt: record.last_used_at ? parseUtcDate(record.last_used_at) : null,
     inviteSentAt: record.invite_sent_at ? parseUtcDate(record.invite_sent_at) : null,
+    inviteExpiresAt: record.invite_expires_at ? parseUtcDate(record.invite_expires_at) : null,
+    inviteAcceptedAt: record.invite_accepted_at ? parseUtcDate(record.invite_accepted_at) : null,
     realmIds,
     assignments,
   };
@@ -215,7 +216,7 @@ export class UserService {
   private async prepareUsername(raw: string, forUserId?: number): Promise<string> {
     const username = normalizeUsername(raw);
     if (!isValidUsername(username)) {
-      throw new Error('Username must be 3-64 characters: letters, digits, @ . _ -');
+      throw new Error(USERNAME_RULE);
     }
     const existing = await this.db.getUserByUsername(username);
     if (existing && existing.id !== forUserId) {
@@ -242,8 +243,9 @@ export class UserService {
     if (isClient && input.accessLevel === 'read_write') {
       throw new Error('A client login is always read-only');
     }
-    if (isClient && (!input.username?.trim() || !input.password)) {
-      // Its API key is never accepted, so without these it could never sign in.
+    if (isClient && (!input.username?.trim() || (!input.password && !input.pendingInvite))) {
+      // Its API key is never accepted, so it needs a username and a way to a
+      // password: one given now, or an invitation on which they choose one.
       throw new Error('A client login requires a username and password');
     }
     if (isClient) {
@@ -311,7 +313,11 @@ export class UserService {
         throw new Error('A client login is always read-only');
       }
       const keepsUsername = fields.username === undefined ? existing.username != null : Boolean(fields.username?.trim());
-      if (!keepsUsername || existing.password_hash == null) {
+      // A login that is already a client may be waiting on its invitation
+      // (no password yet); turning a staff account into one may not leave it
+      // with no way to sign in.
+      const becomingClient = existing.account_type !== 'client';
+      if (!keepsUsername || (becomingClient && existing.password_hash == null)) {
         throw new Error('A client login requires a username and password');
       }
       fields = { ...fields, accessLevel: 'read' };
@@ -330,6 +336,14 @@ export class UserService {
     });
     // Same for a username this login has just taken on.
     if (typeof username === 'string' && username !== existing.username) this.clearLoginFailures(username);
+    // An invitation link was sent to one address, for one username. If either
+    // has changed — a typo fixed, most likely — or the login was switched off,
+    // that link must not be the one that sets the password. Send a new one.
+    const emailChanged = fields.email !== undefined && (fields.email?.trim() || null) !== existing.email;
+    const usernameChanged = username !== undefined && username !== existing.username;
+    if (existing.invite_token_hash && (emailChanged || usernameChanged || fields.status === 'disabled')) {
+      await this.db.clearUserInvite(id);
+    }
     return this.get(id);
   }
 
@@ -438,12 +452,64 @@ export class UserService {
       throw new Error(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`);
     }
     await this.db.setUserPassword(id, password == null ? null : hashPassword(password));
+    // Someone has now chosen this login's password directly, so a link that
+    // would let its holder choose a different one is withdrawn.
+    await this.db.clearUserInvite(id);
     return true;
   }
 
-  /** Note that the invitation and password emails were just sent to this login. */
-  async markInviteSent(id: number): Promise<void> {
-    await this.db.markInviteSent(id);
+  // ── Invitations (a link on which the person chooses their own password) ───
+
+  /**
+   * Issue a fresh invitation link token for a login. Any earlier link stops
+   * working. The plaintext token is returned once — to be put in the link —
+   * and only its hash is stored. The login's current password, if it has
+   * one, is untouched until the invitation is accepted.
+   */
+  async createInvite(id: number): Promise<{ token: string; expiresAt: Date } | null> {
+    if (!(await this.db.getUserById(id))) return null;
+    const token = `${INVITE_TOKEN_PREFIX}${randomBytes(32).toString('hex')}`;
+    const expiresAt = new Date(Date.now() + INVITE_TTL_MS);
+    await this.db.setUserInvite(id, hashApiKey(token), expiresAt.toISOString().replace('T', ' ').slice(0, 19));
+    return { token, expiresAt };
+  }
+
+  /**
+   * The login a live invitation link belongs to: the token must be current
+   * and unexpired, and the login active. Looking it up changes nothing, so a
+   * mail scanner fetching the link does not use it up.
+   */
+  async findInvite(token: string): Promise<User | null> {
+    if (typeof token !== 'string' || !token.startsWith(INVITE_TOKEN_PREFIX)) return null;
+    const record = await this.db.getUserByInviteHash(hashApiKey(token));
+    if (!record || record.status !== 'active') return null;
+    return toUser(record, await this.db.getUserAssignments(record.id));
+  }
+
+  /**
+   * Accept an invitation: the person's chosen password becomes the login's
+   * password and the link is retired. Returns the user, or null when the
+   * link is no longer good (used, replaced, expired, or the login disabled).
+   * Throws when the password itself is unacceptable — the link stays usable.
+   */
+  async acceptInvite(token: string, password: string): Promise<User | null> {
+    if (typeof password !== 'string' || password.length < MIN_PASSWORD_LENGTH) {
+      throw new Error(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`);
+    }
+    if (password.length > MAX_PASSWORD_LENGTH) {
+      throw new Error(`Password must be at most ${MAX_PASSWORD_LENGTH} characters`);
+    }
+    const invited = await this.findInvite(token);
+    if (!invited) return null;
+    const accepted = await this.db.acceptUserInvite(invited.id, hashApiKey(token), hashPassword(password));
+    if (!accepted) return null; // lost a race with another submission of the same link
+    this.clearLoginFailures(invited.username);
+    return this.get(invited.id);
+  }
+
+  /** Withdraw a login's outstanding invitation link. */
+  async cancelInvite(id: number): Promise<void> {
+    await this.db.clearUserInvite(id);
   }
 
   /** Check a password against a user's stored hash. */

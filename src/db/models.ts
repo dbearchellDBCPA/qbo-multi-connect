@@ -125,6 +125,9 @@ export interface UserRecord {
   updated_at: string;
   last_used_at: string | null;
   invite_sent_at: string | null;
+  invite_token_hash: string | null;
+  invite_expires_at: string | null;
+  invite_accepted_at: string | null;
 }
 
 /**
@@ -145,8 +148,15 @@ export interface User {
   createdAt: Date;
   updatedAt: Date;
   lastUsedAt: Date | null;
-  /** When the invitation and password emails were last sent (client logins). */
+  /** When this login was last invited (client logins). */
   inviteSentAt: Date | null;
+  /**
+   * When the outstanding invitation link stops working; null when there is
+   * no link out. A date in the past means it lapsed without being accepted.
+   */
+  inviteExpiresAt: Date | null;
+  /** When they last accepted an invitation and chose their password. */
+  inviteAcceptedAt: Date | null;
   realmIds: string[];
   /**
    * Access level per assigned company, as stored. The user-level accessLevel
@@ -170,6 +180,11 @@ export interface NewUser {
   realmIds?: string[];
   /** Companies to assign with an explicit level each; wins over realmIds. */
   assignments?: ClientAssignment[];
+  /**
+   * The login is being created to be invited: it has no password yet because
+   * the person will choose one from their invitation link.
+   */
+  pendingInvite?: boolean;
 }
 
 /**

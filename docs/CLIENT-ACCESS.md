@@ -30,88 +30,102 @@ The tool list is explicit (`src/server/client-tools.ts`). A tool added to the
 server later is **not** available to clients until someone adds it to that
 list; a test fails until that decision is made.
 
-## Set up a client
+## Invite a client
 
-With [email invitations](#email-invitations) turned on, the server sends the
-client everything they need:
+All it takes is their name and their email address.
 
-1. On the dashboard, open **Team**. Under **Client logins**, click **+ Add**.
-2. Enter their name, their **email address**, and a **username**.
-3. Leave **Email them an invitation and a generated password** checked.
-4. Check **their company**. Usually exactly one — an invitation is not sent
-   for a login with no company assigned.
-5. Click **Create and send invitation**. They receive two emails; there is
-   nothing else for you to send.
+1. On the dashboard, open the client's company under **Clients** and click
+   **Invite the client**.
+2. Enter their **name** and **email address**, and click **Send invitation**.
 
-Without email invitations — or if you untick that box — you choose the
-password yourself:
+That's it. Their email address is their username. They receive one email with
+a link; on the page it opens they choose their own password, and the page
+then shows them how to connect Claude or ChatGPT.
 
-1. Enter their name, a **username**, and a **password**. Both are required: a
-   client login has no API key to fall back on, so the server refuses to
-   create one that couldn't sign in.
-2. Check their company and click **Create client login**. The confirmation
-   shows the connector address.
-3. Send the client the handout, the connector address, and their username.
-   Send the password separately.
+You can also invite from **Team → Client logins → + Add**, which lets you
+assign more than one company.
 
-Create one login per person. If two people at the client need access, give
-each their own, so you can switch one off without affecting the other and the
+Create one login per person. If two people at the client need access, invite
+each of them, so you can switch one off without affecting the other and the
 activity log shows who did what.
 
-## Email invitations
+### What the client does
 
-When a client login is created with the invitation box checked, the server
-generates a strong random password and sends the client two emails through
-[Resend](https://resend.com):
+1. Opens the email and clicks **Accept invitation**.
+2. Chooses a password on a page served by your server. Nobody else ever sees
+   it — not you, and it is never emailed.
+3. Follows the steps shown to add the connector to their assistant. When the
+   connector's sign-in page opens, they enter their email address and that
+   password. That is the only place the password is used; after that their
+   assistant stays connected.
 
-1. **The invitation** — the connector address, their username, step-by-step
-   setup for Claude and for ChatGPT, things to try asking, and what read-only
-   means. No password.
-2. **The password** — and nothing that says where to use it: no address, no
-   username.
+### How the link behaves
 
-They are separate on purpose, so neither message is enough to sign in by
-itself if it is forwarded or seen on a screen. The password is never shown in
-the dashboard, returned by the API, or written to a log; only its hash is
-stored.
+- It works **once**, and for **7 days**. After that, send a new invitation.
+- Opening it does nothing by itself, so a mail scanner that fetches links
+  doesn't use it up. Only submitting a password does.
+- Until it is used, the link *is* the credential: whoever opens it can set
+  the password. So check the address before you send. If an invitation goes
+  to the wrong person, **Disable** the login at once, correct the address,
+  enable it, and send a new invitation — changing the email address also
+  kills the old link.
+- A login's row under **Team** shows where things stand: *waiting for them to
+  accept*, *accepted*, or *expired*.
+- The link points at the address you are using the dashboard on. So that it
+  can only ever be yours, set `QBO_ALLOWED_HOSTS` to your domain(s) — or pin
+  one with `QBO_PUBLIC_URL` — on the server. See
+  [CUSTOM-DOMAIN.md](CUSTOM-DOMAIN.md).
+- Someone who owns several companies gets **one** login. Invite them from the
+  first company; from the others, entering the same email offers to add that
+  company to their existing login instead.
 
-**Send a new invitation** on a client login emails both messages again with a
-**new** password. The old password stops working and any assistant they had
-connected is signed out — so it is also the fix for "I lost the email" and
-"I'm locked out". If the emails cannot be sent, nothing changes and the login
-keeps working as it was.
+### Sending a new invitation
 
-### Turning it on
+**Send a new invitation** on a client login emails a fresh link. Use it when
+they've lost the email, the link has expired, or they've forgotten their
+password — it is the password-reset flow too.
 
-Set these on the server (the same place as the other settings), then restart:
+The earlier link stops working immediately. Their **current password keeps
+working** until they accept the new invitation; when they do, the old
+password and anything connected with it are switched off. If you need to cut
+someone off right now, use **Disable** instead.
+
+### Turning on email
+
+Invitations are sent through [Resend](https://resend.com). Set these on the
+server (the same place as the other settings), then restart:
 
 | Variable | Required | What it is |
 |---|---|---|
 | `RESEND_API_KEY` | Yes | A Resend API key with *Sending access*. The same key the connection alerts use. |
 | `QBO_INVITE_FROM` | Yes | What clients see in their inbox: `Your Firm <hello@yourfirm.com>`, on a domain you have verified in Resend. The alert sender is never used in its place — client email only goes out once you have chosen who it comes from. |
 | `QBO_INVITE_REPLY_TO` | No | Where a client's reply goes — your real inbox — when the sender address isn't one you read. |
-| `QBO_FIRM_NAME` | No | How the emails name the firm. Defaults to the display name in the sender. |
+| `QBO_FIRM_NAME` | No | How the email and the accept page name the firm. Defaults to the display name in the sender. |
 
-The startup log and the **Add a client login** form both say whether
-invitations are on and, if not, which setting is missing.
+**You don't need email to invite someone.** Until it is set up — or if an
+email is rejected — the dashboard gives you the invitation link itself to
+send however you like. It is the same link, and behaves the same way. The
+link is only ever shown to you in that case; when the email goes out, the
+link exists in the client's inbox and nowhere else.
+
+### Choosing the password yourself
+
+If you'd rather not invite — a client without email, say — untick **Invite
+them to choose their own password** under **Team → Client logins → + Add**,
+type a username and password, and pass them on yourself. A client login needs
+both, since it has no API key to fall back on.
 
 ### Things to know
 
-- **A password in an email is only as private as the inbox — and the outbox.**
-  Splitting the two messages helps, but both go to the same address, and
-  Resend keeps a copy of what it sent, readable by anyone with access to your
-  Resend account. The emails ask the client to change the password, but
-  nothing forces them to. If a client's mailbox is shared, choose the password
-  yourself and give it to them another way.
-- **Check the address before you send.** The invitation goes to whatever is in
-  the email field, and it names their company. A typo sends a working login
-  to a stranger. If that happens, **Disable** the login at once.
 - **The ChatGPT steps are the least certain part.** OpenAI limits custom
   connections to certain plans (Business and Enterprise/Edu at the time of
   writing, set up by a workspace admin) and changes its menus often. Try it
   once with your own ChatGPT account before telling a client it will work.
 - **Deliverability is Resend's and your domain's.** A first email from a new
   sending domain can land in spam; ask the client to look there.
+- **Passwords are the client's own.** The minimum is 8 characters; the page
+  encourages a longer phrase. You can't see or recover it — only replace it,
+  with a new invitation or **Reset password**.
 
 ## Before you hand one out
 
@@ -144,7 +158,8 @@ activity, and logging whatever strangers type would let them fill the log.
 - **Clients** shows recent activity across everyone.
 - `GET /api/activity?accountType=client` returns everything client logins
   have done, for export or review. Entries are kept for 180 days.
-- Each client login shows when its invitation was last sent.
+- Each client login shows whether its invitation is waiting, accepted, or
+  expired.
 
 Things worth a look: a login that has never connected (they may be stuck), a
 burst of activity at odd hours, blocked or "not found" calls, or a "Locked out
@@ -156,8 +171,9 @@ After five wrong passwords in a row a username is locked for a minute. Each
 further failure doubles the wait, up to fifteen minutes. The lock is shared
 between the dashboard and the connector sign-in page.
 
-If a client locks themselves out, **Reset password** on their login clears
-the lock immediately.
+If a client locks themselves out, **Send a new invitation** lets them choose
+a new password and clears the lock when they do; **Reset password** clears it
+at once with a password you choose.
 
 The lock is on the username, not on where the attempts come from (network
 addresses are too easy to fake for that to be a real lock). The trade-off:
@@ -167,9 +183,10 @@ to give that login a new username. Your own way in is never at risk — the
 master key does not go through this lock.
 
 **Reset password** also signs out any assistant that is already connected,
-as does the client changing their own password. They sign in to the connector
-again with the new one. So a reset is the right response to "I think someone
-else has my password" — it cuts off whoever connected with the old one.
+as does the client changing their own password or accepting a new invitation.
+They sign in to the connector again with the new one. So if a client thinks
+someone else has their password, **Disable** the login to cut access off at
+once, then enable it and send a new invitation.
 
 ## Turn it off
 

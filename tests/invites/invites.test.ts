@@ -1,22 +1,19 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { parseInvitesConfig, disabledInvitesConfig } from '../../src/invites/config.js';
-import { renderClientInvitationEmail, renderClientPasswordEmail } from '../../src/invites/templates.js';
+import { renderClientInvitationEmail } from '../../src/invites/templates.js';
 import { ClientInvites, InvitesNotConfiguredError } from '../../src/invites/client-invites.js';
+import { acceptInvitePage, inviteAcceptedPage, inviteInvalidPage } from '../../src/server/invite-pages.js';
+import { redactUrlForLog } from '../../src/server/log-redaction.js';
 import { ResendEmailSender, EmailSendError, type EmailSender, type OutboundEmail } from '../../src/alerts/email.js';
-import { generatePassword, MIN_PASSWORD_LENGTH } from '../../src/users.js';
+import { isValidUsername } from '../../src/users.js';
 
 class FakeSender implements EmailSender {
   sent: OutboundEmail[] = [];
-  /** Fail the Nth send (1-based), or every send when `always`. */
-  failOn: number | 'always' | null = null;
+  fail = false;
   async send(email: OutboundEmail): Promise<{ id: string }> {
-    const n = this.sent.length + 1;
-    if (this.failOn === 'always' || this.failOn === n) {
-      if (this.failOn !== 'always') this.failOn = null;
-      throw new EmailSendError('Resend rejected the email (403): domain is not verified', 403);
-    }
+    if (this.fail) throw new EmailSendError('Resend rejected the email (403): domain is not verified', 403);
     this.sent.push(email);
-    return { id: `email_${n}` };
+    return { id: `email_${this.sent.length}` };
   }
 }
 
@@ -26,16 +23,17 @@ const CONFIGURED = parseInvitesConfig({
   QBO_INVITE_REPLY_TO: 'pat@example-cpa.com',
 });
 
+const ACCEPT_URL = 'https://qbo.example-cpa.com/invite/qboi_0123456789abcdef';
 const INVITATION = {
   firmName: 'Example CPA',
   name: 'Jordan Rivera',
-  username: 'jordan.rivera',
+  username: 'jordan@rivera-landscaping.example',
+  acceptUrl: ACCEPT_URL,
+  expiresAt: new Date('2026-11-26T15:00:00Z'),
   connectorUrl: 'https://qbo.example-cpa.com/mcp',
-  signInUrl: 'https://qbo.example-cpa.com',
   companyNames: ['Rivera Landscaping LLC'],
   canReply: true,
 };
-const PASSWORD = 'Kp7m-Qx4R-Ln9t-Vb2s-Hc6d';
 
 describe('invites config', () => {
   it('is off until there is a key and a sender, and says what is missing', () => {
@@ -68,57 +66,57 @@ describe('invites config', () => {
   });
 });
 
-describe('generated passwords', () => {
-  it('are long, grouped for reading, and free of look-alike characters', () => {
-    for (let i = 0; i < 200; i++) {
-      const password = generatePassword();
-      expect(password).toMatch(/^([A-HJ-NP-Za-km-z2-9]{4}-){4}[A-HJ-NP-Za-km-z2-9]{4}$/);
-      expect(password).not.toMatch(/[0O1lI]/);
-      expect(password.length).toBeGreaterThanOrEqual(MIN_PASSWORD_LENGTH);
+describe('an email address as a username', () => {
+  it('accepts ordinary and plus-addressed emails, and long ones', () => {
+    for (const ok of ['jordan@rivera-landscaping.example', 'jordan+qbo@example.com', 'a.b_c-d@sub.example.co', `${'x'.repeat(200)}@example.com`]) {
+      expect(isValidUsername(ok), ok).toBe(true);
     }
-  });
-
-  it('do not repeat', () => {
-    const seen = new Set(Array.from({ length: 2_000 }, () => generatePassword()));
-    expect(seen.size).toBe(2_000);
+    // Anything a mail server would deliver to is fine, odd characters included.
+    for (const ok of ["o'brien@example.com", 'a&b@example.com', 'first.last!#$%@example.co.uk']) {
+      expect(isValidUsername(ok), ok).toBe(true);
+    }
+    for (const bad of ['a b@example.com', 'ab', `${'x'.repeat(250)}@example.com`, '<x>@example.com', 'Upper@example.com', "o'brien", "o'brien@localhost"]) {
+      expect(isValidUsername(bad), bad).toBe(false);
+    }
   });
 });
 
-describe('invitation and password emails', () => {
+describe('the invitation email', () => {
   const invitation = renderClientInvitationEmail(INVITATION);
-  const password = renderClientPasswordEmail({ firmName: 'Example CPA', name: 'Jordan Rivera', password: PASSWORD, canReply: true });
 
-  it('the invitation says where and who, and how to set up both assistants', () => {
-    expect(invitation.subject).toBe('Connect your AI assistant to your QuickBooks data — Example CPA');
+  it('leads with the accept link, and says when it expires', () => {
+    expect(invitation.subject).toBe('Example CPA invited you to connect your AI assistant to QuickBooks');
+    expect(invitation.text).toContain(ACCEPT_URL);
+    expect(invitation.html).toContain(`href="${ACCEPT_URL}"`);
+    for (const body of [invitation.text, invitation.html]) {
+      expect(body).toMatch(/choose your password/i);
+      expect(body).toContain('Thursday, November 26');
+      expect(body).toMatch(/works once/);
+    }
+    // Step 1 comes before the connect steps.
+    expect(invitation.text.indexOf(ACCEPT_URL)).toBeLessThan(invitation.text.indexOf('Connector address'));
+  });
+
+  it('carries no password — there isn\'t one yet', () => {
+    for (const body of [invitation.text, invitation.html]) {
+      expect(body).not.toMatch(/^\s*Password:/im); // no "Password: …" line
+      expect(body).not.toMatch(/temporary password/i);
+      expect(body).toMatch(/Nobody else will know it/);
+    }
+  });
+
+  it('says where and who, and how to set up both assistants', () => {
     for (const body of [invitation.text, invitation.html]) {
       expect(body).toContain('https://qbo.example-cpa.com/mcp');
-      expect(body).toContain('jordan.rivera');
+      expect(body).toContain('jordan@rivera-landscaping.example');
       expect(body).toContain('Rivera Landscaping LLC');
       expect(body).toContain('Jordan Rivera');
-      expect(body).toMatch(/separate email/);
       expect(body).toMatch(/Add custom connector/); // Claude
       expect(body).toMatch(/Add custom MCP server/); // ChatGPT
       expect(body).toMatch(/read-only/i);
     }
-    expect(invitation.text).toContain('SET IT UP IN CLAUDE');
-    expect(invitation.text).toContain('SET IT UP IN CHATGPT');
     expect(invitation.text).not.toContain('**'); // bold markers never leak into plain text
     expect(invitation.html).toContain('<strong>Customize → Connectors</strong>');
-  });
-
-  it('the password email carries the password and nothing that says where to use it', () => {
-    expect(password.subject).toBe('Your password for the QuickBooks connector — Example CPA');
-    for (const body of [password.text, password.html]) {
-      expect(body).toContain(PASSWORD);
-      expect(body).not.toContain('jordan.rivera');
-      expect(body).not.toContain('qbo.example-cpa.com');
-      expect(body).not.toContain('/mcp');
-      expect(body).not.toMatch(/https?:\/\//);
-    }
-  });
-
-  it('neither email holds both halves', () => {
-    expect(invitation.text + invitation.html).not.toContain(PASSWORD);
   });
 
   it('escapes everything that comes from the database or the environment', () => {
@@ -127,17 +125,15 @@ describe('invitation and password emails', () => {
       firmName: 'A & B <CPAs>',
       name: '<script>alert(1)</script>',
       username: 'x"><img src=x>',
+      acceptUrl: 'https://qbo.example-cpa.com/invite/a"onmouseover="x',
       companyNames: ['Smith & Sons <LLC>'],
     });
     expect(hostile.html).not.toContain('<script>');
     expect(hostile.html).not.toContain('<img');
+    expect(hostile.html).not.toContain('"onmouseover="');
     expect(hostile.html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
     expect(hostile.html).toContain('Smith &amp; Sons &lt;LLC&gt;');
     expect(hostile.text).toContain('Smith & Sons <LLC>'); // plain text stays plain
-
-    const secret = renderClientPasswordEmail({ firmName: 'A & B', name: '<b>x</b>', password: 'a<b>&c', canReply: false });
-    expect(secret.html).toContain('a&lt;b&gt;&amp;c');
-    expect(secret.html).not.toContain('<b>x</b>');
   });
 
   it('keeps every inline style intact — no quote inside a style attribute', async () => {
@@ -145,18 +141,11 @@ describe('invitation and password emails', () => {
     // the rest (font stack, text colour); mail clients then fall back to Times.
     const { renderTestEmail } = await import('../../src/alerts/templates.js');
     const alert = renderTestEmail({ dashboardUrl: 'https://qbo.example-cpa.com', recipients: ['a@example.com'], now: new Date() });
-    for (const html of [invitation.html, password.html, alert.html]) {
+    for (const html of [invitation.html, alert.html]) {
       const bodyStyle = html.match(/<body style="([^"]*)"/)![1];
       expect(bodyStyle).toContain('sans-serif');
       expect(bodyStyle).toMatch(/color:#[0-9a-f]{6};$/);
       for (const [, style] of html.matchAll(/style="([^"]*)"/g)) expect(style.trim().endsWith(';')).toBe(true);
-    }
-  });
-
-  it('warns that changing the password signs the assistant out', () => {
-    for (const body of [invitation.text, invitation.html]) {
-      expect(body).toMatch(/before you connect your assistant/);
-      expect(body).toMatch(/signs the assistant out/);
     }
   });
 
@@ -174,66 +163,111 @@ describe('invitation and password emails', () => {
   });
 });
 
-describe('ClientInvites.deliver', () => {
-  const recipient = { name: 'Jordan Rivera', email: 'jordan@rivera-landscaping.example', username: 'jordan.rivera' };
-  const context = { connectorUrl: 'https://qbo.example-cpa.com/mcp', signInUrl: 'https://qbo.example-cpa.com', companyNames: ['Rivera Landscaping LLC'] };
-
-  it('sends the invitation, then the password, as two separate emails', async () => {
-    const sender = new FakeSender();
-    const outcome = await new ClientInvites(CONFIGURED, sender).deliver(recipient, PASSWORD, context);
-    expect(outcome).toEqual({ to: recipient.email, sent: true, invitationSent: true, passwordSent: true, error: null });
-    expect(sender.sent).toHaveLength(2);
-    const [first, second] = sender.sent;
-    for (const email of sender.sent) {
-      expect(email.from).toBe('Example CPA <hello@example-cpa.com>');
-      expect(email.to).toEqual([recipient.email]);
-      expect(email.replyTo).toBe('pat@example-cpa.com');
-    }
-    expect(first.subject).toContain('Connect your AI assistant');
-    expect(first.text).toContain('jordan.rivera');
-    expect(first.text).not.toContain(PASSWORD);
-    expect(second.subject).toContain('Your password');
-    expect(second.text).toContain(PASSWORD);
-    expect(second.text).not.toContain('jordan.rivera');
-    // Distinct idempotency keys, sharing one attempt id.
-    expect(first.idempotencyKey).toMatch(/^client-invite\/.+\/invitation$/);
-    expect(second.idempotencyKey).toBe(first.idempotencyKey!.replace(/invitation$/, 'password'));
+describe('the accept pages', () => {
+  const form = acceptInvitePage({
+    firmName: 'Example CPA',
+    name: 'Jordan Rivera',
+    username: 'jordan@rivera-landscaping.example',
+    companyNames: ['Rivera Landscaping LLC'],
+    minPasswordLength: 8,
   });
 
-  it('a re-send is a new attempt, never deduplicated against the last one', async () => {
+  it('asks for a password twice and shows who it is for', () => {
+    expect(form).toContain('Welcome, Jordan Rivera');
+    expect(form).toContain('Rivera Landscaping LLC');
+    expect(form).toContain('value="jordan@rivera-landscaping.example"');
+    expect(form.match(/type="password"/g)).toHaveLength(2);
+    expect(form).toContain('autocomplete="new-password"');
+    expect(form).toMatch(/<form method="POST">/); // posts back to the same link
+  });
+
+  it('loads nothing from anywhere else and sends no referrer', () => {
+    for (const html of [form, inviteInvalidPage('Example CPA'), inviteAcceptedPage({ firmName: 'Example CPA', username: 'j@x.example', connectorUrl: 'https://q.example/mcp', signInUrl: 'https://q.example' })]) {
+      expect(html).toContain('<meta name="referrer" content="no-referrer">');
+      expect(html).not.toMatch(/<script/i);
+      expect(html).not.toMatch(/(src|href)="https?:\/\//i);
+    }
+  });
+
+  it('escapes what it shows', () => {
+    const hostile = acceptInvitePage({
+      firmName: '<b>Firm</b>',
+      name: '<script>x</script>',
+      username: '"><input name=evil>',
+      companyNames: ['A <i>B</i>'],
+      minPasswordLength: 8,
+      error: '<img src=x onerror=1>',
+    });
+    for (const fragment of ['<script>x', '<input name=evil', '<img src=x', '<i>B</i>', '<b>Firm</b>']) {
+      expect(hostile).not.toContain(fragment);
+    }
+  });
+
+  it('after accepting, shows the connector address, the username, and both sets of steps — but no password', () => {
+    const done = inviteAcceptedPage({
+      firmName: 'Example CPA',
+      username: 'jordan@rivera-landscaping.example',
+      connectorUrl: 'https://qbo.example-cpa.com/mcp',
+      signInUrl: 'https://qbo.example-cpa.com',
+    });
+    expect(done).toContain('https://qbo.example-cpa.com/mcp');
+    expect(done).toContain('jordan@rivera-landscaping.example');
+    expect(done).toMatch(/Add custom connector/);
+    expect(done).toMatch(/Add custom MCP server/);
+    expect(done).toContain('The one you just chose');
+  });
+});
+
+describe('request log redaction', () => {
+  it('keeps invitation tokens and API keys out of the log', () => {
+    expect(redactUrlForLog('/invite/qboi_abcdef0123456789')).toBe('/invite/[REDACTED]');
+    expect(redactUrlForLog('/invite/qboi_abcdef0123456789?utm=x')).toBe('/invite/[REDACTED]?utm=x');
+    expect(redactUrlForLog('/mcp?key=qbo_secret&x=1')).toBe('/mcp?key=[REDACTED]&x=1');
+    expect(redactUrlForLog('/api/users/7/invite')).toBe('/api/users/7/invite'); // not a token
+    expect(redactUrlForLog('/api/me')).toBe('/api/me');
+  });
+});
+
+describe('ClientInvites.deliver', () => {
+  const recipient = { name: 'Jordan Rivera', email: 'jordan@rivera-landscaping.example', username: 'jordan@rivera-landscaping.example' };
+  const context = { acceptUrl: ACCEPT_URL, expiresAt: INVITATION.expiresAt, connectorUrl: 'https://qbo.example-cpa.com/mcp', companyNames: ['Rivera Landscaping LLC'] };
+
+  it('sends one email, with the link, from the configured sender', async () => {
+    const sender = new FakeSender();
+    const delivery = await new ClientInvites(CONFIGURED, sender).deliver(recipient, context);
+    expect(delivery).toEqual({ to: recipient.email, sent: true, error: null });
+    expect(sender.sent).toHaveLength(1);
+    const [email] = sender.sent;
+    expect(email.from).toBe('Example CPA <hello@example-cpa.com>');
+    expect(email.to).toEqual([recipient.email]);
+    expect(email.replyTo).toBe('pat@example-cpa.com');
+    expect(email.text).toContain(ACCEPT_URL);
+    expect(email.idempotencyKey).toMatch(/^client-invite\/.+/);
+  });
+
+  it('a re-send is a new send, never deduplicated against the last one', async () => {
     const sender = new FakeSender();
     const invites = new ClientInvites(CONFIGURED, sender);
-    await invites.deliver(recipient, PASSWORD, context);
-    await invites.deliver(recipient, PASSWORD, context);
-    expect(new Set(sender.sent.map((e) => e.idempotencyKey)).size).toBe(4);
+    await invites.deliver(recipient, context);
+    await invites.deliver(recipient, context);
+    expect(new Set(sender.sent.map((e) => e.idempotencyKey)).size).toBe(2);
   });
 
-  it('does not send the password when the invitation fails', async () => {
+  it('reports a delivery failure with the provider\'s reason — and never the link', async () => {
     const sender = new FakeSender();
-    sender.failOn = 1;
-    const outcome = await new ClientInvites(CONFIGURED, sender).deliver(recipient, PASSWORD, context);
-    expect(outcome).toMatchObject({ sent: false, invitationSent: false, passwordSent: false });
-    expect(outcome.error).toContain('invitation email could not be sent');
-    expect(outcome.error).toContain('domain is not verified');
-    expect(sender.sent).toHaveLength(0);
+    sender.fail = true;
+    const delivery = await new ClientInvites(CONFIGURED, sender).deliver(recipient, context);
+    expect(delivery).toMatchObject({ sent: false });
+    expect(delivery.error).toContain('domain is not verified');
+    expect(JSON.stringify(delivery)).not.toContain('qboi_');
   });
 
-  it('reports a password email that fails after the invitation went out', async () => {
-    const sender = new FakeSender();
-    sender.failOn = 2;
-    const outcome = await new ClientInvites(CONFIGURED, sender).deliver(recipient, PASSWORD, context);
-    expect(outcome).toMatchObject({ sent: false, invitationSent: true, passwordSent: false });
-    expect(outcome.error).toContain('password email could not be');
-    expect(JSON.stringify(outcome)).not.toContain(PASSWORD);
-  });
-
-  it('refuses to run unconfigured, and says what is needed', async () => {
+  it('refuses to send unconfigured, and says what is needed', async () => {
     const off = new ClientInvites(disabledInvitesConfig(), null);
     expect(off.enabled).toBe(false);
     expect(off.whyDisabled()).toContain('RESEND_API_KEY and QBO_INVITE_FROM');
-    await expect(off.deliver(recipient, PASSWORD, context)).rejects.toBeInstanceOf(InvitesNotConfiguredError);
-    // Configured but with no transport is also off.
-    expect(new ClientInvites(CONFIGURED, null).enabled).toBe(false);
+    await expect(off.deliver(recipient, context)).rejects.toBeInstanceOf(InvitesNotConfiguredError);
+    expect(new ClientInvites(CONFIGURED, null).enabled).toBe(false); // configured but no transport
   });
 
   it('reports its status without the API key', () => {

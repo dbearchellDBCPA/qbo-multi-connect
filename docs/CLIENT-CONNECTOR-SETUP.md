@@ -2,16 +2,15 @@
 
 <!--
   FIRM NOTE — delete this block before sending.
-  If email invitations are on (see CLIENT-ACCESS.md), the client already gets
-  the address, their username, and these setup steps by email when you create
-  their login — you only need this handout if you want something to attach or
-  print. Otherwise: create the client's login first (dashboard → Team → Client
-  logins → + Add), then fill in the four placeholders: [FIRM NAME],
-  [CONNECTOR ADDRESS] (your deployment's URL ending in /mcp — shown when you
-  create the login), [SIGN-IN ADDRESS] (the same URL without /mcp), and
-  [SUPPORT CONTACT]. Send the username and password separately from this
-  document. Do a dry run with a test client login before the first real one —
-  menu names in Claude change from time to time.
+  You probably don't need to send this at all. When you invite a client
+  (dashboard → open their company → Invite the client; see CLIENT-ACCESS.md),
+  they get an email with a link to choose their own password, and both the
+  email and the page they land on carry these setup steps. This handout is
+  for when you want something to attach, print, or adapt. To use it, fill in
+  the four placeholders: [FIRM NAME], [CONNECTOR ADDRESS] (your deployment's
+  URL ending in /mcp), [SIGN-IN ADDRESS] (the same URL without /mcp), and
+  [SUPPORT CONTACT]. Do a dry run with a test client login before the first
+  real one — menu names in Claude change from time to time.
 -->
 
 [FIRM NAME] can give your AI assistant a secure, **read-only** window into your
@@ -32,7 +31,8 @@ reports. It cannot create, change, or delete anything in QuickBooks.
   custom connector). See [Other AI assistants](#other-ai-assistants) if you use
   something else.
 - **The connector address:** `[CONNECTOR ADDRESS]`
-- **Your username and password**, which we send you separately.
+- **Your username and password.** Your username is your email address. You
+  choose your password yourself, from the invitation link we email you.
 
 Set this up from a computer (the Claude website or desktop app). It takes
 about five minutes.
@@ -46,8 +46,8 @@ about five minutes.
 5. Claude detects how to sign in. Leave the suggested settings as they are and
    click **Continue**, then **Add**. If you're asked which *OAuth client* to
    use, choose **Register automatically**.
-6. A page titled **Sign in to connect** opens. Enter the username and password
-   we gave you and click **Sign in and allow access**.
+6. A page titled **Sign in to connect** opens. Enter your email address and
+   the password you chose, and click **Sign in and allow access**.
 7. Claude returns to the connector list, now showing the connector as
    connected.
 
@@ -55,7 +55,7 @@ about five minutes.
 connectors — a workspace Owner adds it once under **Organization settings →
 Connectors**, using the same address. After that, each person who should have
 access opens **Customize → Connectors**, finds the connector, clicks
-**Connect**, and signs in with their own username and password from us.
+**Connect**, and signs in with their own email address and password.
 
 ## Try it
 
@@ -124,10 +124,11 @@ or ask your assistant to draft the request and forward it.
 - **Only add the connector using the address above.** We will never ask for
   your password by email or phone.
 
-To change your password, sign in at `[SIGN-IN ADDRESS]` with the same username
-and password, open **Settings**, and choose **Change password** — or ask us to
-reset it. Either way your assistant is signed out as a precaution: click
-**Connect** on the connector and sign in with the new password.
+To change your password, sign in at `[SIGN-IN ADDRESS]` with your email
+address and password, open **Settings**, and choose **Change password**.
+Forgotten it? Ask us for a new invitation and you can choose another. Either
+way your assistant is signed out as a precaution: click **Connect** on the
+connector and sign in with the new password.
 
 ## Other AI assistants
 
@@ -143,12 +144,12 @@ admin or owner has to add it.
 3. Give it a name. Under **Connection**, paste the connector address.
 4. For authentication choose **OAuth**. Review the warning, tick **I
    understand and want to continue**, and select **Create as a plugin**.
-5. When the sign-in page opens, enter the username and password from us.
+5. When the sign-in page opens, enter your email address and your password.
 6. Install the new plugin from your plugins list, then turn it on in a chat.
 
 **Anything else.** Look for an option like **Add custom connector** or **Add
 custom MCP server**, paste the connector address, choose **OAuth** if asked
-how to authenticate, and sign in with the username and password from us.
+how to authenticate, and sign in with your email address and your password.
 
 Menu names change from time to time. If yours look different, tell us which
 assistant you use and we'll walk you through it.

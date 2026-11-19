@@ -77,11 +77,11 @@ function signInPage(opts: {
   <div class="card">
     <div class="brand">${BRAND_MARK}<span class="brand-name">QBO Multi-Connect</span></div>
     <h1>Sign in to connect</h1>
-    <p class="lead"><strong>${escapeHtml(opts.clientName)}</strong> is requesting access to QuickBooks on your behalf. Sign in with the username and password you were given — you'll only reach the companies assigned to you.</p>
+    <p class="lead"><strong>${escapeHtml(opts.clientName)}</strong> is requesting access to QuickBooks on your behalf. Sign in with your email or username and your password — you'll only reach the companies assigned to you.</p>
     ${opts.error ? `<div class="err">${escapeHtml(opts.error)}</div>` : ''}
     <form method="POST" action="/oauth/authorize">
       ${hidden}
-      <label for="username">Username</label>
+      <label for="username">Email or username</label>
       <input type="text" id="username" name="username" autocomplete="username" autofocus required>
       <label for="password">Password</label>
       <input type="password" id="password" name="password" autocomplete="current-password" required>
@@ -126,7 +126,9 @@ export async function oauthRoutes(fastify: FastifyInstance, qboManager: QBOManag
   // OAuth is form-encoded: the browser sign-in form posts
   // application/x-www-form-urlencoded, and so do token/revocation requests
   // per RFC 6749. Fastify only parses JSON out of the box.
-  await fastify.register(fastifyFormbody);
+  if (!fastify.hasContentTypeParser('application/x-www-form-urlencoded')) {
+    await fastify.register(fastifyFormbody);
+  }
 
   // ── Discovery: protected resource metadata (RFC 9728) ─────────────────────
   // Claude reads this after a 401 to learn which authorization server to use.

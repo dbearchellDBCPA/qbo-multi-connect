@@ -15,8 +15,9 @@ makes this a ~30-minute, no-code setup — walkthrough below). It gives you:
   the files they work in, read-only on the ones they only need to look at.
 - **Client logins** — give a client a read-only login to their own company so
   their AI assistant can answer questions from their books. Always read-only,
-  never an admin, no API key. The server can email them an invitation with
-  setup steps and, separately, a generated password.
+  never an admin, no API key. Inviting one takes a name and an email
+  address: they get a link, choose their own password, and are shown how to
+  connect.
   See [docs/CLIENT-ACCESS.md](docs/CLIENT-ACCESS.md).
 - **An activity log** — every tool call and sign-in: who, which tool, which
   company, and whether it was blocked.
@@ -361,13 +362,18 @@ assignments.
 | `PATCH` | `/api/users/:id` | Update name/email/role/status/`accessLevel` and/or `clients` |
 | `PUT` | `/api/connections/:realmId/users` | Replace who can access one company (`{users: [{userId, accessLevel}]}`) |
 | `GET` | `/api/activity` | Activity log, newest first. Filters: `userId`, `realmId`, `accountType`; page with `before` (entry id) and `limit` (max 200) |
-| `POST` | `/api/users/:id/invite` | Email a client login a new invitation and a new password (two messages). Changes nothing if the emails can't be sent |
+| `POST` | `/api/users/:id/invite` | Send a client login a new invitation link. The earlier link stops working; the current password keeps working until the new invitation is accepted |
 | `GET` | `/api/invites` | Whether invitation emails are configured, and the sender |
 
-`POST /api/users` with `"sendInvite": true` (client logins only, with an
-`email` and no `password`) generates the password and sends the two emails;
-the response carries an `invite` object saying whether both were accepted.
-The generated password is never returned.
+`POST /api/users` with `"sendInvite": true` invites a client login: it needs
+a `name`, an `email`, `accountType: "client"` and a company, and no
+`password`. `username` defaults to the email address. The client gets a
+one-time link (valid 7 days) to `/invite/<token>`, a page on this server
+where they choose their own password; that page then shows how to connect.
+The response carries `invite: { to, sent, error, expiresAt }`. When the email
+could not be sent — delivery failed, or email is not configured — it also
+carries `link`, so the admin can pass it on; otherwise the link is never
+returned, and only its hash is stored.
 | `POST` | `/api/users/:id/rotate-key` | Invalidate old key, return new key once |
 | `DELETE` | `/api/users/:id` | Remove member and revoke key |
 
@@ -764,9 +770,9 @@ curl -H "Authorization: Bearer YOUR_API_KEY" \
 | `RESEND_API_KEY` | No | — | Resend API key for email alerts ("sending access" is enough) |
 | `QBO_ALERT_EMAIL` | No | — | Who to email when a connection breaks; comma-separated for several |
 | `QBO_ALERT_FROM` | No | — | Sender for alert emails, on a domain verified in Resend |
-| `QBO_INVITE_FROM` | No | — | Sender clients see on invitation emails, e.g. `Your Firm <hello@yourfirm.com>`. Invitations are off until it is set |
+| `QBO_INVITE_FROM` | No | — | Sender clients see on invitation emails, e.g. `Your Firm <hello@yourfirm.com>`. Until it is set, invitations are produced as links for you to send yourself |
 | `QBO_INVITE_REPLY_TO` | No | — | Where a client's reply to an invitation goes |
-| `QBO_FIRM_NAME` | No | sender's display name | How invitation emails name the firm |
+| `QBO_FIRM_NAME` | No | sender's display name | How invitation emails and the accept page name the firm |
 
 ### Public URL & custom domains
 
@@ -886,8 +892,13 @@ and [Docker](#running-it-elsewhere-docker)). Details worth knowing:
 - Sign-in lockout shared by the dashboard and the connector sign-in page:
   five failures lock a username for a minute, doubling to fifteen. Flooding
   it with made-up usernames cannot reset the count on a real account
-- Resetting or changing a password, or disabling a login, revokes its
-  connector tokens — an assistant connected with the old password is cut off
+- Client invitations never carry a password: a single-use link, valid 7
+  days and stored only as a hash, leads to a page where the client chooses
+  their own. The pages are script-free, uncached and send no referrer, and
+  the token is redacted from the request log
+- Resetting or changing a password, accepting a new invitation, or disabling
+  a login revokes its connector tokens — an assistant connected with the old
+  password is cut off
 - Activity log of every tool call and sign-in (who, tool, company, outcome —
   never arguments or results), including attempts on tools a login was not
   offered; kept 180 days and capped by row count

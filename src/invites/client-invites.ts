@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { EmailSender } from '../alerts/email.js';
 import type { InvitesConfig } from './config.js';
-import { renderClientInvitationEmail, renderClientPasswordEmail } from './templates.js';
+import { renderClientInvitationEmail } from './templates.js';
 
 /** Who an invitation is for. */
 export interface InviteRecipient {
@@ -10,21 +10,20 @@ export interface InviteRecipient {
   username: string;
 }
 
-/** Where the login is used — worked out from the request that asked for the invite. */
+/** What the invitation email has to say — worked out from the request that asked for it. */
 export interface InviteContext {
+  /** The one-time link to the page where they choose their password. */
+  acceptUrl: string;
+  expiresAt: Date;
   connectorUrl: string;
-  signInUrl: string;
   companyNames: string[];
 }
 
-/** What happened when an invitation was sent. Never contains the password. */
-export interface InviteOutcome {
+/** What happened when an invitation email was sent. Never contains the link. */
+export interface InviteDelivery {
   to: string;
-  /** True only when BOTH emails were accepted for delivery. */
   sent: boolean;
-  invitationSent: boolean;
-  passwordSent: boolean;
-  /** Why it stopped, when it did. */
+  /** Why it was not sent, when it was attempted and failed. */
   error: string | null;
 }
 
@@ -46,13 +45,12 @@ export class InvitesNotConfiguredError extends Error {
 }
 
 /**
- * Sends a new client login its two emails: the invitation (address,
- * username, setup steps) and, separately, the password.
+ * Emails a client login its invitation: a link to choose a password, plus
+ * the connector address, their username, and how to connect an assistant.
  *
- * Delivery problems are reported in the outcome rather than thrown, because
- * the caller has state to settle either way — a login that now exists, or a
- * password that must not be changed unless the client actually received the
- * new one.
+ * Delivery problems are reported in the result rather than thrown, because
+ * the caller still has an invitation link either way and can hand it to the
+ * admin to pass on by other means.
  */
 export class ClientInvites {
   constructor(
@@ -60,8 +58,14 @@ export class ClientInvites {
     private sender: EmailSender | null
   ) {}
 
+  /** Whether invitation emails can be sent (a link can be issued either way). */
   get enabled(): boolean {
     return this.config.enabled && this.sender !== null;
+  }
+
+  /** How the firm is named in emails and on the accept page. */
+  get firmName(): string {
+    return this.config.firmName;
   }
 
   status(): InvitesStatus {
@@ -76,7 +80,7 @@ export class ClientInvites {
     };
   }
 
-  /** Human-readable reason invitations can't be sent, for an error message. */
+  /** Human-readable reason invitation emails can't be sent. */
   whyDisabled(): string {
     const parts: string[] = [];
     if (this.config.missing.length) parts.push(`set ${this.config.missing.join(' and ')}`);
@@ -84,64 +88,35 @@ export class ClientInvites {
     return `Email invitations are not configured${parts.length ? `: ${parts.join('; ')}` : ''}`;
   }
 
-  /**
-   * Send the invitation, then the password. The password only goes out once
-   * the invitation has been accepted for delivery: a password with no
-   * instructions is no use to the client, and stopping there keeps a failed
-   * attempt from leaving a live credential in someone's inbox for nothing.
-   */
-  async deliver(recipient: InviteRecipient, password: string, context: InviteContext): Promise<InviteOutcome> {
+  /** Send the invitation email. */
+  async deliver(recipient: InviteRecipient, context: InviteContext): Promise<InviteDelivery> {
     if (!this.enabled || !this.sender) throw new InvitesNotConfiguredError(this.whyDisabled());
 
-    const outcome: InviteOutcome = {
-      to: recipient.email,
-      sent: false,
-      invitationSent: false,
-      passwordSent: false,
-      error: null,
-    };
-    const common = {
-      from: this.config.from,
-      to: [recipient.email],
-      ...(this.config.replyTo ? { replyTo: this.config.replyTo } : {}),
-    };
-    const canReply = this.config.replyTo !== null;
-    // One id per invitation, so a transport-level retry of either message
-    // can't deliver it twice, while a deliberate re-send always goes out.
-    const attempt = randomUUID();
-
+    const delivery: InviteDelivery = { to: recipient.email, sent: false, error: null };
     try {
-      const invitation = renderClientInvitationEmail({
+      const email = renderClientInvitationEmail({
         firmName: this.config.firmName,
         name: recipient.name,
         username: recipient.username,
+        acceptUrl: context.acceptUrl,
+        expiresAt: context.expiresAt,
         connectorUrl: context.connectorUrl,
-        signInUrl: context.signInUrl,
         companyNames: context.companyNames,
-        canReply,
+        canReply: this.config.replyTo !== null,
       });
-      await this.sender.send({ ...common, ...invitation, idempotencyKey: `client-invite/${attempt}/invitation` });
-      outcome.invitationSent = true;
-    } catch (error) {
-      outcome.error = `The invitation email could not be sent: ${error instanceof Error ? error.message : String(error)}`;
-      return outcome;
-    }
-
-    try {
-      const secret = renderClientPasswordEmail({
-        firmName: this.config.firmName,
-        name: recipient.name,
-        password,
-        canReply,
+      await this.sender.send({
+        from: this.config.from,
+        to: [recipient.email],
+        ...(this.config.replyTo ? { replyTo: this.config.replyTo } : {}),
+        ...email,
+        // A fresh key per invitation: a transport-level retry can't deliver
+        // it twice, while a deliberate re-send always goes out.
+        idempotencyKey: `client-invite/${randomUUID()}`,
       });
-      await this.sender.send({ ...common, ...secret, idempotencyKey: `client-invite/${attempt}/password` });
-      outcome.passwordSent = true;
+      delivery.sent = true;
     } catch (error) {
-      outcome.error = `The invitation was sent, but the password email could not be: ${error instanceof Error ? error.message : String(error)}`;
-      return outcome;
+      delivery.error = `The invitation email could not be sent: ${error instanceof Error ? error.message : String(error)}`;
     }
-
-    outcome.sent = true;
-    return outcome;
+    return delivery;
   }
 }

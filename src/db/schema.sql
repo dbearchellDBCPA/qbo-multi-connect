@@ -52,11 +52,17 @@ CREATE TABLE IF NOT EXISTS users (
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   last_used_at DATETIME,
-  -- When the invitation and password emails were last sent to a client login.
-  invite_sent_at DATETIME
+  -- Invitation for a client login: a one-time link on which the client
+  -- chooses their own password. Only the link's token hash is stored; it is
+  -- cleared when the invitation is accepted or replaced.
+  invite_sent_at DATETIME,
+  invite_token_hash TEXT,
+  invite_expires_at DATETIME,
+  invite_accepted_at DATETIME
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_api_key_hash ON users(api_key_hash);
+CREATE INDEX IF NOT EXISTS idx_users_invite_token_hash ON users(invite_token_hash) WHERE invite_token_hash IS NOT NULL;
 -- Usernames are normalized to lowercase before writes; the partial index
 -- keeps NULLs (users without dashboard credentials) out of the constraint.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username) WHERE username IS NOT NULL;
