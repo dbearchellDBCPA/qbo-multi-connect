@@ -8,7 +8,7 @@
  * shown once that link has been used up, may embed the firm's walkthrough
  * video.
  */
-import { BRAND_BASE, BRAND_FONT_FACES, BRAND_MARK, BRAND_TOKENS } from './brand-css.js';
+import { BRAND_BASE, BRAND_FONT_FACES, BRAND_TOKENS, brandLine } from './brand-css.js';
 import { APP_NAME, type FirmBrand, type SetupVideo } from '../branding.js';
 import {
   CHATGPT_NOTE,
@@ -118,7 +118,7 @@ export function clientPage(title: string, body: string, firm: FirmBrand): string
 <body>
   <div>
     <div class="card">
-      <div class="brand">${BRAND_MARK}<span class="brand-name">${escapeHtml(firm.displayName)}</span></div>
+      <div class="brand">${brandLine(firm)}</div>
       ${body}
     </div>
     ${firm.configured ? `<p class="powered">Secure access from ${escapeHtml(firm.name)}, provided through ${APP_NAME}.</p>` : ''}

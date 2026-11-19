@@ -1268,3 +1268,13 @@ pre.json-view {
 @media (max-width: 720px) {
   .request-row { flex-direction: column; }
 }
+
+/* ── Firm logo in Settings ───────────────────────────────────────────────── */
+.logo-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.logo-preview {
+  display: inline-flex; align-items: center; justify-content: center; min-width: 64px; height: 52px; padding: 6px 10px;
+  border: 1px solid var(--border); border-radius: 8px; background: #ffffff;
+}
+.logo-preview img { display: block; max-height: 40px; max-width: 200px; object-fit: contain; }
+.logo-preview-empty { background: var(--panel); color: var(--muted-2); font-size: 11.5px; }
+.logo-pick { cursor: pointer; }

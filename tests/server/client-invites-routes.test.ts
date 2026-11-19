@@ -582,6 +582,95 @@ describe('inviting a client by link', () => {
     expect(sender.sent[sender.sent.length - 1].text).not.toContain('Prefer to watch');
   });
 
+  // A 1×1 PNG, and the same bytes stretched into a "wide" header for the wordmark case.
+  const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+  const dataUrl = (bytes: Buffer, type = 'image/png') => `data:${type};base64,${bytes.toString('base64')}`;
+  const putLogo = (payload: Record<string, unknown>, headers: Record<string, string> = asMaster) =>
+    app.inject({ method: 'PUT', url: '/api/branding/logo', headers, payload });
+
+  it('a logo uploaded in the dashboard heads the pages a client sees and the invitation email', async () => {
+    // Before: the app's own mark, and nothing to fetch.
+    expect((await app.inject({ method: 'GET', url: '/brand/logo', headers: HOST })).statusCode).toBe(404);
+
+    const set = await putLogo({ dataUrl: dataUrl(PNG) });
+    expect(set.statusCode).toBe(200);
+    const logoUrl = set.json().logoUrl as string;
+    expect(logoUrl).toMatch(/^\/brand\/logo\?v=[0-9a-f]{12}$/);
+
+    // Served as exactly what it is, to anyone, and safe to keep.
+    const served = await app.inject({ method: 'GET', url: logoUrl, headers: HOST });
+    expect(served.statusCode).toBe(200);
+    expect(served.headers['content-type']).toBe('image/png');
+    expect(served.headers['x-content-type-options']).toBe('nosniff');
+    expect(served.headers['content-security-policy']).toContain("default-src 'none'");
+    expect(served.headers['cache-control']).toContain('immutable');
+    expect(served.rawPayload.equals(PNG)).toBe(true);
+    expect((await app.inject({ method: 'GET', url: '/brand/logo', headers: HOST })).headers['cache-control']).toBe('public, max-age=300');
+
+    await invite();
+    const email = sender.sent[0];
+    expect(email.html).toContain(`<img src="https://qbo.example-cpa.com${logoUrl}" alt="Example CPA"`); // a full address, for a mail client
+    const form = await openLink(sender.lastLinkPath());
+    expect(form.body).toContain(`<img class="brand-img" src="${logoUrl}" alt="">`); // a square mark sits beside the name
+    expect(form.body).toContain('<span class="brand-name">Example CPA</span>');
+    expect(form.body).not.toContain('class="brand-logo"');
+    expect(form.body).not.toMatch(/(src|href)="https?:\/\//i); // still nothing from anywhere else
+
+    // The sign-in page an assistant opens carries it too.
+    const client = (await app.inject({ method: 'POST', url: '/oauth/register', headers: HOST, payload: { client_name: 'Claude', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'none' } })).json();
+    const signIn = await app.inject({ method: 'GET', url: `/oauth/authorize?client_id=${client.client_id}&redirect_uri=${encodeURIComponent(REDIRECT)}&response_type=code&code_challenge=${'x'.repeat(43)}&code_challenge_method=S256`, headers: HOST });
+    expect(signIn.body).toContain(`<img class="brand-img" src="${logoUrl}"`);
+
+    // A wordmark already spells the name, so it stands alone.
+    const wide = await putLogo({ dataUrl: dataUrl(Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(64)]), 'image/jpeg'), width: 600, height: 120 });
+    const widePage = await openLink(sender.lastLinkPath());
+    expect(widePage.body).toContain(`<img class="brand-img" src="${wide.json().logoUrl}" alt="Example CPA">`);
+    expect(widePage.body).not.toContain('<span class="brand-name">');
+    expect(wide.json().logoUrl).not.toBe(logoUrl); // a new image gets a new address
+
+    // Removing it brings the app's mark back.
+    const removed = await app.inject({ method: 'DELETE', url: '/api/branding/logo', headers: asMaster });
+    expect(removed.json().logoUrl).toBeNull();
+    expect((await app.inject({ method: 'GET', url: logoUrl, headers: HOST })).statusCode).toBe(404);
+    expect((await openLink(sender.lastLinkPath())).body).toContain('class="brand-logo"');
+    await reinvite((await qbo.users.list())[0].id);
+    expect(sender.sent[sender.sent.length - 1].html).not.toContain('<img');
+  });
+
+  it('only takes a real image of a sensible size as a logo, and only from an admin', async () => {
+    const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>');
+    const refused: Array<[string, unknown]> = [
+      ['an SVG', dataUrl(svg, 'image/svg+xml')],
+      ['an SVG calling itself a PNG', dataUrl(svg)],
+      ['a web page calling itself a PNG', dataUrl(Buffer.from('<html><script>alert(1)</script></html>'))],
+      ['too large', dataUrl(Buffer.concat([PNG, Buffer.alloc(300 * 1024)]))],
+      ['empty', 'data:image/png;base64,'],
+      ['not a data URL', 'https://example.com/logo.png'],
+      ['not text', 42],
+      ['missing', undefined],
+    ];
+    for (const [what, value] of refused) {
+      const res = await putLogo({ dataUrl: value });
+      expect(res.statusCode, what).toBe(400);
+    }
+    expect((await app.inject({ method: 'GET', url: '/brand/logo', headers: HOST })).statusCode).toBe(404);
+
+    // What it is served as comes from its bytes, never from what the upload claimed.
+    await putLogo({ dataUrl: dataUrl(PNG, 'text/html') });
+    expect((await app.inject({ method: 'GET', url: '/brand/logo', headers: HOST })).headers['content-type']).toBe('image/png');
+
+    // Neither a stranger nor a signed-in client can change it.
+    await invite();
+    await accept(sender.lastLinkPath());
+    const login = (await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: EMAIL, password: CHOSEN } })).json().token;
+    expect(login).toBeTruthy();
+    for (const headers of [HOST, { ...HOST, authorization: `Bearer ${login}` }]) {
+      expect((await putLogo({ dataUrl: dataUrl(PNG) }, headers)).statusCode).toBeGreaterThanOrEqual(401);
+      expect((await app.inject({ method: 'DELETE', url: '/api/branding/logo', headers })).statusCode).toBeGreaterThanOrEqual(401);
+    }
+    expect((await app.inject({ method: 'GET', url: '/brand/logo', headers: HOST })).statusCode).toBe(200);
+  });
+
   it('refuses a video link that is not a plain https address, and saves nothing when it does', async () => {
     for (const setupVideoUrl of ['http://www.loom.com/share/0123456789abcdef', 'javascript:alert(1)', 'watch this', 12]) {
       const res = await app.inject({ method: 'PUT', url: '/api/branding', headers: asMaster, payload: { firmName: 'Should Not Stick', setupVideoUrl } });

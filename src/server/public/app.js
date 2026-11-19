@@ -2523,6 +2523,22 @@ function showSettingsModal() {
         } It appears on the invitation email, the page where a client chooses their password, and the sign-in page.</span>
       </div>
       <div class="field">
+        <span class="field-label">Logo <span class="field-hint">(optional)</span></span>
+        <div class="logo-row">
+          ${
+            invitesInfo.logoUrl
+              ? `<span class="logo-preview"><img src="${escapeHtml(invitesInfo.logoUrl)}" alt="Your logo"></span>`
+              : '<span class="logo-preview logo-preview-empty">No logo</span>'
+          }
+          <label class="btn btn-ghost btn-small logo-pick">
+            ${invitesInfo.logoUrl ? 'Replace…' : 'Choose image…'}
+            <input type="file" name="logo" accept="image/png,image/jpeg,image/gif,image/webp" hidden>
+          </label>
+          ${invitesInfo.logoUrl ? '<button type="button" class="btn-link" data-remove-logo>Remove</button>' : ''}
+        </div>
+        <span class="field-hint">Shown at the top of the pages clients see — the request page, the page where they choose a password, the sign-in page — and of the invitation email. PNG or JPEG, up to 256 KB. It is saved as soon as you choose it.</span>
+      </div>
+      <div class="field">
         <span class="field-label">Setup walkthrough video <span class="field-hint">(optional)</span></span>
         <input type="url" name="setupVideoUrl" maxlength="500" value="${escapeHtml(invitesInfo.setupVideoUrl || '')}" placeholder="https://www.loom.com/share/…" autocomplete="off">
         <span class="field-hint">${
@@ -2597,6 +2613,43 @@ function showSettingsModal() {
   }
   const firmForm = body.querySelector('[data-firm-form]');
   if (firmForm) {
+    // The logo saves on its own, the moment a file is chosen.
+    const applyBranding = (saved, message) => {
+      invitesInfo = { ...invitesInfo, ...saved };
+      toast(message);
+      showSettingsModal(); // redraw with the new preview
+    };
+    firmForm.querySelector('input[name="logo"]').addEventListener('change', async (event) => {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      try {
+        if (file.size > 256 * 1024) throw new Error('The logo must be 256 KB or smaller — save a smaller version and try again');
+        const dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = () => reject(new Error('That file could not be read'));
+          reader.readAsDataURL(file);
+        });
+        // Its shape decides whether it is shown alone or beside the firm's name.
+        const size = await new Promise((resolve) => {
+          const image = new Image();
+          image.onload = () => resolve({ width: image.naturalWidth, height: image.naturalHeight });
+          image.onerror = () => resolve({});
+          image.src = dataUrl;
+        });
+        applyBranding(await api('/api/branding/logo', { method: 'PUT', body: JSON.stringify({ dataUrl, ...size }) }), 'Logo saved');
+      } catch (err) {
+        event.target.value = '';
+        toast(err.message, 'error');
+      }
+    });
+    firmForm.querySelector('[data-remove-logo]')?.addEventListener('click', async () => {
+      try {
+        applyBranding(await api('/api/branding/logo', { method: 'DELETE' }), 'Logo removed');
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+    });
     firmForm.addEventListener('submit', async (event) => {
       event.preventDefault();
       try {

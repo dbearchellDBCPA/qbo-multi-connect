@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import fastifyFormbody from '@fastify/formbody';
 import type { QBOManager } from '../../index.js';
 import { escapeHtml } from '../callback-page.js';
-import { BRAND_BASE, BRAND_FONT_FACES, BRAND_MARK, BRAND_TOKENS } from '../brand-css.js';
+import { BRAND_BASE, BRAND_FONT_FACES, BRAND_TOKENS, brandLine } from '../brand-css.js';
 
 /**
  * OAuth 2.1 authorization server endpoints for the MCP connector.
@@ -86,7 +86,7 @@ function signInPage(opts: {
 <body>
   <div>
   <div class="card">
-    <div class="brand">${BRAND_MARK}<span class="brand-name">${escapeHtml(opts.firm.displayName)}</span></div>
+    <div class="brand">${brandLine(opts.firm)}</div>
     <h1>Sign in to connect</h1>
     <p class="lead"><strong>${escapeHtml(opts.clientName)}</strong> is requesting access to QuickBooks on your behalf. Sign in with your email or username and your password — you'll only reach the companies assigned to you.</p>
     ${opts.error ? `<div class="err">${escapeHtml(opts.error)}</div>` : ''}
@@ -360,7 +360,7 @@ function errorPage(message: string, firm: FirmBrand): string {
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Sign-in error — ${escapeHtml(firm.displayName)}</title><style>${SIGN_IN_STYLES}</style></head>
 <body><div class="card">
-  <div class="brand">${BRAND_MARK}<span class="brand-name">${escapeHtml(firm.displayName)}</span></div>
+  <div class="brand">${brandLine(firm)}</div>
   <h1>Can't complete sign-in</h1>
   <p class="lead">${escapeHtml(message)}</p>
 </div></body></html>`;

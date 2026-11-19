@@ -62,6 +62,7 @@ export function createInviteIssuer(qboManager: QBOManager) {
 
     if (qboManager.invites.enabled) {
       const names = new Map((await qboManager.listConnections()).map((c) => [c.realmId, c.clientName]));
+      const firm = await qboManager.branding.firm();
       const delivery = await qboManager.invites.deliver(
         { name: user.name, email: user.email!, username: user.username! },
         {
@@ -69,8 +70,10 @@ export function createInviteIssuer(qboManager: QBOManager) {
           expiresAt,
           connectorUrl: `${base}/mcp`,
           companyNames: user.realmIds.map((realmId) => names.get(realmId)).filter((n): n is string => Boolean(n)),
-          firm: await qboManager.branding.firm(),
+          firm,
           videoUrl: (await qboManager.branding.setupVideo())?.url ?? null,
+          // An email needs the logo's full address; a page can use the path.
+          logoUrl: firm.logo ? `${base}${firm.logo.path}` : null,
         }
       );
       result.sent = delivery.sent;

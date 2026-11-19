@@ -43,6 +43,8 @@ export interface InvitationDetails {
   canReply: boolean;
   /** The firm's walkthrough video, when it has recorded one. */
   videoUrl?: string | null;
+  /** The full address of the firm's logo, when it has uploaded one. */
+  logoUrl?: string | null;
 }
 
 // These strings are dropped into style="…" attributes: no double quotes inside.
@@ -69,7 +71,7 @@ function formatDay(date: Date): string {
 }
 
 export function renderClientInvitationEmail(details: InvitationDetails): RenderedEmail {
-  const { firmName, name, username, acceptUrl, expiresAt, connectorUrl, companyNames, canReply, videoUrl } = details;
+  const { firmName, name, username, acceptUrl, expiresAt, connectorUrl, companyNames, canReply, videoUrl, logoUrl } = details;
   const videoLine = 'Prefer to watch? This short video walks through it:';
   const company = companyPhrase(companyNames);
   const subject = `${firmName} invited you to connect your AI assistant to QuickBooks`;
@@ -122,8 +124,12 @@ export function renderClientInvitationEmail(details: InvitationDetails): Rendere
     `<ol style="${STYLE.list}">${steps.map((s) => `<li style="${STYLE.li}">${rich(s)}</li>`).join('')}</ol>`;
   const ul = (items: string[]) =>
     `<ul style="${STYLE.list}">${items.map((s) => `<li style="${STYLE.li}">${escapeHtml(s)}</li>`).join('')}</ul>`;
+  // Mail clients often hide images until asked; the alt text carries the name.
+  const logo = logoUrl
+    ? `<p style="margin:0 0 18px;"><img src="${escapeHtml(logoUrl)}" alt="${escapeHtml(firmName)}" height="40" style="display:block;height:40px;width:auto;max-width:240px;border:0;"></p>`
+    : '';
   const html = `<!doctype html><html><body style="${STYLE.body}"><div style="${STYLE.card}">
-<h1 style="${STYLE.h1}">Connect your AI assistant to your QuickBooks data</h1>
+${logo}<h1 style="${STYLE.h1}">Connect your AI assistant to your QuickBooks data</h1>
 <p style="${STYLE.p}">Hello ${escapeHtml(name)},</p>
 <p style="${STYLE.p}">${escapeHtml(intro)}</p>
 <h2 style="${STYLE.h2}">Step 1 — Accept and choose your password</h2>

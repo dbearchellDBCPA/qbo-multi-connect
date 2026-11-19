@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { ConnectionDatabase } from './db/index.js';
 import type { InvitesConfig } from './invites/config.js';
 
@@ -8,6 +9,55 @@ export const MAX_FIRM_NAME_LENGTH = 100;
 
 const FIRM_NAME_SETTING = 'firm_name';
 const SETUP_VIDEO_SETTING = 'setup_video_url';
+const LOGO_SETTING = 'firm_logo';
+
+/** Where the firm's logo is served from. Public: it appears on pages and in emails. */
+export const LOGO_PATH = '/brand/logo';
+export const MAX_LOGO_BYTES = 256 * 1024;
+/** Wider than this (width ÷ height) and a logo is a wordmark that already spells the name. */
+const WIDE_LOGO_RATIO = 2.2;
+
+/** The image formats a logo may be, each recognised by how its bytes begin — never by what the upload claims. */
+const LOGO_FORMATS: Array<{ type: string; matches: (bytes: Buffer) => boolean }> = [
+  { type: 'image/png', matches: (b) => b.length > 24 && b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) },
+  { type: 'image/jpeg', matches: (b) => b.length > 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff },
+  { type: 'image/gif', matches: (b) => b.length > 10 && ['GIF87a', 'GIF89a'].includes(b.subarray(0, 6).toString('latin1')) },
+  { type: 'image/webp', matches: (b) => b.length > 12 && b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WEBP' },
+];
+
+/** The firm's logo as stored. */
+export interface FirmLogo {
+  type: string;
+  bytes: Buffer;
+  /** Changes whenever the image does, so browsers and mail clients fetch the new one. */
+  version: string;
+  /** A wordmark: shown on its own rather than beside the firm's name. */
+  wide: boolean;
+}
+
+/**
+ * Check an uploaded logo: a data: URL holding a PNG, JPEG, GIF or WebP of a
+ * sensible size. SVG is refused — it can carry script. Throws with a message
+ * for the admin.
+ */
+export function parseLogoUpload(dataUrl: unknown): { type: string; bytes: Buffer } {
+  if (typeof dataUrl !== 'string') throw new Error('Choose an image file for the logo');
+  const match = dataUrl.match(/^data:([a-z0-9.+/-]+);base64,([A-Za-z0-9+/=\s]+)$/i);
+  if (!match) throw new Error('The logo must be an image file (PNG, JPEG, GIF or WebP)');
+  const bytes = Buffer.from(match[2], 'base64');
+  if (bytes.length === 0) throw new Error('That image file is empty');
+  if (bytes.length > MAX_LOGO_BYTES) throw new Error(`The logo must be ${MAX_LOGO_BYTES / 1024} KB or smaller — save a smaller version and try again`);
+  const format = LOGO_FORMATS.find((f) => f.matches(bytes));
+  if (!format) throw new Error('The logo must be a PNG, JPEG, GIF or WebP image. (Save an SVG as PNG first.)');
+  return { type: format.type, bytes };
+}
+
+/** The pixel size of a PNG or GIF, read from its header; null for other formats. */
+function imageSize(type: string, bytes: Buffer): { width: number; height: number } | null {
+  if (type === 'image/png') return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+  if (type === 'image/gif') return { width: bytes.readUInt16LE(6), height: bytes.readUInt16LE(8) };
+  return null;
+}
 
 export const MAX_VIDEO_URL_LENGTH = 500;
 
@@ -79,6 +129,8 @@ export interface FirmBrand {
   source: 'dashboard' | 'environment' | 'sender' | 'default';
   /** What to put where a brand goes: the firm's name, or the app's when there isn't one. */
   displayName: string;
+  /** The firm's logo, when one has been uploaded: its address on this server, and whether it is a wordmark. */
+  logo?: { path: string; wide: boolean } | null;
 }
 
 /**
@@ -127,11 +179,47 @@ export class Branding {
    * else the display name of the invitation sender, else a neutral phrase.
    */
   async firm(): Promise<FirmBrand> {
+    const image = await this.logo();
+    const logo = image ? { path: `${LOGO_PATH}?v=${image.version}`, wide: image.wide } : null;
     const stored = (await this.db.getSetting(FIRM_NAME_SETTING))?.trim();
-    if (stored) return { name: stored, configured: true, source: 'dashboard', displayName: stored };
+    if (stored) return { name: stored, configured: true, source: 'dashboard', displayName: stored, logo };
     const { firmName, firmNameSource } = this.invitesConfig;
     const configured = firmNameSource !== 'default';
-    return { name: firmName, configured, source: firmNameSource, displayName: configured ? firmName : APP_NAME };
+    return { name: firmName, configured, source: firmNameSource, displayName: configured ? firmName : APP_NAME, logo };
+  }
+
+  /** The firm's logo, if one has been uploaded. */
+  async logo(): Promise<FirmLogo | null> {
+    const raw = await this.db.getSetting(LOGO_SETTING);
+    if (!raw) return null;
+    try {
+      const stored = JSON.parse(raw) as { type: string; data: string; version: string; wide: boolean };
+      const bytes = Buffer.from(stored.data, 'base64');
+      // Re-checked on the way out: only ever serve what is recognisably one of the allowed image formats.
+      if (!LOGO_FORMATS.some((f) => f.type === stored.type && f.matches(bytes))) return null;
+      return { type: stored.type, bytes, version: String(stored.version), wide: Boolean(stored.wide) };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Store an uploaded logo (a data: URL). `size` is the image's pixel size as
+   * the browser measured it, used only to tell a wordmark from a square mark.
+   */
+  async setLogo(dataUrl: unknown, size?: { width?: unknown; height?: unknown }): Promise<FirmLogo> {
+    const { type, bytes } = parseLogoUpload(dataUrl);
+    const measured = imageSize(type, bytes);
+    const width = measured?.width ?? Number(size?.width);
+    const height = measured?.height ?? Number(size?.height);
+    const wide = Number.isFinite(width) && Number.isFinite(height) && height > 0 && width / height >= WIDE_LOGO_RATIO;
+    const version = createHash('sha256').update(bytes).digest('hex').slice(0, 12);
+    await this.db.setSetting(LOGO_SETTING, JSON.stringify({ type, data: bytes.toString('base64'), version, wide }));
+    return { type, bytes, version, wide };
+  }
+
+  async removeLogo(): Promise<void> {
+    await this.db.setSetting(LOGO_SETTING, null);
   }
 
   /** The firm's setup walkthrough video, if one has been set. */

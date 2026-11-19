@@ -3,7 +3,7 @@ import type { QBOManager } from '../../index.js';
 import { AlertsNotConfiguredError } from '../../alerts/connection-alerts.js';
 import { EmailSendError } from '../../alerts/email.js';
 import { authenticateRequest, requireAdmin } from '../middleware.js';
-import { cleanFirmName, cleanVideoUrl } from '../../branding.js';
+import { LOGO_PATH, cleanFirmName, cleanVideoUrl } from '../../branding.js';
 
 /**
  * Outbound email status (admin only): alerts for broken QuickBooks
@@ -28,6 +28,8 @@ export async function alertsRoutes(
       setupVideoUrl: video?.url ?? null,
       /** Whether the video will play on the page, or only be linked. */
       setupVideoEmbedded: Boolean(video?.embedUrl),
+      /** Where the firm's logo is served from, when one has been uploaded. */
+      logoUrl: firm.logo?.path ?? null,
     };
   }
 
@@ -82,6 +84,48 @@ export async function alertsRoutes(
     } catch (error) {
       await reply.code(400).send({ error: 'Bad Request', message: error instanceof Error ? error.message : 'Invalid value' });
     }
+  });
+
+  // The firm's logo: an image file sent as a data: URL. It replaces the app's
+  // mark on the pages clients see and heads the invitation email.
+  fastify.put<{ Body: { dataUrl?: unknown; width?: unknown; height?: unknown } }>('/api/branding/logo', async (request, reply) => {
+    const scope = await authenticateRequest(request, reply, qboManager, masterApiKey);
+    if (!scope) return;
+    if (!(await requireAdmin(scope, reply))) return;
+    const body = request.body && typeof request.body === 'object' ? request.body : {};
+    try {
+      await qboManager.branding.setLogo(body.dataUrl, { width: body.width, height: body.height });
+      await reply.send(await brandingState());
+    } catch (error) {
+      await reply.code(400).send({ error: 'Bad Request', message: error instanceof Error ? error.message : 'Invalid image' });
+    }
+  });
+
+  fastify.delete('/api/branding/logo', async (request, reply) => {
+    const scope = await authenticateRequest(request, reply, qboManager, masterApiKey);
+    if (!scope) return;
+    if (!(await requireAdmin(scope, reply))) return;
+    await qboManager.branding.removeLogo();
+    await reply.send(await brandingState());
+  });
+
+  // The logo itself. Public — it is shown on pages people see before they
+  // sign in, and fetched by mail clients. Only ever one of the image formats
+  // checked at upload, and marked so a browser will not treat it as anything else.
+  fastify.get<{ Querystring: { v?: string } }>(LOGO_PATH, async (request, reply) => {
+    const logo = await qboManager.branding.logo();
+    if (!logo) {
+      await reply.code(404).send({ error: 'Not Found', message: 'No logo has been set' });
+      return;
+    }
+    await reply
+      .header('Content-Type', logo.type)
+      // A link carrying the current version can be kept; any other may be stale.
+      .header('Cache-Control', request.query.v === logo.version ? 'public, max-age=604800, immutable' : 'public, max-age=300')
+      .header('X-Content-Type-Options', 'nosniff')
+      .header('Content-Security-Policy', "default-src 'none'; sandbox")
+      .header('Cross-Origin-Resource-Policy', 'cross-origin')
+      .send(logo.bytes);
   });
 
   fastify.post('/api/alerts/test', async (request, reply) => {
