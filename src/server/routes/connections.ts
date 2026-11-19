@@ -2,7 +2,10 @@ import type { FastifyInstance } from 'fastify';
 import type { QBOManager } from '../../index.js';
 import { authenticateRequest, requireAdmin } from '../middleware.js';
 import { isRealmAllowed } from '../auth.js';
+import type { UserAccessLevel } from '../../db/models.js';
 import { intuitRedirectUri, resolvePublicUrl, allowedHosts } from '../public-url.js';
+
+const VALID_ACCESS_LEVELS: UserAccessLevel[] = ['read', 'read_write'];
 
 export async function connectionsRoutes(
   fastify: FastifyInstance,
@@ -159,10 +162,13 @@ export async function connectionsRoutes(
     }
   });
 
-  // Replace the set of users who can access a company (admin only)
+  // Replace the set of users who can access a company (admin only). Send
+  // `users: [{ userId, accessLevel }]` to choose each member's level, or the
+  // older `userIds: [...]`, which keeps the level of members who stay and
+  // gives newly added ones read & write.
   fastify.put<{
     Params: { realmId: string };
-    Body: { userIds?: unknown };
+    Body: { userIds?: unknown; users?: unknown };
   }>('/api/connections/:realmId/users', async (request, reply) => {
     const scope = await authenticateRequest(request, reply, qboManager, masterApiKey);
     if (!scope) return;
@@ -177,7 +183,39 @@ export async function connectionsRoutes(
         return;
       }
 
-      const userIds = request.body?.userIds;
+      const explicit = request.body?.users;
+      let assignments: Array<{ userId: number; accessLevel: UserAccessLevel }> | null = null;
+      let userIds: unknown;
+      if (explicit !== undefined) {
+        const wellFormed =
+          Array.isArray(explicit) &&
+          explicit.every(
+            (u) =>
+              u != null &&
+              typeof u === 'object' &&
+              Number.isInteger(u.userId) &&
+              (u.accessLevel === undefined || VALID_ACCESS_LEVELS.includes(u.accessLevel))
+          );
+        if (!wellFormed) {
+          await reply.code(400).send({
+            error: 'Bad Request',
+            message: `users must be an array of { userId, accessLevel } where accessLevel is one of: ${VALID_ACCESS_LEVELS.join(', ')}`,
+          });
+          return;
+        }
+        assignments = (explicit as Array<{ userId: number; accessLevel?: UserAccessLevel }>).map((u) => ({
+          userId: u.userId,
+          accessLevel: u.accessLevel ?? 'read_write',
+        }));
+        userIds = assignments.map((a) => a.userId);
+        if (new Set(userIds as number[]).size !== (userIds as number[]).length) {
+          await reply.code(400).send({ error: 'Bad Request', message: 'users lists the same userId more than once' });
+          return;
+        }
+      } else {
+        userIds = request.body?.userIds;
+      }
+
       if (!Array.isArray(userIds) || userIds.some((u) => !Number.isInteger(u))) {
         await reply.code(400).send({ error: 'Bad Request', message: 'userIds must be an array of integer user IDs' });
         return;
@@ -190,7 +228,11 @@ export async function connectionsRoutes(
         return;
       }
 
-      await qboManager.users.setClientUsers(realmId, userIds as number[]);
+      if (assignments) {
+        await qboManager.users.setClientAssignments(realmId, assignments);
+      } else {
+        await qboManager.users.setClientUsers(realmId, userIds as number[]);
+      }
       await reply.send({ success: true, userIds });
     } catch (error) {
       await reply.code(500).send({

@@ -19,15 +19,20 @@ corrections — but **only for the client companies assigned to you**.
    "Sign in with an API key instead", then create your own admin account.)
 2. Switch the left rail to **Team** and click **+ Add a member**.
 3. Enter their name, a **username and password** (this is what they'll use to
-   authorize the connector), pick the **Member** role, choose their
-   **QuickBooks access** (Read & write, or Read-only — read-only members never
-   even see the write tools), and check the client companies they should
-   access.
-4. Click **Create member**, then give them their username and password.
+   authorize the connector) and pick the **Member** role.
+4. Check the client companies they should access, and next to each one choose
+   **Read & write** or **Read-only**. Read-only means reports and lookups:
+   nothing in that client's books can be created, changed, or deleted. A
+   member can have full access to some clients and read-only access to
+   others. To make someone read-only across the board, choose **Read-only
+   everywhere** under **QuickBooks access** instead.
+5. Click **Create member**, then give them their username and password.
 
-You can change a member's client assignments, access level, or credentials, or
-disable them entirely, at any time from the same view — changes take effect on
-their next request.
+You can change a member's client assignments, access levels, or credentials,
+or disable them entirely, at any time from the same view — changes take effect
+on their next request. To review one client at a time, open it on the
+**Clients** tab and click **Manage access**: it lists every member with their
+level for that client.
 
 ## Part 2 — Add the connector once (workspace Owner)
 
@@ -90,6 +95,7 @@ the start of a bookkeeping session.
 | Connector tools don't appear in chat | Check the connector is enabled in Settings → Connectors and toggled on in the chat's tools menu. |
 | `401 Unauthorized` on tool calls | Your session expired or your account was disabled. Click **Connect** on the connector again to sign in. |
 | A client you work on isn't listed | It isn't assigned to your account yet — ask the admin to add it on the Team tab. |
+| Claude says a client is read-only | Your access to that client is set to Read-only. Ask the admin to change it to Read & write on the Team tab if you need to post or correct entries there. |
 | A client company errors out | Its QuickBooks authorization may have expired — the admin can reconnect it from the dashboard. |
 
 ## Questions

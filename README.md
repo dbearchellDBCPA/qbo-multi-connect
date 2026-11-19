@@ -11,7 +11,8 @@ makes this a ~30-minute, no-code setup — walkthrough below). It gives you:
   "sign in to QuickBooks and approve" flow — no data entry), watch connection
   health, and manage your team.
 - **Team accounts** — each staff member gets their own username/password and
-  sees only their assigned clients. Read-only mode available per member.
+  sees only their assigned clients. Access is set per client: read & write on
+  the files they work in, read-only on the ones they only need to look at.
 - **A Claude connector** — add one URL in Claude's settings and Claude can
   pull reports, look up transactions, post journal entries, fix coding, and
   attach documents across every company a person is allowed to touch. Each
@@ -141,7 +142,8 @@ Your QuickBooks connections must survive restarts, so give the app a disk:
    password) with the **Admin** role — from then on you sign in normally,
    and the API key goes back in the drawer as a break-glass credential.
 5. Add each staff member the same way, checking off the client companies
-   they're allowed to reach (and Read-only if appropriate).
+   they're allowed to reach and choosing **Read & write** or **Read-only**
+   for each one.
 
 ### Step 7 — Connect Claude
 
@@ -314,6 +316,17 @@ on every MCP tool call and REST request.
   - returns *not found* for unassigned companies, so members can't discover
     client names or realm IDs they weren't given;
   - cannot manage users or connect/disconnect companies.
+- **Per-company access level** — each assignment is either **read & write**
+  or **read-only** (reports and lookups; nothing in that company's books can
+  be created, changed, or deleted). A member can hold both: full access to
+  the files they work in and read-only on the rest. A member can also be set
+  to **read-only everywhere**, which overrides the per-company levels.
+  Read-only is enforced in three places: the MCP write tools are not listed
+  for a key that can't write anywhere; a write tool pointed at a read-only
+  company is refused before it runs; and the QuickBooks request layer rejects
+  any non-read request made on behalf of a read-only caller, so the rule
+  holds for the REST API and for any tool added later. `list_clients` marks
+  read-only companies so the model doesn't plan a write it can't make.
 - **Admin-role members** — behave like the master key (all companies + team
   management) but with their own revocable key.
 
@@ -328,16 +341,29 @@ assignments.
 |--------|----------|-------------|
 | `GET` | `/api/me` | Who am I — role and visible companies for the presented key |
 | `GET` | `/api/users` | List team members and their assignments |
-| `POST` | `/api/users` | Create member (`{name, email?, role?, realmIds?}`); returns key once |
-| `PATCH` | `/api/users/:id` | Update name/email/role/status and/or `realmIds` |
+| `POST` | `/api/users` | Create member (`{name, email?, role?, accessLevel?, clients?}`); returns key once |
+| `PATCH` | `/api/users/:id` | Update name/email/role/status/`accessLevel` and/or `clients` |
+| `PUT` | `/api/connections/:realmId/users` | Replace who can access one company (`{users: [{userId, accessLevel}]}`) |
 | `POST` | `/api/users/:id/rotate-key` | Invalidate old key, return new key once |
 | `DELETE` | `/api/users/:id` | Remove member and revoke key |
+
+`clients` is `[{ realmId, accessLevel }]` with `accessLevel` of `"read"` or
+`"read_write"` (the default). The older `realmIds: [...]` and
+`userIds: [...]` forms still work: companies and members that stay assigned
+keep their level, and newly added ones get read & write. The member-level
+`accessLevel` is a ceiling — `"read"` makes the member read-only on every
+company regardless of the per-company values. Each entry in a user's `clients`
+reports both the stored `accessLevel` and the `effectiveAccessLevel` after
+that ceiling.
 
 ### Migration
 
 Existing databases are migrated automatically on startup (the new `users` and
-`user_clients` tables are created if missing). Nothing changes for
-single-user setups: the master key behaves exactly as before.
+`user_clients` tables are created if missing, and `user_clients` gains its
+`access_level` column). Nothing changes for single-user setups: the master
+key behaves exactly as before. Upgrading to per-company levels changes
+nobody's access — existing assignments become read & write, and members who
+were read-only stay read-only everywhere.
 
 ## REST API Endpoints
 
@@ -348,8 +374,10 @@ Authorization: Bearer YOUR_API_KEY
 ```
 
 Company data routes accept the master key or any member key assigned to that
-company. Connection management (`auth-url`, `DELETE`) and `/api/users` routes
-require an admin key.
+company. Routes that change QuickBooks data (`POST`/`PUT` under
+`/api/company/:realmId/`) additionally require read & write access to that
+company and return `403` for a read-only key. Connection management
+(`auth-url`, `DELETE`) and `/api/users` routes require an admin key.
 
 ### Connection Management
 
@@ -820,8 +848,10 @@ and [Docker](#running-it-elsewhere-docker)). Details worth knowing:
   their own key and connector URL
 - Per-client authorization enforced at name resolution *and* on every QBO API
   call (defense in depth)
-- Per-member access level: read-only keys never expose the MCP write tools
-  (create/update/delete never even appear in their tool list)
+- Per-company access level (read-only or read & write) enforced at the tool
+  list, at each write tool call, on the REST write routes, and again at the
+  QuickBooks request layer, which refuses any non-read request made for a
+  read-only caller
 - Master key compared with a timing-safe equality check
 - No tokens in log output
 - Scopes limited to `com.intuit.quickbooks.accounting` (no payments, no payroll)

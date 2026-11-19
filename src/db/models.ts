@@ -82,10 +82,20 @@ export type UserRole = 'admin' | 'member';
 export type UserStatus = 'active' | 'disabled';
 
 /**
- * What a user's API key may do in QuickBooks. 'read' keys never see the
- * MCP write tools; admins always behave as 'read_write'.
+ * What a user's API key may do in QuickBooks: 'read' is reports and lookups
+ * only, 'read_write' is full access. It is set per assigned company
+ * (ClientAssignment); the level on the user itself is a ceiling — a 'read'
+ * user is read-only on every company. Admins always behave as 'read_write'.
  */
 export type UserAccessLevel = 'read' | 'read_write';
+
+/**
+ * One company a member may access, and what they may do there.
+ */
+export interface ClientAssignment {
+  realmId: string;
+  accessLevel: UserAccessLevel;
+}
 
 /**
  * Database user record (raw row)
@@ -125,6 +135,11 @@ export interface User {
   updatedAt: Date;
   lastUsedAt: Date | null;
   realmIds: string[];
+  /**
+   * Access level per assigned company, as stored. The user-level accessLevel
+   * still caps it — use effectiveAccessLevel() for what actually applies.
+   */
+  assignments: ClientAssignment[];
 }
 
 /**
@@ -137,7 +152,10 @@ export interface NewUser {
   accessLevel?: UserAccessLevel;
   username?: string | null;
   password?: string | null;
+  /** Companies to assign at the default level (read & write). */
   realmIds?: string[];
+  /** Companies to assign with an explicit level each; wins over realmIds. */
+  assignments?: ClientAssignment[];
 }
 
 /**

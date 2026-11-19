@@ -793,6 +793,10 @@ button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
   padding: 4px 12px;
 }
 .chip-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--brand); flex-shrink: 0; }
+/* A client the member can read but not change. */
+.chip-read { background: var(--badge-muted-bg); border-color: var(--border); color: var(--badge-muted-text); }
+.chip-read .chip-dot { background: var(--badge-muted-text); }
+.chip-note { font-weight: 500; opacity: 0.85; white-space: nowrap; }
 
 /* ── MCP connector card ─────────────────────────────────────────────────── */
 /* Uses the standard .card shell so it follows the active theme like every
@@ -968,8 +972,45 @@ button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
 .radio-row input:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 .checkbox-item input { accent-color: var(--brand); }
 
-.checkbox-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.checkbox-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; margin-bottom: 8px; }
 .toolbar-sep { color: var(--muted-2); font-size: 12px; }
+.toolbar-label { color: var(--muted-2); font-size: 12px; }
+
+/* Access list: one row per client (or member) — is it assigned, and at what
+   level. Same bordered scroll box as .checkbox-grid, one row per line so the
+   level picker lines up down the right edge. */
+.access-list {
+  display: grid;
+  /* minmax(0, …) lets a long client name shrink and ellipsize instead of
+     pushing the level picker out of the box. */
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2px;
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px;
+}
+.access-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-radius: 6px;
+  padding-right: 4px;
+}
+.access-row:hover { background: var(--surface); }
+.access-row .checkbox-item { flex: 1; min-width: 0; }
+.access-row .checkbox-item:hover { background: none; }
+.access-row .checkbox-item span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.field .access-level {
+  width: auto;
+  flex-shrink: 0;
+  padding: 4px 8px;
+  font-size: 12.5px;
+  border-radius: 6px;
+}
+.field .access-level:disabled { opacity: 0.45; cursor: not-allowed; }
 
 .radio-row { display: grid; gap: 8px; }
 .radio-row label { display: flex; align-items: center; gap: 7px; font-size: 13px; cursor: pointer; }

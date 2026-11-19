@@ -59,6 +59,34 @@ export class ConnectionDatabase {
     if (!has('username')) this.db.exec('ALTER TABLE users ADD COLUMN username TEXT');
     if (!has('password_hash')) this.db.exec('ALTER TABLE users ADD COLUMN password_hash TEXT');
     if (!has('api_key_encrypted')) this.db.exec('ALTER TABLE users ADD COLUMN api_key_encrypted TEXT');
+
+    // Per-company access level. Existing assignments become 'read_write' —
+    // members who were read-only stay read-only through users.access_level,
+    // which still caps every company, so nobody gains access in the upgrade.
+    const hasAssignments = this.db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'user_clients'")
+      .get();
+    if (hasAssignments) {
+      const assignmentColumns = this.db.prepare('PRAGMA table_info(user_clients)').all() as Array<{ name: string }>;
+      if (!assignmentColumns.some((c) => c.name === 'access_level')) {
+        this.db.exec(
+          "ALTER TABLE user_clients ADD COLUMN access_level TEXT NOT NULL DEFAULT 'read_write' CHECK(access_level IN ('read', 'read_write'))"
+        );
+      }
+    }
+
+    // Upload tokens remember who minted them, so one stops working when that
+    // member loses write access. Tokens from before this column (they live an
+    // hour at most) keep NULL and simply run out their time.
+    const hasUploadTokens = this.db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'upload_tokens'")
+      .get();
+    if (hasUploadTokens) {
+      const tokenColumns = this.db.prepare('PRAGMA table_info(upload_tokens)').all() as Array<{ name: string }>;
+      if (!tokenColumns.some((c) => c.name === 'user_id')) {
+        this.db.exec('ALTER TABLE upload_tokens ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE CASCADE');
+      }
+    }
   }
 
   /**
@@ -354,38 +382,74 @@ export class ConnectionDatabase {
   }
 
   /**
-   * Replace a user's client assignments
+   * Replace a user's client assignments, each with its own access level
    */
-  async setUserRealms(userId: number, realmIds: string[]): Promise<void> {
-    const replaceAll = this.db.transaction((ids: string[]) => {
+  async setUserAssignments(
+    userId: number,
+    assignments: Array<{ realmId: string; accessLevel: UserAccessLevel }>
+  ): Promise<void> {
+    const replaceAll = this.db.transaction((rows: Array<{ realmId: string; accessLevel: UserAccessLevel }>) => {
       this.db.prepare('DELETE FROM user_clients WHERE user_id = ?').run(userId);
-      const insert = this.db.prepare('INSERT OR IGNORE INTO user_clients (user_id, realm_id) VALUES (?, ?)');
-      for (const realmId of ids) insert.run(userId, realmId);
+      const insert = this.db.prepare(
+        'INSERT OR REPLACE INTO user_clients (user_id, realm_id, access_level) VALUES (?, ?, ?)'
+      );
+      for (const row of rows) insert.run(userId, row.realmId, row.accessLevel);
     });
-    replaceAll(realmIds);
+    replaceAll(assignments);
   }
 
   /**
-   * Replace the full set of users assigned to a realm (edit access from the
-   * client side). Members not in the list lose access to this realm; admins
-   * are unaffected since their access is role-based, not row-based.
+   * Replace the full set of members assigned to a realm (edit access from
+   * the client side), each with its own access level. Members not in the list
+   * lose access to this realm; admins are unaffected since their access is
+   * role-based, not row-based, and any row they hold is left as it is unless
+   * the list names them.
    */
-  async setRealmUsers(realmId: string, userIds: number[]): Promise<void> {
-    const replaceAll = this.db.transaction((ids: number[]) => {
-      this.db.prepare('DELETE FROM user_clients WHERE realm_id = ?').run(realmId);
-      const insert = this.db.prepare('INSERT OR IGNORE INTO user_clients (user_id, realm_id) VALUES (?, ?)');
-      for (const userId of ids) insert.run(userId, realmId);
+  async setRealmAssignments(
+    realmId: string,
+    assignments: Array<{ userId: number; accessLevel: UserAccessLevel }>
+  ): Promise<void> {
+    const replaceAll = this.db.transaction((rows: Array<{ userId: number; accessLevel: UserAccessLevel }>) => {
+      // Only member rows are replaced. An admin's row is dormant (their
+      // access is by role) and callers list members only — deleting it here
+      // would silently cost them this company if they are ever made a member
+      // again.
+      this.db
+        .prepare("DELETE FROM user_clients WHERE realm_id = ? AND user_id NOT IN (SELECT id FROM users WHERE role = 'admin')")
+        .run(realmId);
+      const insert = this.db.prepare(
+        'INSERT OR REPLACE INTO user_clients (user_id, realm_id, access_level) VALUES (?, ?, ?)'
+      );
+      for (const row of rows) insert.run(row.userId, realmId, row.accessLevel);
     });
-    replaceAll(userIds);
+    replaceAll(assignments);
+  }
+
+  /**
+   * Get a user's assignments (realm + access level), ordered by realm
+   */
+  async getUserAssignments(userId: number): Promise<Array<{ realmId: string; accessLevel: UserAccessLevel }>> {
+    const rows = this.db
+      .prepare('SELECT realm_id, access_level FROM user_clients WHERE user_id = ? ORDER BY realm_id')
+      .all(userId) as Array<{ realm_id: string; access_level: UserAccessLevel }>;
+    return rows.map((r) => ({ realmId: r.realm_id, accessLevel: r.access_level }));
+  }
+
+  /**
+   * Get the assignments for one realm (user + access level)
+   */
+  async getRealmAssignments(realmId: string): Promise<Array<{ userId: number; accessLevel: UserAccessLevel }>> {
+    const rows = this.db
+      .prepare('SELECT user_id, access_level FROM user_clients WHERE realm_id = ? ORDER BY user_id')
+      .all(realmId) as Array<{ user_id: number; access_level: UserAccessLevel }>;
+    return rows.map((r) => ({ userId: r.user_id, accessLevel: r.access_level }));
   }
 
   /**
    * Get realm IDs assigned to a user
    */
   async getUserRealms(userId: number): Promise<string[]> {
-    const rows = this.db.prepare('SELECT realm_id FROM user_clients WHERE user_id = ? ORDER BY realm_id')
-      .all(userId) as Array<{ realm_id: string }>;
-    return rows.map((r) => r.realm_id);
+    return (await this.getUserAssignments(userId)).map((a) => a.realmId);
   }
 
   /**
@@ -440,16 +504,22 @@ export class ConnectionDatabase {
 
   // ── Upload tokens (REST attachments endpoint) ────────────────────────────
 
-  async insertUploadToken(tokenHash: string, realmId: string, issuedBy: string, expiresAtIso: string): Promise<void> {
-    this.db.prepare('INSERT INTO upload_tokens (token_hash, realm_id, issued_by, expires_at) VALUES (?, ?, ?, ?)')
-      .run(tokenHash, realmId, issuedBy, expiresAtIso);
+  async insertUploadToken(
+    tokenHash: string,
+    realmId: string,
+    issuedBy: string,
+    expiresAtIso: string,
+    userId: number | null = null
+  ): Promise<void> {
+    this.db.prepare('INSERT INTO upload_tokens (token_hash, realm_id, issued_by, expires_at, user_id) VALUES (?, ?, ?, ?, ?)')
+      .run(tokenHash, realmId, issuedBy, expiresAtIso, userId);
   }
 
-  /** Resolve an unexpired upload token hash to its realm binding. */
-  async getUploadToken(tokenHash: string): Promise<{ realm_id: string; expires_at: string } | null> {
+  /** Resolve an unexpired upload token hash to its realm binding and issuer. */
+  async getUploadToken(tokenHash: string): Promise<{ realm_id: string; expires_at: string; user_id: number | null } | null> {
     const row = this.db.prepare(
-      "SELECT realm_id, expires_at FROM upload_tokens WHERE token_hash = ? AND expires_at > datetime('now')"
-    ).get(tokenHash) as { realm_id: string; expires_at: string } | undefined;
+      "SELECT realm_id, expires_at, user_id FROM upload_tokens WHERE token_hash = ? AND expires_at > datetime('now')"
+    ).get(tokenHash) as { realm_id: string; expires_at: string; user_id: number | null } | undefined;
     return row ?? null;
   }
 
