@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { TokenStore } from '../auth/token-store.js';
 import { refreshConnectionTokens } from '../auth/refresh.js';
 import { decodeStrayEntitiesDeep } from '../server/entity-fields.js';
+import { assertRequestAllowed } from '../access-context.js';
 import type { OAuthConfig } from '../db/models.js';
 
 // Hard ceiling on how long a single QBO HTTP request may run before we abort it.
@@ -68,6 +69,11 @@ export class QBOClient {
       raw?: boolean;
     } = {}
   ): Promise<T> {
+    // Read-only callers never get a mutating request past this point — see
+    // access-context.ts. Checked before anything else so a refused write
+    // costs no token refresh and reaches no network.
+    assertRequestAllowed(method, realmId);
+
     const connection = await this.tokenStore.getConnection(realmId);
     if (!connection) {
       throw new QBOError(`Connection not found: ${realmId}`);

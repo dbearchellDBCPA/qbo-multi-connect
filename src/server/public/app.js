@@ -657,7 +657,13 @@ function clientDetailHtml() {
               <span class="avatar ${u.role === 'admin' ? 'avatar-admin' : 'avatar-member'}">${escapeHtml(initials(u.name))}</span>
               <span class="team-name">${escapeHtml(u.name)}</span>
               <span class="team-meta">${
-                u.role === 'admin' ? 'admin · all clients' : `member · ${escapeHtml(u.keyPrefix)}…`
+                u.role === 'admin'
+                  ? 'admin · all clients'
+                  : `member · ${
+                      u.clients.find((c) => c.realmId === conn.realmId)?.effectiveAccessLevel === 'read'
+                        ? 'read-only'
+                        : 'read & write'
+                    }`
               }</span>
             </div>`
         )
@@ -678,7 +684,11 @@ function clientDetailHtml() {
   const scopeNote = isAdmin
     ? `every connected client (${clientCount})`
     : `your ${clientCount} assigned client${clientCount === 1 ? '' : 's'}${
-        me.canWrite === false ? ', read-only' : ''
+        me.canWrite === false
+          ? ', read-only'
+          : me.clients?.some((c) => c.canWrite === false)
+            ? ', some read-only'
+            : ''
       }`;
 
   return `
@@ -687,6 +697,12 @@ function clientDetailHtml() {
         <div class="detail-title-row">
           <h2 class="detail-title">${escapeHtml(conn.clientName)}</h2>
           ${statusPillHtml(status)}
+          ${
+            // Members see their own level for this client; admins write everywhere.
+            !isAdmin && me.clients?.find((c) => c.realmId === conn.realmId)?.canWrite === false
+              ? '<span class="pill pill-muted">Read-only</span>'
+              : ''
+          }
         </div>
         <div class="detail-sub mono">realm ${escapeHtml(conn.realmId)}</div>
       </div>
@@ -928,6 +944,14 @@ function teamDetailHtml() {
 
   const isDisabled = user.status === 'disabled';
   const isReadOnly = user.role !== 'admin' && user.accessLevel === 'read';
+  const readOnlyCount = user.role === 'admin' ? 0 : user.clients.filter((c) => c.effectiveAccessLevel === 'read').length;
+  const accessSummary = isReadOnly
+    ? 'Read-only everywhere'
+    : readOnlyCount === 0
+      ? 'Read & write'
+      : readOnlyCount === user.clients.length
+        ? 'Read-only'
+        : `Read & write on ${user.clients.length - readOnlyCount}, read-only on ${readOnlyCount}`;
   let pill = isDisabled
     ? '<span class="pill pill-disabled">Disabled</span>'
     : `<span class="pill pill-role">${escapeHtml(user.role)}</span>`;
@@ -948,7 +972,11 @@ function teamDetailHtml() {
     user.role === 'admin'
       ? '<span class="chip"><span class="chip-dot"></span>All clients</span>'
       : user.clients
-          .map((c) => `<span class="chip"><span class="chip-dot"></span>${escapeHtml(c.clientName)}</span>`)
+          .map((c) =>
+            c.effectiveAccessLevel === 'read'
+              ? `<span class="chip chip-read" title="Read-only: reports and lookups"><span class="chip-dot"></span>${escapeHtml(c.clientName)}<span class="chip-note">read-only</span></span>`
+              : `<span class="chip" title="Read &amp; write"><span class="chip-dot"></span>${escapeHtml(c.clientName)}</span>`
+          )
           .join('') || '<p class="field-hint">No clients assigned yet.</p>';
 
   return `
@@ -975,7 +1003,7 @@ function teamDetailHtml() {
           <div class="stat-row"><span class="stat-label">Key</span><span class="key-chip">${escapeHtml(user.keyPrefix)}…</span></div>
           <div class="stat-row"><span class="stat-label">Last used</span><span class="stat-value">${escapeHtml(lastUsed)}</span></div>
           <div class="stat-row"><span class="stat-label">Status</span><span class="stat-value ${isDisabled ? 'status-bad' : 'status-ok'}"><span class="status-dot"></span>${isDisabled ? 'Disabled' : 'Active'}</span></div>
-          <div class="stat-row"><span class="stat-label">QuickBooks access</span><span class="stat-value">${isReadOnly ? 'Read-only' : 'Read & write'}</span></div>
+          <div class="stat-row"><span class="stat-label">QuickBooks access</span><span class="stat-value">${escapeHtml(accessSummary)}</span></div>
           <button type="button" class="btn btn-ghost btn-card" data-action="set-password" data-id="${idAttr}">${user.hasPassword ? 'Reset password' : 'Set up sign-in'}</button>
           <button type="button" class="btn btn-ghost btn-card" data-action="rotate-key" data-id="${idAttr}">Rotate key</button>
         </div>
@@ -1215,15 +1243,20 @@ async function manageClientAccess(realmId, clientName) {
   const body = document.createElement('div');
   const memberRows = members.length
     ? `${checkboxToolbar()}
-      <div class="checkbox-grid">
+      <div class="access-list">
         ${members
-          .map(
-            (u) => `
-          <label class="checkbox-item">
-            <input type="checkbox" name="userIds" value="${u.id}" ${u.realmIds.includes(realmId) ? 'checked' : ''}>
-            <span>${escapeHtml(u.name)}</span>
-          </label>`
-          )
+          .map((u) => {
+            const assignment = u.clients.find((c) => c.realmId === realmId);
+            const capped = u.accessLevel === 'read';
+            return accessRowHtml({
+              inputName: 'userIds',
+              value: u.id,
+              label: capped ? `${u.name} (read-only member)` : u.name,
+              checked: Boolean(assignment),
+              level: assignment?.accessLevel,
+              locked: capped,
+            });
+          })
           .join('')}
       </div>`
     : '<p class="field-hint">No member accounts yet. Add members from the Team view first.</p>';
@@ -1235,7 +1268,7 @@ async function manageClientAccess(realmId, clientName) {
     : '';
 
   body.innerHTML = `
-    <p class="field-hint" style="margin-bottom:14px;font-size:12.5px">Choose which members can access <strong>${escapeHtml(clientName)}</strong>. Changes take effect immediately.</p>
+    <p class="field-hint" style="margin-bottom:14px;font-size:12.5px">Choose which members can access <strong>${escapeHtml(clientName)}</strong>, and whether each can change its books or only read them. Changes take effect immediately.</p>
     <form id="access-form" class="form-stack">
       <div class="field">${memberRows}${adminNote}</div>
       <div class="modal-footer">
@@ -1247,11 +1280,14 @@ async function manageClientAccess(realmId, clientName) {
 
   body.querySelector('#access-form').addEventListener('submit', async (event) => {
     event.preventDefault();
-    const userIds = [...event.target.querySelectorAll('input[name="userIds"]:checked')].map((cb) => Number(cb.value));
+    const assigned = readAccessRows(event.target, 'userIds').map((row) => ({
+      userId: Number(row.id),
+      accessLevel: row.accessLevel,
+    }));
     try {
       await api(`/api/connections/${encodeURIComponent(realmId)}/users`, {
         method: 'PUT',
-        body: JSON.stringify({ userIds }),
+        body: JSON.stringify({ users: assigned }),
       });
       toast('Access updated');
       closeModal();
@@ -1265,31 +1301,98 @@ async function manageClientAccess(realmId, clientName) {
 }
 
 // ── Team actions ─────────────────────────────────────────────────────────────
+const ACCESS_LEVEL_LABELS = { read_write: 'Read & write', read: 'Read-only' };
+
 function checkboxToolbar() {
   return `
     <div class="checkbox-toolbar">
       <button type="button" class="btn-link" data-action="check-all">Select all</button>
       <span class="toolbar-sep">·</span>
       <button type="button" class="btn-link" data-action="check-none">Select none</button>
+      <span class="toolbar-sep">·</span>
+      <span class="toolbar-label">Set checked to</span>
+      <button type="button" class="btn-link" data-action="level-all" data-level="read_write">Read &amp; write</button>
+      <span class="toolbar-sep">/</span>
+      <button type="button" class="btn-link" data-action="level-all" data-level="read">Read-only</button>
     </div>
   `;
 }
 
-function clientCheckboxes(selectedRealms) {
-  const selected = new Set(selectedRealms || []);
+// One row of an access list: a checkbox (is it assigned?) and a level picker
+// (what may they do there?). `locked` shows the level as fixed read-only —
+// used when the member is read-only everywhere, which overrides the picker.
+function accessRowHtml({ inputName, value, label, checked, level, locked }) {
+  const shown = locked ? 'read' : level || 'read_write';
+  return `
+    <div class="access-row">
+      <label class="checkbox-item">
+        <input type="checkbox" name="${inputName}" value="${escapeHtml(String(value))}" ${checked ? 'checked' : ''}>
+        <span title="${escapeHtml(label)}">${escapeHtml(label)}</span>
+      </label>
+      <select class="access-level" data-stored-level="${escapeHtml(level || 'read_write')}"
+              aria-label="Access level for ${escapeHtml(label)}"
+              ${locked ? 'data-locked="true"' : ''} ${!checked || locked ? 'disabled' : ''}>
+        ${Object.entries(ACCESS_LEVEL_LABELS)
+          .map(([v, text]) => `<option value="${v}" ${shown === v ? 'selected' : ''}>${escapeHtml(text)}</option>`)
+          .join('')}
+      </select>
+    </div>`;
+}
+
+// Read an access list back as [{ id, accessLevel }] for the checked rows. A
+// locked picker reports the level stored on the assignment, so saving while
+// the member is read-only everywhere doesn't quietly rewrite it.
+function readAccessRows(root, inputName) {
+  return [...root.querySelectorAll(`input[name="${inputName}"]:checked`)].map((cb) => {
+    const select = cb.closest('.access-row').querySelector('.access-level');
+    return {
+      id: cb.value,
+      accessLevel: select.dataset.locked ? select.dataset.storedLevel : select.value,
+    };
+  });
+}
+
+// Keep each row's picker in step with its checkbox, and with the member-wide
+// "read-only everywhere" choice when the list sits in the member form.
+function syncAccessRows(root) {
+  const cap = root.querySelector('input[name="accessLevel"]:checked');
+  const lockAll = cap?.value === 'read';
+  root.querySelectorAll('.access-row').forEach((row) => {
+    const checkbox = row.querySelector('input[type="checkbox"]');
+    const select = row.querySelector('.access-level');
+    if (cap) {
+      if (lockAll && !select.dataset.locked) {
+        select.dataset.storedLevel = select.value;
+        select.dataset.locked = 'true';
+        select.value = 'read';
+      } else if (!lockAll && select.dataset.locked) {
+        delete select.dataset.locked;
+        select.value = select.dataset.storedLevel || 'read_write';
+      }
+    }
+    select.disabled = !checkbox.checked || Boolean(select.dataset.locked);
+  });
+}
+
+function clientCheckboxes(user) {
+  const levels = new Map((user?.clients || []).map((c) => [c.realmId, c.accessLevel]));
   if (connections.length === 0) {
     return '<p class="field-hint">No clients connected yet — connect one first, then assign it here.</p>';
   }
+  const locked = user?.role !== 'admin' && user?.accessLevel === 'read';
   return `
     ${checkboxToolbar()}
-    <div class="checkbox-grid">
+    <div class="access-list">
       ${connections
-        .map(
-          (c) => `
-        <label class="checkbox-item">
-          <input type="checkbox" name="realmIds" value="${escapeHtml(c.realmId)}" ${selected.has(c.realmId) ? 'checked' : ''}>
-          <span>${escapeHtml(c.clientName)}</span>
-        </label>`
+        .map((c) =>
+          accessRowHtml({
+            inputName: 'realmIds',
+            value: c.realmId,
+            label: c.clientName,
+            checked: levels.has(c.realmId),
+            level: levels.get(c.realmId),
+            locked,
+          })
         )
         .join('')}
     </div>
@@ -1331,15 +1434,15 @@ function userFormHtml(user) {
       <div class="field">
         <span class="field-label">QuickBooks access</span>
         <div class="radio-row">
-          <label><input type="radio" name="accessLevel" value="read_write" ${!user || user.accessLevel !== 'read' ? 'checked' : ''}> Read &amp; write — can create, edit, and delete transactions</label>
-          <label><input type="radio" name="accessLevel" value="read" ${user?.accessLevel === 'read' ? 'checked' : ''}> Read-only — reports and lookups; write tools are hidden from their connector</label>
+          <label><input type="radio" name="accessLevel" value="read_write" ${!user || user.accessLevel !== 'read' ? 'checked' : ''}> Set per client — choose Read &amp; write or Read-only for each client below</label>
+          <label><input type="radio" name="accessLevel" value="read" ${user?.accessLevel === 'read' ? 'checked' : ''}> Read-only everywhere — reports and lookups only, on every assigned client</label>
         </div>
         <span class="field-hint">Applies to this member's API key and MCP connector. Admins always have full access.</span>
       </div>
       <div class="field" id="client-assign-field">
         <span class="field-label">Assigned clients</span>
-        ${clientCheckboxes(user?.realmIds)}
-        <span class="field-hint">Only checked clients are visible to this member's API key. Ignored for admins.</span>
+        ${clientCheckboxes(user)}
+        <span class="field-hint">Only checked clients are visible to this member. Read-only means reports and lookups — nothing in that client's books can be created, changed, or deleted. Ignored for admins.</span>
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-ghost" data-action="close-modal">Cancel</button>
@@ -1358,7 +1461,7 @@ function readUserForm(form) {
     accessLevel: data.get('accessLevel'),
     username: data.get('username')?.trim() || null,
     password: data.get('password') || null,
-    realmIds: data.getAll('realmIds'),
+    clients: readAccessRows(form, 'realmIds').map((row) => ({ realmId: row.id, accessLevel: row.accessLevel })),
   };
 }
 
@@ -1404,8 +1507,12 @@ function showAssignmentsModal(user) {
   body.innerHTML = `
     <div class="field">
       <span class="field-label">Assigned clients</span>
-      ${clientCheckboxes(user.realmIds)}
-      <span class="field-hint">Only checked clients are visible to ${escapeHtml(user.name)}'s API key.</span>
+      ${clientCheckboxes(user)}
+      <span class="field-hint">Only checked clients are visible to ${escapeHtml(user.name)}. ${
+        user.accessLevel === 'read'
+          ? 'This member is read-only everywhere — change that under Edit to set levels per client.'
+          : 'Read-only means reports and lookups; nothing in that client\'s books can be changed.'
+      }</span>
     </div>
     <div class="modal-footer">
       <button type="button" class="btn btn-ghost" data-action="close-modal">Cancel</button>
@@ -1414,9 +1521,9 @@ function showAssignmentsModal(user) {
   `;
   body.addEventListener('submit', async (event) => {
     event.preventDefault();
-    const realmIds = [...event.target.querySelectorAll('input[name="realmIds"]:checked')].map((cb) => cb.value);
+    const clients = readAccessRows(event.target, 'realmIds').map((row) => ({ realmId: row.id, accessLevel: row.accessLevel }));
     try {
-      await api(`/api/users/${user.id}`, { method: 'PATCH', body: JSON.stringify({ realmIds }) });
+      await api(`/api/users/${user.id}`, { method: 'PATCH', body: JSON.stringify({ clients }) });
       toast('Assignments updated');
       closeModal();
       await loadUsers();
@@ -1757,6 +1864,16 @@ document.addEventListener('DOMContentLoaded', () => {
     if (authToken && me) loadData(true).catch(() => {});
   });
 
+  // Access lists: a row's level picker follows its checkbox, and every picker
+  // follows the member-wide "read-only everywhere" choice.
+  document.addEventListener('change', (event) => {
+    const modal = $('modal-body');
+    if (!modal || !modal.contains(event.target)) return;
+    if (event.target.matches('.access-row input[type="checkbox"], input[name="accessLevel"]')) {
+      syncAccessRows(modal);
+    }
+  });
+
   // Delegated actions for dynamic content
   document.addEventListener('click', (event) => {
     const target = event.target.closest('[data-action]');
@@ -1770,6 +1887,17 @@ document.addEventListener('DOMContentLoaded', () => {
       $('modal-body')
         .querySelectorAll('input[name="realmIds"], input[name="userIds"]')
         .forEach((cb) => (cb.checked = checked));
+      syncAccessRows($('modal-body'));
+    } else if (action === 'level-all') {
+      // Set the level on every checked row (locked rows keep their fixed level).
+      $('modal-body')
+        .querySelectorAll('.access-row')
+        .forEach((row) => {
+          const select = row.querySelector('.access-level');
+          if (row.querySelector('input[type="checkbox"]').checked && !select.dataset.locked) {
+            select.value = target.dataset.level;
+          }
+        });
     } else if (action === 'switch-view') switchView(nextView);
     else if (action === 'select-client') selectClient(realm);
     else if (action === 'select-user') {

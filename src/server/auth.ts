@@ -1,6 +1,8 @@
 import { timingSafeEqual } from 'node:crypto';
 import type { QBOManager } from '../index.js';
-import type { Connection } from '../db/models.js';
+import type { Connection, User } from '../db/models.js';
+import { effectiveAccessLevel } from '../users.js';
+import { ReadOnlyAccessError, runWithAccess } from '../access-context.js';
 
 /**
  * Resolved identity for a request. The master QBO_API_KEY and admin-role
@@ -15,16 +17,48 @@ export interface AuthScope {
   allRealms: boolean;
   realmIds: Set<string>;
   /**
-   * Whether the key may reach QuickBooks write tools. Read-only members get
-   * false; the master key and admin-role users are always true (an admin
-   * could grant themselves write access anyway, so restricting them would
-   * only be decorative).
+   * Whether the key may change data in at least one company — which is what
+   * decides whether the MCP write tools are listed at all. Which company a
+   * given write may touch is a separate question: see canWriteRealm.
    */
   canWrite: boolean;
+  /**
+   * Write access to every company: the master key and admin-role users (an
+   * admin could grant themselves write access anyway, so restricting them
+   * would only be decorative).
+   */
+  allWrite: boolean;
+  /** For members: the assigned companies they may change. */
+  writeRealmIds: Set<string>;
 }
 
 export function isRealmAllowed(scope: AuthScope, realmId: string): boolean {
   return scope.allRealms || scope.realmIds.has(realmId);
+}
+
+/** Whether the scope may change data in this company (not just read it). */
+export function canWriteRealm(scope: AuthScope, realmId: string): boolean {
+  if (!isRealmAllowed(scope, realmId)) return false;
+  return scope.allWrite || scope.writeRealmIds.has(realmId);
+}
+
+/** Build the scope for a signed-in user from their role and assignments. */
+export function scopeForUser(user: User): AuthScope {
+  const isAdmin = user.role === 'admin';
+  const writeRealmIds = new Set(
+    user.realmIds.filter((realmId) => effectiveAccessLevel(user, realmId) === 'read_write')
+  );
+  return {
+    kind: 'user',
+    userId: user.id,
+    userName: user.name,
+    role: user.role,
+    allRealms: isAdmin,
+    realmIds: new Set(user.realmIds),
+    canWrite: isAdmin || writeRealmIds.size > 0,
+    allWrite: isAdmin,
+    writeRealmIds,
+  };
 }
 
 function safeEqual(a: string, b: string): boolean {
@@ -73,6 +107,8 @@ export async function resolveAuth(
         allRealms: true,
         realmIds: new Set(),
         canWrite: true,
+        allWrite: true,
+        writeRealmIds: new Set(),
       };
     }
 
@@ -81,30 +117,14 @@ export async function resolveAuth(
     const oauthUserId = (await qboManager.oauth.verifyAccessToken(presented))?.userId;
     const oauthUser = oauthUserId != null ? await qboManager.users.get(oauthUserId) : null;
     if (oauthUser && oauthUser.status === 'active') {
-      return {
-        kind: 'user',
-        userId: oauthUser.id,
-        userName: oauthUser.name,
-        role: oauthUser.role,
-        allRealms: oauthUser.role === 'admin',
-        realmIds: new Set(oauthUser.realmIds),
-        canWrite: oauthUser.role === 'admin' || oauthUser.accessLevel !== 'read',
-      };
+      return scopeForUser(oauthUser);
     }
 
     // API key, then dashboard session token (issued by username/password
     // login) — both resolve to the same scope shape.
     const user = (await qboManager.users.findByApiKey(presented)) ?? (await qboManager.users.findBySessionToken(presented));
     if (user) {
-      return {
-        kind: 'user',
-        userId: user.id,
-        userName: user.name,
-        role: user.role,
-        allRealms: user.role === 'admin',
-        realmIds: new Set(user.realmIds),
-        canWrite: user.role === 'admin' || user.accessLevel !== 'read',
-      };
+      return scopeForUser(user);
     }
   }
   return null;
@@ -146,8 +166,14 @@ class RealmAccessError extends Error {
  * the scope before hitting QuickBooks. Every method on the API namespaces
  * takes realmId as its first parameter, which makes this a reliable
  * defense-in-depth check behind the name-resolution filtering.
+ *
+ * The call then runs inside an access context carrying whether the scope may
+ * WRITE to that company, which QBOClient.request enforces on every request:
+ * a read-only caller cannot get a mutating request out, whichever tool asked.
+ * `writeOnly` is for namespaces whose every method grants write capability
+ * without touching QuickBooks itself (upload tokens).
  */
-function guardNamespace<T extends object>(namespace: T, scope: AuthScope): T {
+function guardNamespace<T extends object>(namespace: T, scope: AuthScope, options: { writeOnly?: boolean } = {}): T {
   return new Proxy(namespace, {
     get(target, prop, receiver) {
       const value = Reflect.get(target, prop, receiver);
@@ -157,7 +183,13 @@ function guardNamespace<T extends object>(namespace: T, scope: AuthScope): T {
         if (typeof realmId !== 'string' || !isRealmAllowed(scope, realmId)) {
           throw new RealmAccessError();
         }
-        return (value as (...a: unknown[]) => unknown).apply(target, args);
+        const canWrite = canWriteRealm(scope, realmId);
+        if (options.writeOnly && !canWrite) {
+          throw new ReadOnlyAccessError();
+        }
+        return runWithAccess({ realmId, canWrite, who: scope.userName }, () =>
+          (value as (...a: unknown[]) => unknown).apply(target, args)
+        );
       };
     },
   });
@@ -188,6 +220,6 @@ export function createScopedManager(qboManager: QBOManager, scope: AuthScope): S
     lists: guardNamespace(qboManager.lists, scope),
     attachments: guardNamespace(qboManager.attachments, scope),
     batch: guardNamespace(qboManager.batch, scope),
-    uploadTokens: guardNamespace(qboManager.uploadTokens, scope),
+    uploadTokens: guardNamespace(qboManager.uploadTokens, scope, { writeOnly: true }),
   };
 }

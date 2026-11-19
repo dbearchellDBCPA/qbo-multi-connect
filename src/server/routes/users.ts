@@ -1,9 +1,9 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { QBOManager } from '../../index.js';
-import type { UserAccessLevel, UserRole, UserStatus } from '../../db/models.js';
+import type { ClientAssignment, UserAccessLevel, UserRole, UserStatus } from '../../db/models.js';
 import { authenticateRequest, requireAdmin } from '../middleware.js';
-import { isRealmAllowed } from '../auth.js';
-import { MIN_PASSWORD_LENGTH, isValidUsername, normalizeUsername } from '../../users.js';
+import { isRealmAllowed, canWriteRealm } from '../auth.js';
+import { MIN_PASSWORD_LENGTH, effectiveAccessLevel, isValidUsername, normalizeUsername } from '../../users.js';
 
 const VALID_ROLES: UserRole[] = ['admin', 'member'];
 const VALID_STATUSES: UserStatus[] = ['active', 'disabled'];
@@ -17,7 +17,10 @@ interface UserBody {
   username?: string | null;
   password?: string | null;
   status?: UserStatus;
+  /** Assign these companies; ones already assigned keep their access level. */
   realmIds?: string[];
+  /** Assign these companies with an explicit access level each. Wins over realmIds. */
+  clients?: Array<{ realmId?: unknown; accessLevel?: unknown }>;
 }
 
 export async function usersRoutes(
@@ -34,11 +37,24 @@ export async function usersRoutes(
   function withClientNames(user: Awaited<ReturnType<QBOManager['users']['list']>>[number], names: Map<string, string>) {
     return {
       ...user,
-      clients: user.realmIds.map((realmId) => ({
+      // accessLevel is the level set on the assignment; effectiveAccessLevel
+      // is what applies once the member-wide read-only ceiling is counted.
+      clients: user.assignments.map(({ realmId, accessLevel }) => ({
         realmId,
         clientName: names.get(realmId) ?? realmId,
+        accessLevel,
+        effectiveAccessLevel: effectiveAccessLevel(user, realmId) ?? accessLevel,
       })),
     };
+  }
+
+  /** The assignments a validated body asks for, or undefined when it names none. */
+  function assignmentsFromBody(body: UserBody): ClientAssignment[] | undefined {
+    if (body.clients === undefined) return undefined;
+    return body.clients.map((c) => ({
+      realmId: c.realmId as string,
+      accessLevel: (c.accessLevel ?? 'read_write') as UserAccessLevel,
+    }));
   }
 
   async function validateBody(body: UserBody, reply: FastifyReply): Promise<boolean> {
@@ -67,8 +83,34 @@ export async function usersRoutes(
         await reply.code(400).send({ error: 'Bad Request', message: 'realmIds must be an array of realm ID strings' });
         return false;
       }
+    }
+    if (body.clients !== undefined) {
+      const wellFormed =
+        Array.isArray(body.clients) &&
+        body.clients.every(
+          (c) =>
+            c != null &&
+            typeof c === 'object' &&
+            typeof c.realmId === 'string' &&
+            (c.accessLevel === undefined || VALID_ACCESS_LEVELS.includes(c.accessLevel as UserAccessLevel))
+        );
+      if (!wellFormed) {
+        await reply.code(400).send({
+          error: 'Bad Request',
+          message: `clients must be an array of { realmId, accessLevel } where accessLevel is one of: ${VALID_ACCESS_LEVELS.join(', ')}`,
+        });
+        return false;
+      }
+      const ids = body.clients.map((c) => c.realmId as string);
+      if (new Set(ids).size !== ids.length) {
+        await reply.code(400).send({ error: 'Bad Request', message: 'clients lists the same realmId more than once' });
+        return false;
+      }
+    }
+    const named = [...(body.realmIds ?? []), ...(body.clients ?? []).map((c) => c.realmId as string)];
+    if (named.length > 0) {
       const known = new Set((await qboManager.listConnections()).map((c) => c.realmId));
-      const unknown = body.realmIds.filter((r) => !known.has(r));
+      const unknown = [...new Set(named.filter((r) => !known.has(r)))];
       if (unknown.length > 0) {
         await reply.code(400).send({ error: 'Bad Request', message: `Unknown realm IDs: ${unknown.join(', ')}` });
         return false;
@@ -84,7 +126,11 @@ export async function usersRoutes(
 
     const visibleClients = (await qboManager.listConnections())
       .filter((c) => isRealmAllowed(scope, c.realmId))
-      .map((c) => ({ realmId: c.realmId, clientName: c.clientName }));
+      .map((c) => ({
+        realmId: c.realmId,
+        clientName: c.clientName,
+        canWrite: canWriteRealm(scope, c.realmId),
+      }));
 
     const self = scope.userId != null ? await qboManager.users.get(scope.userId) : null;
 
@@ -133,6 +179,7 @@ export async function usersRoutes(
         username: body.username ?? null,
         password: body.password ?? null,
         realmIds: body.realmIds ?? [],
+        assignments: assignmentsFromBody(body),
       });
       await reply.code(201).send({ user: withClientNames(user, await realmNameMap()), apiKey });
     } catch (error) {
@@ -188,9 +235,12 @@ export async function usersRoutes(
       return;
     }
 
-    const finalUser = body.realmIds !== undefined
-      ? (await qboManager.users.setClients(id, body.realmIds))!
-      : updated;
+    const assignments = assignmentsFromBody(body);
+    const finalUser = assignments !== undefined
+      ? (await qboManager.users.setAssignments(id, assignments))!
+      : body.realmIds !== undefined
+        ? (await qboManager.users.setClients(id, body.realmIds))!
+        : updated;
 
     await reply.send({ user: withClientNames(finalUser, await realmNameMap()) });
   });

@@ -442,7 +442,7 @@ describe('HTTP routes', () => {
     const memberMe = (await app.inject({ method: 'GET', url: '/api/me', headers: asMember() })).json();
     expect(memberMe.kind).toBe('user');
     expect(memberMe.name).toBe('Jane');
-    expect(memberMe.clients).toEqual([{ realmId: 'realm-1', clientName: 'Acme Corp' }]);
+    expect(memberMe.clients).toEqual([{ realmId: 'realm-1', clientName: 'Acme Corp', canWrite: true }]);
   });
 
   it('hides unassigned companies from member data routes', async () => {
@@ -578,7 +578,9 @@ describe('HTTP routes', () => {
     expect(res.statusCode).toBe(201);
     const { user, apiKey } = res.json();
     expect(apiKey).toMatch(/^qbo_/);
-    expect(user.clients).toEqual([{ realmId: 'realm-2', clientName: 'Beta LLC' }]);
+    expect(user.clients).toEqual([
+      { realmId: 'realm-2', clientName: 'Beta LLC', accessLevel: 'read_write', effectiveAccessLevel: 'read_write' },
+    ]);
 
     const list = (await app.inject({ method: 'GET', url: '/api/users', headers: asMaster })).json();
     expect(list.map((u: any) => u.name).sort()).toEqual(['Bob', 'Jane']);
@@ -918,7 +920,7 @@ describe('username/password sign-in', () => {
     expect(meData.name).toBe('Jane');
     expect(meData.username).toBe('jane.smith');
     expect(meData.hasPassword).toBe(true);
-    expect(meData.clients).toEqual([{ realmId: 'realm-1', clientName: 'Acme Corp' }]);
+    expect(meData.clients).toEqual([{ realmId: 'realm-1', clientName: 'Acme Corp', canWrite: true }]);
   });
 
   it('login is case-insensitive on username and rejects bad credentials', async () => {

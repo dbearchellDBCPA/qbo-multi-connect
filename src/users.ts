@@ -1,7 +1,7 @@
 import { randomBytes, createHash, scryptSync, timingSafeEqual } from 'node:crypto';
 import { encrypt, decrypt } from './crypto/encrypt.js';
 import type { ConnectionDatabase } from './db/index.js';
-import type { NewUser, User, UserRecord, UserUpdate } from './db/models.js';
+import type { ClientAssignment, NewUser, User, UserAccessLevel, UserRecord, UserUpdate } from './db/models.js';
 
 /** Length of the plaintext prefix stored for display (e.g. "qbo_1a2b3c4d") */
 const KEY_PREFIX_LENGTH = 12;
@@ -74,7 +74,26 @@ function parseUtcDate(value: string): Date {
   return new Date(value.includes('T') ? value : `${value.replace(' ', 'T')}Z`);
 }
 
-function toUser(record: UserRecord, realmIds: string[]): User {
+/** The level new assignments get when none is given. */
+export const DEFAULT_ASSIGNMENT_LEVEL: UserAccessLevel = 'read_write';
+
+/**
+ * What a user may actually do in one company: null when it isn't assigned to
+ * them, otherwise the per-company level capped by the user-level ceiling.
+ * Admins reach every company with full access.
+ */
+export function effectiveAccessLevel(
+  user: Pick<User, 'role' | 'accessLevel' | 'assignments'>,
+  realmId: string
+): UserAccessLevel | null {
+  if (user.role === 'admin') return 'read_write';
+  const assignment = user.assignments.find((a) => a.realmId === realmId);
+  if (!assignment) return null;
+  return user.accessLevel === 'read' ? 'read' : assignment.accessLevel;
+}
+
+function toUser(record: UserRecord, assignments: ClientAssignment[]): User {
+  const realmIds = assignments.map((a) => a.realmId);
   return {
     id: record.id,
     name: record.name,
@@ -89,13 +108,15 @@ function toUser(record: UserRecord, realmIds: string[]): User {
     updatedAt: parseUtcDate(record.updated_at),
     lastUsedAt: record.last_used_at ? parseUtcDate(record.last_used_at) : null,
     realmIds,
+    assignments,
   };
 }
 
 /**
  * Team member management: each user gets their own API key (stored hashed)
- * and a list of assigned QBO companies. Admin-role users see every company;
- * member-role users see only their assignments.
+ * and a list of assigned QBO companies, each with its own access level
+ * (read-only or read & write). Admin-role users see every company with full
+ * access; member-role users see only their assignments.
  */
 export class UserService {
   constructor(
@@ -140,8 +161,11 @@ export class UserService {
       apiKeyEncrypted: encrypt(apiKey, this.encryptionKey),
       keyPrefix: apiKey.slice(0, KEY_PREFIX_LENGTH),
     });
-    if (input.realmIds?.length) {
-      await this.db.setUserRealms(id, input.realmIds);
+    const assignments =
+      input.assignments ??
+      (input.realmIds ?? []).map((realmId) => ({ realmId, accessLevel: DEFAULT_ASSIGNMENT_LEVEL }));
+    if (assignments.length) {
+      await this.db.setUserAssignments(id, assignments);
     }
     return { user: (await this.get(id))!, apiKey };
   }
@@ -149,12 +173,12 @@ export class UserService {
   async get(id: number): Promise<User | null> {
     const record = await this.db.getUserById(id);
     if (!record) return null;
-    return toUser(record, await this.db.getUserRealms(id));
+    return toUser(record, await this.db.getUserAssignments(id));
   }
 
   async list(): Promise<User[]> {
     const records = await this.db.getAllUsers();
-    return Promise.all(records.map(async (r) => toUser(r, await this.db.getUserRealms(r.id))));
+    return Promise.all(records.map(async (r) => toUser(r, await this.db.getUserAssignments(r.id))));
   }
 
   async update(id: number, fields: UserUpdate): Promise<User | null> {
@@ -177,19 +201,48 @@ export class UserService {
     return this.get(id);
   }
 
-  /** Replace the user's assigned companies with the given realm IDs. */
+  /**
+   * Replace the user's assigned companies with the given realm IDs. A company
+   * that stays assigned keeps its access level; a newly assigned one gets the
+   * default (read & write). Use setAssignments to choose levels.
+   */
   async setClients(id: number, realmIds: string[]): Promise<User | null> {
     if (!(await this.db.getUserById(id))) return null;
-    await this.db.setUserRealms(id, realmIds);
+    const current = new Map((await this.db.getUserAssignments(id)).map((a) => [a.realmId, a.accessLevel]));
+    await this.db.setUserAssignments(
+      id,
+      realmIds.map((realmId) => ({ realmId, accessLevel: current.get(realmId) ?? DEFAULT_ASSIGNMENT_LEVEL }))
+    );
+    return this.get(id);
+  }
+
+  /** Replace the user's assigned companies, each with an explicit access level. */
+  async setAssignments(id: number, assignments: ClientAssignment[]): Promise<User | null> {
+    if (!(await this.db.getUserById(id))) return null;
+    await this.db.setUserAssignments(id, assignments);
     return this.get(id);
   }
 
   /**
    * Replace the full set of users assigned to a company (edit access from
-   * the client side). Members not in the list lose access to that realm.
+   * the client side). Members not in the list lose access to that realm; a
+   * member who stays keeps their level, a newly added one gets the default
+   * (read & write). Use setClientAssignments to choose levels.
    */
   async setClientUsers(realmId: string, userIds: number[]): Promise<void> {
-    await this.db.setRealmUsers(realmId, userIds);
+    const current = new Map((await this.db.getRealmAssignments(realmId)).map((a) => [a.userId, a.accessLevel]));
+    await this.db.setRealmAssignments(
+      realmId,
+      userIds.map((userId) => ({ userId, accessLevel: current.get(userId) ?? DEFAULT_ASSIGNMENT_LEVEL }))
+    );
+  }
+
+  /** Replace the users assigned to a company, each with an explicit access level. */
+  async setClientAssignments(
+    realmId: string,
+    assignments: Array<{ userId: number; accessLevel: UserAccessLevel }>
+  ): Promise<void> {
+    await this.db.setRealmAssignments(realmId, assignments);
   }
 
   /**
@@ -253,7 +306,7 @@ export class UserService {
       return null;
     }
     if (!verifyPassword(password, record.password_hash)) return null;
-    return toUser(record, await this.db.getUserRealms(record.id));
+    return toUser(record, await this.db.getUserAssignments(record.id));
   }
 
   /** Issue a dashboard session for a user. The token is stored hashed. */
@@ -275,7 +328,7 @@ export class UserService {
     const record = await this.db.getSessionUser(tokenHash);
     if (!record || record.status !== 'active') return null;
     await this.db.touchSession(tokenHash);
-    return toUser(record, await this.db.getUserRealms(record.id));
+    return toUser(record, await this.db.getUserAssignments(record.id));
   }
 
   /** End one session (sign out). No-op for non-session tokens. */
@@ -316,7 +369,7 @@ export class UserService {
     if (Date.now() - lastUsed > LAST_USED_THROTTLE_MS) {
       await this.db.touchUserLastUsed(record.id);
     }
-    return toUser(record, await this.db.getUserRealms(record.id));
+    return toUser(record, await this.db.getUserAssignments(record.id));
   }
 
   /** Remove a disconnected company from every user's assignments. */

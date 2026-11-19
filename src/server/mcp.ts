@@ -37,7 +37,7 @@ import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import type { QBOManager } from '../index.js';
-import { resolveAuth, createScopedManager, type AuthScope, type ScopedQBOManager } from './auth.js';
+import { resolveAuth, createScopedManager, canWriteRealm, type AuthScope, type ScopedQBOManager } from './auth.js';
 import { publicBaseUrl, resolvePublicUrl } from './public-url.js';
 import { registerImportTools } from './import-tools.js';
 import type { BatchRunnerOptions } from './qbo-batch.js';
@@ -284,9 +284,13 @@ function formatCashFlow(reportData: any, clientName: string, startDate: string, 
 async function findRealmId(qboManager: ScopedQBOManager, clientName: string): Promise<string | null> {
   const connections = await qboManager.listConnections();
   const normalized = clientName.toLowerCase().trim();
+  // An exact name always wins. Without this, "Acme" and "Acme Holdings" both
+  // loosely match either name, and whichever was connected first would be
+  // picked — the wrong books, and possibly a different access level.
+  const exact = connections.find((c) => c.clientName.toLowerCase().trim() === normalized);
+  if (exact) return exact.realmId;
   const match = connections.find(
     (c) =>
-      c.clientName.toLowerCase().trim() === normalized ||
       c.clientName.toLowerCase().trim().includes(normalized) ||
       normalized.includes(c.clientName.toLowerCase().trim())
   );
@@ -471,13 +475,43 @@ export async function registerMcpRoutes(
     // the default-period report (2026-09-05): the date never reached the
     // handler and nothing said so. With .strict() an unrecognized argument
     // fails the call and names the key, so the caller can fix it.
+    // Access is set per company, so a key that may write to one company can
+    // be read-only on another. Every write tool names its company in
+    // client_name; this resolves it the same way the tool will and refuses
+    // the call before the tool runs when that company is read-only for the
+    // caller. (QBOClient.request enforces the same rule again underneath —
+    // see access-context.ts — so this is the friendly message, not the lock.)
+    const writeDenial = async (toolName: string, args: any) => {
+      if (scope.allWrite) return null;
+      const clientName = args?.client_name;
+      if (typeof clientName !== 'string' || !clientName.trim()) {
+        // No write tool is company-less today; if one is ever added, it must
+        // not become a way around per-company access.
+        return {
+          isError: true,
+          content: [{ type: 'text' as const, text: `${toolName} changes QuickBooks data and needs a client_name so your access to that company can be checked.` }],
+        };
+      }
+      const realmId = await findRealmId(qboManager, clientName);
+      if (!realmId || canWriteRealm(scope, realmId)) return null; // unknown client → the tool reports it
+      return {
+        isError: true,
+        content: [{
+          type: 'text' as const,
+          text: `Read-only access: your login can view "${clientName}" but not change it, so ${toolName} was not run and nothing was changed. Ask an administrator for read & write access to this company if you need it.`,
+        }],
+      };
+    };
+
     const registerToolRaw = server.tool.bind(server);
     (server as any).tool = (name: string, ...rest: any[]) => {
-      // Read-only keys never see write tools at all — skipping registration
-      // beats erroring at call time, since the model can't attempt what was
-      // never listed. Reads are get_*/list_*/query_transactions; everything
-      // else (create/update/delete/apply/convert/close/match/swap/bulk) writes.
-      if (!scope.canWrite && !isReadOnlyTool(name)) return undefined;
+      // Keys that can't write anywhere never see write tools at all —
+      // skipping registration beats erroring at call time, since the model
+      // can't attempt what was never listed. Reads are
+      // get_*/list_*/query_transactions; everything else
+      // (create/update/delete/apply/convert/close/match/swap/bulk) writes.
+      const isWriteTool = !isReadOnlyTool(name);
+      if (isWriteTool && !scope.canWrite) return undefined;
       if (rest.length > 0 && typeof rest[rest.length - 1] === 'function') {
         const rawCb = rest[rest.length - 1];
         // Blanket credential redaction: no tool may echo a URL whose query
@@ -485,6 +519,10 @@ export async function registerMcpRoutes(
         // carries intuit_apikey + user-auth-info). Only a result the tool
         // explicitly marked via allowSensitiveUrls() passes through as-is.
         const cb = async (...cbArgs: any[]) => {
+          if (isWriteTool) {
+            const denied = await writeDenial(name, cbArgs[0]);
+            if (denied) return denied;
+          }
           const result = await rawCb(...cbArgs);
           return isSensitiveUrlAllowed(result) ? result : redactToolResult(result);
         };
@@ -524,9 +562,11 @@ export async function registerMcpRoutes(
     // ── list_clients ──────────────────────────────────────────────────────────
     server.tool('list_clients', 'List all connected QuickBooks Online companies', {}, async () => {
       const connections = await qboManager.listConnections();
+      // Members can hold different access per company — say which ones are
+      // read-only so the model doesn't plan a write it isn't allowed to make.
       const list = connections
         .filter((c) => c.status === 'active')
-        .map((c) => `• ${c.clientName} (realmId: ${c.realmId})`)
+        .map((c) => `• ${c.clientName} (realmId: ${c.realmId})${canWriteRealm(scope, c.realmId) ? '' : ' — read-only'}`)
         .join('\n');
 
       return {

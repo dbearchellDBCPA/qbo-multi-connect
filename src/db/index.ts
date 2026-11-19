@@ -59,6 +59,21 @@ export class ConnectionDatabase {
     if (!has('username')) this.db.exec('ALTER TABLE users ADD COLUMN username TEXT');
     if (!has('password_hash')) this.db.exec('ALTER TABLE users ADD COLUMN password_hash TEXT');
     if (!has('api_key_encrypted')) this.db.exec('ALTER TABLE users ADD COLUMN api_key_encrypted TEXT');
+
+    // Per-company access level. Existing assignments become 'read_write' —
+    // members who were read-only stay read-only through users.access_level,
+    // which still caps every company, so nobody gains access in the upgrade.
+    const hasAssignments = this.db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'user_clients'")
+      .get();
+    if (hasAssignments) {
+      const assignmentColumns = this.db.prepare('PRAGMA table_info(user_clients)').all() as Array<{ name: string }>;
+      if (!assignmentColumns.some((c) => c.name === 'access_level')) {
+        this.db.exec(
+          "ALTER TABLE user_clients ADD COLUMN access_level TEXT NOT NULL DEFAULT 'read_write' CHECK(access_level IN ('read', 'read_write'))"
+        );
+      }
+    }
   }
 
   /**
@@ -354,38 +369,67 @@ export class ConnectionDatabase {
   }
 
   /**
-   * Replace a user's client assignments
+   * Replace a user's client assignments, each with its own access level
    */
-  async setUserRealms(userId: number, realmIds: string[]): Promise<void> {
-    const replaceAll = this.db.transaction((ids: string[]) => {
+  async setUserAssignments(
+    userId: number,
+    assignments: Array<{ realmId: string; accessLevel: UserAccessLevel }>
+  ): Promise<void> {
+    const replaceAll = this.db.transaction((rows: Array<{ realmId: string; accessLevel: UserAccessLevel }>) => {
       this.db.prepare('DELETE FROM user_clients WHERE user_id = ?').run(userId);
-      const insert = this.db.prepare('INSERT OR IGNORE INTO user_clients (user_id, realm_id) VALUES (?, ?)');
-      for (const realmId of ids) insert.run(userId, realmId);
+      const insert = this.db.prepare(
+        'INSERT OR REPLACE INTO user_clients (user_id, realm_id, access_level) VALUES (?, ?, ?)'
+      );
+      for (const row of rows) insert.run(userId, row.realmId, row.accessLevel);
     });
-    replaceAll(realmIds);
+    replaceAll(assignments);
   }
 
   /**
    * Replace the full set of users assigned to a realm (edit access from the
-   * client side). Members not in the list lose access to this realm; admins
-   * are unaffected since their access is role-based, not row-based.
+   * client side), each with its own access level. Members not in the list
+   * lose access to this realm; admins are unaffected since their access is
+   * role-based, not row-based.
    */
-  async setRealmUsers(realmId: string, userIds: number[]): Promise<void> {
-    const replaceAll = this.db.transaction((ids: number[]) => {
+  async setRealmAssignments(
+    realmId: string,
+    assignments: Array<{ userId: number; accessLevel: UserAccessLevel }>
+  ): Promise<void> {
+    const replaceAll = this.db.transaction((rows: Array<{ userId: number; accessLevel: UserAccessLevel }>) => {
       this.db.prepare('DELETE FROM user_clients WHERE realm_id = ?').run(realmId);
-      const insert = this.db.prepare('INSERT OR IGNORE INTO user_clients (user_id, realm_id) VALUES (?, ?)');
-      for (const userId of ids) insert.run(userId, realmId);
+      const insert = this.db.prepare(
+        'INSERT OR REPLACE INTO user_clients (user_id, realm_id, access_level) VALUES (?, ?, ?)'
+      );
+      for (const row of rows) insert.run(row.userId, realmId, row.accessLevel);
     });
-    replaceAll(userIds);
+    replaceAll(assignments);
+  }
+
+  /**
+   * Get a user's assignments (realm + access level), ordered by realm
+   */
+  async getUserAssignments(userId: number): Promise<Array<{ realmId: string; accessLevel: UserAccessLevel }>> {
+    const rows = this.db
+      .prepare('SELECT realm_id, access_level FROM user_clients WHERE user_id = ? ORDER BY realm_id')
+      .all(userId) as Array<{ realm_id: string; access_level: UserAccessLevel }>;
+    return rows.map((r) => ({ realmId: r.realm_id, accessLevel: r.access_level }));
+  }
+
+  /**
+   * Get the assignments for one realm (user + access level)
+   */
+  async getRealmAssignments(realmId: string): Promise<Array<{ userId: number; accessLevel: UserAccessLevel }>> {
+    const rows = this.db
+      .prepare('SELECT user_id, access_level FROM user_clients WHERE realm_id = ? ORDER BY user_id')
+      .all(realmId) as Array<{ user_id: number; access_level: UserAccessLevel }>;
+    return rows.map((r) => ({ userId: r.user_id, accessLevel: r.access_level }));
   }
 
   /**
    * Get realm IDs assigned to a user
    */
   async getUserRealms(userId: number): Promise<string[]> {
-    const rows = this.db.prepare('SELECT realm_id FROM user_clients WHERE user_id = ? ORDER BY realm_id')
-      .all(userId) as Array<{ realm_id: string }>;
-    return rows.map((r) => r.realm_id);
+    return (await this.getUserAssignments(userId)).map((a) => a.realmId);
   }
 
   /**

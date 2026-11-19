@@ -1,8 +1,9 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply } from 'fastify';
 import fastifyMultipart from '@fastify/multipart';
 import type { QBOManager } from '../../index.js';
 import { authenticateRequest } from '../middleware.js';
-import { isRealmAllowed, type AuthScope } from '../auth.js';
+import { isRealmAllowed, canWriteRealm, createScopedManager, type AuthScope } from '../auth.js';
+import { runWithAccess } from '../../access-context.js';
 import { contentTypeForFile, supportedExtensions, MAX_ATTACHMENT_BYTES } from '../../api/attachments.js';
 import { looksLikeUploadToken } from '../../upload-tokens.js';
 
@@ -21,6 +22,19 @@ export async function companyRoutes(
   // which realm IDs exist.
   async function getScopedConnection(scope: AuthScope, realmId: string) {
     return isRealmAllowed(scope, realmId) ? qboManager.getConnection(realmId) : null;
+  }
+
+  // Every route that changes QuickBooks data calls this after the connection
+  // lookup (so an unassigned company still 404s rather than revealing that it
+  // exists). Access is per company: a key may write to one and only read
+  // another.
+  async function requireWrite(scope: AuthScope, realmId: string, reply: FastifyReply): Promise<boolean> {
+    if (canWriteRealm(scope, realmId)) return true;
+    await reply.code(403).send({
+      error: 'Forbidden',
+      message: 'This API key is read-only for this company: it can view the books but not change them',
+    });
+    return false;
   }
 
   // Upload a file as a QBO attachment (Attachable), optionally linked to an
@@ -49,10 +63,6 @@ export async function companyRoutes(
       } else {
         const scope = await authenticateRequest(request, reply, qboManager, masterApiKey);
         if (!scope) return;
-        if (!scope.canWrite) {
-          await reply.code(403).send({ error: 'Forbidden', message: 'This API key is read-only' });
-          return;
-        }
         const connection = await getScopedConnection(scope, realmId);
         if (!connection) {
           await reply.code(404).send({
@@ -61,6 +71,7 @@ export async function companyRoutes(
           });
           return;
         }
+        if (!(await requireWrite(scope, realmId, reply))) return;
       }
 
       try {
@@ -160,7 +171,7 @@ export async function companyRoutes(
         return;
       }
 
-      const companyInfo = await qboManager.company.getInfo(realmId);
+      const companyInfo = await createScopedManager(qboManager, scope).company.getInfo(realmId);
       await reply.send(companyInfo);
     } catch (error) {
       await reply.code((error as any)?.statusCode || 500).send({
@@ -199,7 +210,7 @@ export async function companyRoutes(
         return;
       }
 
-      const report = await qboManager.reports.profitAndLoss(realmId, { startDate, endDate });
+      const report = await createScopedManager(qboManager, scope).reports.profitAndLoss(realmId, { startDate, endDate });
       await reply.send(report);
     } catch (error) {
       await reply.code((error as any)?.statusCode || 500).send({
@@ -238,7 +249,7 @@ export async function companyRoutes(
         return;
       }
 
-      const report = await qboManager.reports.balanceSheet(realmId, { asOfDate });
+      const report = await createScopedManager(qboManager, scope).reports.balanceSheet(realmId, { asOfDate });
       await reply.send(report);
     } catch (error) {
       await reply.code((error as any)?.statusCode || 500).send({
@@ -267,7 +278,7 @@ export async function companyRoutes(
         return;
       }
 
-      const report = await qboManager.reports.trialBalance(realmId);
+      const report = await createScopedManager(qboManager, scope).reports.trialBalance(realmId);
       await reply.send(report);
     } catch (error) {
       await reply.code((error as any)?.statusCode || 500).send({
@@ -296,7 +307,7 @@ export async function companyRoutes(
         return;
       }
 
-      const accounts = await qboManager.accounts.getAll(realmId);
+      const accounts = await createScopedManager(qboManager, scope).accounts.getAll(realmId);
       await reply.send(accounts);
     } catch (error) {
       await reply.code((error as any)?.statusCode || 500).send({
@@ -336,7 +347,7 @@ export async function companyRoutes(
       }
 
       // Execute raw query using the QBOClient
-      const result = await qboManager.transactions.rawQuery(realmId, q);
+      const result = await createScopedManager(qboManager, scope).transactions.rawQuery(realmId, q);
       await reply.send(result);
     } catch (error) {
       await reply.code((error as any)?.statusCode || 500).send({
@@ -367,7 +378,9 @@ export async function companyRoutes(
         return;
       }
 
-      const result = await qboManager.journalEntries.create(realmId, journalEntry);
+      if (!(await requireWrite(scope, realmId, reply))) return;
+
+      const result = await createScopedManager(qboManager, scope).journalEntries.create(realmId, journalEntry);
       await reply.code(201).send(result);
     } catch (error: any) {
       console.error('JE create error:', error?.message, error?.statusCode, error?.response);
@@ -409,7 +422,9 @@ export async function companyRoutes(
         return;
       }
 
-      const result = await qboManager.journalEntries.update(realmId, journalEntry);
+      if (!(await requireWrite(scope, realmId, reply))) return;
+
+      const result = await createScopedManager(qboManager, scope).journalEntries.update(realmId, journalEntry);
       await reply.send(result);
     } catch (error) {
       await reply.code((error as any)?.statusCode || 500).send({
@@ -448,7 +463,12 @@ export async function companyRoutes(
         return;
       }
 
-      const result = await qboManager.client.post(realmId, 'bill', bill);
+      if (!(await requireWrite(scope, realmId, reply))) return;
+
+      const result = await runWithAccess(
+        { realmId, canWrite: canWriteRealm(scope, realmId), who: scope.userName },
+        () => qboManager.client.post(realmId, 'bill', bill)
+      );
       await reply.send(result);
     } catch (error) {
       await reply.code((error as any)?.statusCode || 500).send({
@@ -479,7 +499,7 @@ export async function companyRoutes(
         return;
       }
 
-      const report = await qboManager.reports.arAging(realmId, { asOfDate });
+      const report = await createScopedManager(qboManager, scope).reports.arAging(realmId, { asOfDate });
       await reply.send(report);
     } catch (error) {
       await reply.code((error as any)?.statusCode || 500).send({
@@ -510,7 +530,7 @@ export async function companyRoutes(
         return;
       }
 
-      const report = await qboManager.reports.apAging(realmId, { asOfDate });
+      const report = await createScopedManager(qboManager, scope).reports.apAging(realmId, { asOfDate });
       await reply.send(report);
     } catch (error) {
       await reply.code((error as any)?.statusCode || 500).send({
@@ -541,7 +561,7 @@ export async function companyRoutes(
         return;
       }
 
-      const report = await qboManager.reports.generalLedger(realmId, { startDate, endDate });
+      const report = await createScopedManager(qboManager, scope).reports.generalLedger(realmId, { startDate, endDate });
       await reply.send(report);
     } catch (error) {
       await reply.code((error as any)?.statusCode || 500).send({
@@ -573,7 +593,7 @@ export async function companyRoutes(
       }
 
       const options = maxResults ? { maxResults: Number(maxResults) } : {};
-      const result = await qboManager.transactions.queryInvoices(realmId, query, options);
+      const result = await createScopedManager(qboManager, scope).transactions.queryInvoices(realmId, query, options);
       await reply.send(result);
     } catch (error) {
       await reply.code((error as any)?.statusCode || 500).send({
@@ -605,7 +625,7 @@ export async function companyRoutes(
       }
 
       const options = maxResults ? { maxResults: Number(maxResults) } : {};
-      const result = await qboManager.transactions.queryBills(realmId, query, options);
+      const result = await createScopedManager(qboManager, scope).transactions.queryBills(realmId, query, options);
       await reply.send(result);
     } catch (error) {
       await reply.code((error as any)?.statusCode || 500).send({
@@ -637,7 +657,7 @@ export async function companyRoutes(
       }
 
       const options = maxResults ? { maxResults: Number(maxResults) } : {};
-      const result = await qboManager.transactions.queryVendors(realmId, query, options);
+      const result = await createScopedManager(qboManager, scope).transactions.queryVendors(realmId, query, options);
       await reply.send(result);
     } catch (error) {
       await reply.code((error as any)?.statusCode || 500).send({
@@ -669,7 +689,7 @@ export async function companyRoutes(
       }
 
       const options = maxResults ? { maxResults: Number(maxResults) } : {};
-      const result = await qboManager.transactions.queryCustomers(realmId, query, options);
+      const result = await createScopedManager(qboManager, scope).transactions.queryCustomers(realmId, query, options);
       await reply.send(result);
     } catch (error) {
       await reply.code((error as any)?.statusCode || 500).send({

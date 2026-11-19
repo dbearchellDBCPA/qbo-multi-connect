@@ -35,9 +35,9 @@ CREATE TABLE IF NOT EXISTS users (
   name TEXT NOT NULL,
   email TEXT,
   role TEXT NOT NULL DEFAULT 'member' CHECK(role IN ('admin', 'member')),
-  -- What the key may do in QuickBooks: 'read' hides every write tool from
-  -- the MCP server; 'read_write' is full access. Admin-role users always
-  -- act as read_write regardless of this value.
+  -- Ceiling on what the key may do in QuickBooks: 'read' makes the member
+  -- read-only on every company; 'read_write' defers to the per-company level
+  -- in user_clients. Admin-role users always act as read_write regardless.
   access_level TEXT NOT NULL DEFAULT 'read_write' CHECK(access_level IN ('read', 'read_write')),
   username TEXT,
   password_hash TEXT,
@@ -78,10 +78,14 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
 
--- Which QBO companies a member's key may access. Admins bypass this table.
+-- Which QBO companies a member's key may access, and what it may do in each:
+-- 'read' is reports and lookups only, 'read_write' is full access. A member
+-- whose users.access_level is 'read' is read-only everywhere regardless of
+-- the value here. Admins bypass this table.
 CREATE TABLE IF NOT EXISTS user_clients (
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   realm_id TEXT NOT NULL,
+  access_level TEXT NOT NULL DEFAULT 'read_write' CHECK(access_level IN ('read', 'read_write')),
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (user_id, realm_id)
 );
