@@ -227,6 +227,8 @@ function applyIdentity() {
     if (!wordmark.dataset.appName) wordmark.dataset.appName = wordmark.textContent;
     wordmark.textContent = isClientAccount() && me.firmName ? me.firmName : wordmark.dataset.appName;
   }
+  if (!document.documentElement.dataset.appTitle) document.documentElement.dataset.appTitle = document.title;
+  document.title = isClientAccount() && me.firmName ? me.firmName : document.documentElement.dataset.appTitle;
   // If the caller just lost admin (demoted mid-session), leave the Team view.
   if (!isAdmin && view === 'team') view = 'clients';
 }
@@ -422,6 +424,7 @@ function signOut(expired = false) {
   document.body.classList.remove('client-account');
   const wordmark = document.querySelector('.rail-wordmark');
   if (wordmark?.dataset.appName) wordmark.textContent = wordmark.dataset.appName;
+  if (document.documentElement.dataset.appTitle) document.title = document.documentElement.dataset.appTitle;
   $('whoami').textContent = '';
   $('search-input').value = '';
   closeModal();

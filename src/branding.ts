@@ -31,7 +31,8 @@ export interface SetupVideo {
 export function cleanVideoUrl(raw: unknown): string {
   if (typeof raw !== 'string') throw new Error('Video link must be text');
   const value = raw.trim();
-  if (value.length > MAX_VIDEO_URL_LENGTH) throw new Error(`Video link must be at most ${MAX_VIDEO_URL_LENGTH} characters`);
+  const tooLong = new Error(`Video link must be at most ${MAX_VIDEO_URL_LENGTH} characters`);
+  if (value.length > MAX_VIDEO_URL_LENGTH) throw tooLong;
   let url: URL;
   try {
     url = new URL(value);
@@ -40,6 +41,8 @@ export function cleanVideoUrl(raw: unknown): string {
   }
   if (url.protocol !== 'https:') throw new Error('Video link must start with https://');
   if (url.username || url.password) throw new Error('Video link cannot contain a username or password');
+  // The normalised link is what is stored and sent, so it is what must fit.
+  if (url.href.length > MAX_VIDEO_URL_LENGTH) throw tooLong;
   return url.href;
 }
 
@@ -93,14 +96,23 @@ export function cleanFirmName(raw: unknown): string {
 }
 
 /**
- * The From value for mail sent in the firm's name. An address that already
- * carries a display name (`Your Firm <a@b.com>`) is left exactly as the admin
- * wrote it; a bare address gets the firm's name in front, so the client's
- * inbox shows who the message is from rather than just an address.
+ * The From value for mail sent in the firm's name, so the client's inbox
+ * shows who the message is from.
+ *
+ * - A bare address gets the firm's name in front.
+ * - A sender that already carries a display name (`Your Firm <a@b.com>`) is
+ *   left as the admin wrote it — unless the firm's name was set in the
+ *   dashboard. That is the later, deliberate choice of "what clients see",
+ *   so it replaces the display name and the inbox agrees with the subject.
  */
 export function senderWithFirmName(from: string, firm: FirmBrand): string {
-  const address = from.trim();
-  if (!firm.configured || /<[^<>]+>\s*$/.test(address)) return address;
+  const sender = from.trim();
+  if (!firm.configured) return sender;
+  const named = sender.match(/^(.*)<([^<>]+)>\s*$/);
+  const address = named ? named[2].trim() : sender;
+  const ownName = named ? named[1].trim().replace(/^"+|"+$/g, '').trim() : '';
+  // Already says the right thing, or was written alongside the name itself.
+  if (ownName && (ownName === firm.name || firm.source !== 'dashboard')) return sender;
   return `"${firm.name.replace(/["\\]/g, '')}" <${address}>`;
 }
 

@@ -250,9 +250,18 @@ describe('firm name', () => {
     expect(cleanFirmName('Firm\r\nBcc: x@example.com')).toBe('Firm Bcc: x@example.com');
   });
 
-  it('is added to a bare sender address, and never overrides a sender that already has a name', () => {
+  it('is added to a bare sender address; a name set in the dashboard also replaces the sender\'s own', () => {
+    const fromEnv: FirmBrand = { ...FIRM, source: 'environment' };
     expect(senderWithFirmName('hello@example-cpa.com', FIRM)).toBe('"Example CPA" <hello@example-cpa.com>');
-    expect(senderWithFirmName('Someone Else <hello@example-cpa.com>', FIRM)).toBe('Someone Else <hello@example-cpa.com>');
+    expect(senderWithFirmName('hello@example-cpa.com', fromEnv)).toBe('"Example CPA" <hello@example-cpa.com>');
+    // Both written in the server settings: the sender stays as written.
+    expect(senderWithFirmName('Someone Else <hello@example-cpa.com>', fromEnv)).toBe('Someone Else <hello@example-cpa.com>');
+    // Chosen in the dashboard: the inbox shows the same name as the subject.
+    expect(senderWithFirmName('Someone Else <hello@example-cpa.com>', FIRM)).toBe('"Example CPA" <hello@example-cpa.com>');
+    expect(senderWithFirmName('"Quoted, Name" <hello@example-cpa.com>', FIRM)).toBe('"Example CPA" <hello@example-cpa.com>');
+    expect(senderWithFirmName('Example CPA <hello@example-cpa.com>', FIRM)).toBe('Example CPA <hello@example-cpa.com>'); // already right
+    expect(senderWithFirmName('<hello@example-cpa.com>', fromEnv)).toBe('"Example CPA" <hello@example-cpa.com>');
+    expect(senderWithFirmName('Someone Else <hello@example-cpa.com>', NO_FIRM)).toBe('Someone Else <hello@example-cpa.com>');
     expect(senderWithFirmName('hello@example-cpa.com', NO_FIRM)).toBe('hello@example-cpa.com');
     const quoted: FirmBrand = { ...FIRM, name: 'The "Best" CPA \\ Co' };
     expect(senderWithFirmName('a@b.com', quoted)).toBe('"The Best CPA  Co" <a@b.com>');
@@ -262,6 +271,10 @@ describe('firm name', () => {
     expect(parseInvitesConfig({ QBO_FIRM_NAME: 'Env Firm', QBO_INVITE_FROM: 'Sender Firm <a@b.com>' })).toMatchObject({ firmName: 'Env Firm', firmNameSource: 'environment' });
     expect(parseInvitesConfig({ QBO_INVITE_FROM: 'Sender Firm <a@b.com>' })).toMatchObject({ firmName: 'Sender Firm', firmNameSource: 'sender' });
     expect(parseInvitesConfig({})).toMatchObject({ firmName: 'Your accounting firm', firmNameSource: 'default' });
+    // The environment's name is held to the same shape as the dashboard's.
+    expect(parseInvitesConfig({ QBO_FIRM_NAME: '  Env\tFirm\n<b> ' }).firmName).toBe('Env Firm b');
+    expect(parseInvitesConfig({ QBO_FIRM_NAME: 'x'.repeat(300) }).firmName).toHaveLength(100);
+    expect(parseInvitesConfig({ QBO_FIRM_NAME: ' \t ' })).toMatchObject({ firmNameSource: 'default' });
   });
 });
 
@@ -272,6 +285,8 @@ describe('setup walkthrough video', () => {
   it('accepts an https link and nothing else', () => {
     expect(cleanVideoUrl(`  ${LOOM}?sid=abc  `)).toBe(`${LOOM}?sid=abc`);
     expect(cleanVideoUrl('https://example.com/videos/setup')).toBe('https://example.com/videos/setup');
+    // The limit applies to the link as stored, after it is normalised.
+    expect(() => cleanVideoUrl(`https://example.com/${'é'.repeat(200)}`)).toThrow(/at most 500/);
     for (const bad of ['http://www.loom.com/share/abc12345', 'javascript:alert(1)', 'loom.com/share/abc', 'not a link', 'https://user:pw@example.com/v', `https://example.com/${'x'.repeat(500)}`, 7, null]) {
       expect(() => cleanVideoUrl(bad as any), JSON.stringify(bad)).toThrow();
     }

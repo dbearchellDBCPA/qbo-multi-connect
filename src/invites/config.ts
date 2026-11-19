@@ -59,7 +59,11 @@ export function parseInvitesConfig(env: NodeJS.ProcessEnv = process.env): Invite
     problems.push(`QBO_INVITE_REPLY_TO is not a valid address: ${replyTo}`);
   }
 
-  const envName = env.QBO_FIRM_NAME?.trim() || '';
+  // Held to the same shape as a name typed in the dashboard: one line, no
+  // control characters or angle brackets, 100 characters — it goes into an
+  // email subject and a From header.
+  // eslint-disable-next-line no-control-regex
+  const envName = (env.QBO_FIRM_NAME ?? '').replace(/[\u0000-\u001f\u007f<>]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100).trim();
   const senderName = (from ? displayName(from) : null) || '';
   return {
     enabled: missing.length === 0 && problems.length === 0,

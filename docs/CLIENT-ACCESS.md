@@ -118,9 +118,10 @@ that provides it.
 
 Set the name under **Settings (the gear) → What clients see → Firm name**.
 Nothing needs restarting. A name set there wins over `QBO_FIRM_NAME`; with
-neither, the display name in `QBO_INVITE_FROM` is used. If the sender is a
-bare address (`hello@yourfirm.com`), the email still goes out as
-`Your Firm <hello@yourfirm.com>`.
+neither, the display name in `QBO_INVITE_FROM` is used. The inbox shows it
+too: the email goes out as `Your Firm <hello@yourfirm.com>` even if the
+sender setting is a bare address, and a name set in Settings replaces
+whatever display name the sender setting carries.
 
 ### A walkthrough video
 
