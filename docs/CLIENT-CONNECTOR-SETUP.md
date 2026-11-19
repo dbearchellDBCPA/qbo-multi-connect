@@ -2,8 +2,11 @@
 
 <!--
   FIRM NOTE — delete this block before sending.
-  Create the client's login first: dashboard → Team → Client logins → + Add
-  (see CLIENT-ACCESS.md). Then fill in the four placeholders: [FIRM NAME],
+  If email invitations are on (see CLIENT-ACCESS.md), the client already gets
+  the address, their username, and these setup steps by email when you create
+  their login — you only need this handout if you want something to attach or
+  print. Otherwise: create the client's login first (dashboard → Team → Client
+  logins → + Add), then fill in the four placeholders: [FIRM NAME],
   [CONNECTOR ADDRESS] (your deployment's URL ending in /mcp — shown when you
   create the login), [SIGN-IN ADDRESS] (the same URL without /mcp), and
   [SUPPORT CONTACT]. Send the username and password separately from this
@@ -129,11 +132,26 @@ reset it. Either way your assistant is signed out as a precaution: click
 ## Other AI assistants
 
 The same connector address works with other assistants that support remote
-MCP connectors with sign-in. Look for an option like **Add custom connector**
-or **Add custom MCP server**, paste the connector address, choose **OAuth** if
-asked how to authenticate, and sign in with the username and password from us.
-Availability depends on the product and your plan — tell us which assistant
-you use and we'll help you get connected.
+MCP connectors with sign-in.
+
+**ChatGPT.** Custom connections depend on your plan: they are offered on
+ChatGPT Business and Enterprise/Edu, on the web, and on Business a workspace
+admin or owner has to add it.
+
+1. Sign in at chatgpt.com on a computer and open **Plugins**.
+2. Select the **+** button, then **Add custom MCP server**.
+3. Give it a name. Under **Connection**, paste the connector address.
+4. For authentication choose **OAuth**. Review the warning, tick **I
+   understand and want to continue**, and select **Create as a plugin**.
+5. When the sign-in page opens, enter the username and password from us.
+6. Install the new plugin from your plugins list, then turn it on in a chat.
+
+**Anything else.** Look for an option like **Add custom connector** or **Add
+custom MCP server**, paste the connector address, choose **OAuth** if asked
+how to authenticate, and sign in with the username and password from us.
+
+Menu names change from time to time. If yours look different, tell us which
+assistant you use and we'll walk you through it.
 
 ## Troubleshooting
 

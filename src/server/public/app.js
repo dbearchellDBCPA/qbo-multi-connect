@@ -15,6 +15,7 @@ let serverUrl = null;
 // breaks, who it tells, and the last alert it sent. Null until loaded (or for
 // non-admins / a server without the feature).
 let alertsInfo = null;
+let invitesInfo = null; // { enabled, from, firmName, replyTo, usingAlertSender, missing, problems } — admins only
 let connections = [];
 let users = [];
 let connectionsLoaded = false;
@@ -279,6 +280,20 @@ async function loadAlerts() {
   renderAll();
 }
 
+// Whether the server can email client logins their invitation and password.
+async function loadInvites() {
+  const sessionToken = authToken;
+  try {
+    const data = await api('/api/invites');
+    if (sessionToken !== authToken) return;
+    invitesInfo = data;
+  } catch {
+    if (sessionToken !== authToken) return;
+    invitesInfo = null; // non-admin or older server — the option stays hidden
+  }
+  renderAll();
+}
+
 async function initApp() {
   me = await api('/api/me');
   $('auth-screen').hidden = true;
@@ -290,7 +305,7 @@ async function initApp() {
   await Promise.all([
     loadData(false),
     loadMyKey(),
-    ...(me.role === 'admin' ? [loadServerUrl(), loadAlerts()] : []),
+    ...(me.role === 'admin' ? [loadServerUrl(), loadAlerts(), loadInvites()] : []),
   ]);
 
   clearInterval(refreshTimer);
@@ -575,7 +590,7 @@ function renderRail() {
       if (user.status === 'disabled') meta = '<span class="row-meta bad">disabled</span>';
       else if (user.role === 'admin') meta = '<span class="row-meta">admin</span>';
       else if (user.accountType === 'client') {
-        meta = `<span class="row-meta">${user.clients.length === 1 ? escapeHtml(user.clients[0].clientName) : `${user.clients.length} clients`}</span>`;
+        meta = `<span class="row-meta row-meta-long">${user.clients.length === 1 ? escapeHtml(user.clients[0].clientName) : `${user.clients.length} clients`}</span>`;
       } else meta = `<span class="row-meta">${user.realmIds.length} client${user.realmIds.length === 1 ? '' : 's'}</span>`;
       return `
           <button type="button" class="rail-row${isSelected ? ' selected' : ''}" data-action="select-user" data-id="${user.id}">
@@ -991,6 +1006,24 @@ async function sendTestAlert(button) {
   }
 }
 
+// Under a client login's sign-in card: the button that emails them a new
+// invitation and password, or the reason there isn't one.
+function clientInviteControlsHtml(user, idAttr) {
+  const note = '<p class="field-hint" style="margin-top:6px">Client logins connect by signing in. They have no API key.</p>';
+  if (!invitesInfo?.enabled) {
+    return `${note}<p class="field-hint">Email invitations are off on this server — see docs/CLIENT-ACCESS.md to turn them on.</p>`;
+  }
+  if (!user.email) {
+    return `${note}<p class="field-hint">Add an email address under Edit to send them an invitation.</p>`;
+  }
+  if (user.status === 'disabled') {
+    return `${note}<p class="field-hint">Enable this login to send an invitation.</p>`;
+  }
+  return `<button type="button" class="btn btn-ghost btn-card" data-action="send-invite" data-id="${idAttr}">${
+    user.inviteSentAt ? 'Send a new invitation' : 'Send invitation'
+  }</button>${note}`;
+}
+
 function teamDetailHtml() {
   if (usersError) return `<div class="error-box">${escapeHtml(usersError)}</div>`;
   if (!usersLoaded) return '<div class="loading">Loading team…</div>';
@@ -1070,8 +1103,9 @@ function teamDetailHtml() {
           <div class="stat-row"><span class="stat-label">Last used</span><span class="stat-value">${escapeHtml(lastUsed)}</span></div>
           <div class="stat-row"><span class="stat-label">Status</span><span class="stat-value ${isDisabled ? 'status-bad' : 'status-ok'}"><span class="status-dot"></span>${isDisabled ? 'Disabled' : 'Active'}</span></div>
           <div class="stat-row"><span class="stat-label">QuickBooks access</span><span class="stat-value">${escapeHtml(accessSummary)}</span></div>
+          ${isClientLogin ? `<div class="stat-row"><span class="stat-label">Invitation</span><span class="stat-value">${user.inviteSentAt ? `Sent ${escapeHtml(relativeTime(user.inviteSentAt))}` : '<span class="team-meta">not sent</span>'}</span></div>` : ''}
           <button type="button" class="btn btn-ghost btn-card" data-action="set-password" data-id="${idAttr}">${user.hasPassword ? 'Reset password' : 'Set up sign-in'}</button>
-          ${isClientLogin ? '<p class="field-hint" style="margin-top:6px">Client logins connect by signing in. They have no API key.</p>' : `<button type="button" class="btn btn-ghost btn-card" data-action="rotate-key" data-id="${idAttr}">Rotate key</button>`}
+          ${isClientLogin ? clientInviteControlsHtml(user, idAttr) : `<button type="button" class="btn btn-ghost btn-card" data-action="rotate-key" data-id="${idAttr}">Rotate key</button>`}
         </div>
       </div>
       <div class="card">
@@ -1520,8 +1554,20 @@ function syncAccessRows(root) {
   root.querySelectorAll('[data-staff-only]').forEach((el) => (el.hidden = isClient));
   root.querySelectorAll('[data-client-only]').forEach((el) => (el.hidden = !isClient));
   root.querySelectorAll('[data-client-required]').forEach((el) => (el.required = isClient));
+  // Emailing an invitation means the server chooses the password: the
+  // password field goes away and the email address becomes the thing we need.
+  const inviteBox = root.querySelector('input[name="sendInvite"]');
+  const inviting = isClient && Boolean(inviteBox?.checked) && !inviteBox.disabled;
+  root.querySelectorAll('[data-hidden-when-inviting]').forEach((el) => (el.hidden = inviting));
+  const passwordInput = root.querySelector('input[name="password"]');
+  if (passwordInput) passwordInput.required = isClient && !inviting;
+  const emailInput = root.querySelector('input[name="email"]');
+  if (emailInput) emailInput.required = inviting;
+  root.querySelectorAll('[data-email-optional]').forEach((el) => (el.hidden = inviting));
   const createButton = root.querySelector('[data-submit-create]');
-  if (createButton) createButton.textContent = isClient ? 'Create client login' : 'Create member';
+  if (createButton) {
+    createButton.textContent = !isClient ? 'Create member' : inviting ? 'Create and send invitation' : 'Create client login';
+  }
   root.querySelectorAll('.access-row').forEach((row) => {
     const checkbox = row.querySelector('input[type="checkbox"]');
     const select = row.querySelector('.access-level');
@@ -1564,6 +1610,30 @@ function clientCheckboxes(user) {
   `;
 }
 
+// The "email them an invitation" choice on the new-client-login form. On by
+// default when the server can send; when it can't, it says what is missing
+// instead of quietly not being there.
+function inviteOptionHtml() {
+  if (!invitesInfo) return '';
+  if (!invitesInfo.enabled) {
+    const need = [...(invitesInfo.problems || []), ...(invitesInfo.missing || []).map((name) => `${name} is not set`)].join('; ');
+    return `
+      <div class="field" data-client-only hidden>
+        <span class="field-hint">Email invitations are off${need ? ` — ${escapeHtml(need)}` : ''}. Choose a password below and send it to the client yourself.</span>
+      </div>`;
+  }
+  return `
+      <div class="field" data-client-only hidden>
+        <label class="checkbox-item checkbox-solo">
+          <input type="checkbox" name="sendInvite" checked>
+          <span>Email them an invitation and a generated password</span>
+        </label>
+        <span class="field-hint">Two emails go to the address above from ${escapeHtml(invitesInfo.from || '')}: one with the connector address, their username, and setup steps for Claude and ChatGPT; a second with a strong password the server generates. The password is never shown here.${
+          invitesInfo.usingAlertSender ? ' This is your alert sender — set QBO_INVITE_FROM for a client-facing address.' : ''
+        }</span>
+      </div>`;
+}
+
 function userFormHtml(user, presetType) {
   const accountType = user?.accountType || presetType || 'staff';
   return `
@@ -1581,7 +1651,7 @@ function userFormHtml(user, presetType) {
         <input type="text" name="name" required value="${user ? escapeHtml(user.name) : ''}" placeholder="e.g. Jane Smith">
       </label>
       <label class="field">
-        <span class="field-label">Email <span class="field-hint">(optional)</span></span>
+        <span class="field-label">Email <span class="field-hint" data-email-optional>(optional)</span></span>
         <input type="email" name="email" value="${user?.email ? escapeHtml(user.email) : ''}" placeholder="jane@example.com">
       </label>
       <label class="field">
@@ -1592,9 +1662,10 @@ function userFormHtml(user, presetType) {
         user
           ? ''
           : `
-      <label class="field">
+      ${inviteOptionHtml()}
+      <label class="field" data-hidden-when-inviting>
         <span class="field-label">Password <span class="field-hint" data-staff-only>(optional — can be set later)</span></span>
-        <input type="password" name="password" data-client-required minlength="8" placeholder="At least 8 characters" autocomplete="new-password">
+        <input type="password" name="password" minlength="8" placeholder="At least 8 characters" autocomplete="new-password">
         <span class="field-hint">Give it to them privately, separately from the username — they can change it after signing in.</span>
       </label>`
       }
@@ -1630,14 +1701,17 @@ function userFormHtml(user, presetType) {
 function readUserForm(form) {
   const data = new FormData(form);
   const isClient = data.get('accountType') === 'client';
+  const inviteBox = form.querySelector('input[name="sendInvite"]');
+  const sendInvite = isClient && Boolean(inviteBox?.checked) && !inviteBox.disabled;
   return {
+    ...(sendInvite ? { sendInvite: true } : {}),
     name: data.get('name')?.trim(),
     email: data.get('email')?.trim() || null,
     accountType: isClient ? 'client' : 'staff',
     role: isClient ? 'member' : data.get('role'),
     accessLevel: isClient ? 'read' : data.get('accessLevel'),
     username: data.get('username')?.trim() || null,
-    password: data.get('password') || null,
+    password: sendInvite ? null : data.get('password') || null,
     clients: readAccessRows(form, 'realmIds').map((row) => ({ realmId: row.id, accessLevel: row.accessLevel })),
   };
 }
@@ -1649,13 +1723,13 @@ function showCreateUserModal(presetType) {
     event.preventDefault();
     try {
       const payload = readUserForm(event.target);
-      const { user, apiKey: newKey } = await api('/api/users', {
+      const { user, apiKey: newKey, invite } = await api('/api/users', {
         method: 'POST',
         body: JSON.stringify(payload),
       });
       selectedUserId = user.id;
       await loadUsers();
-      if (user.accountType === 'client') showClientLoginCreatedModal(user);
+      if (user.accountType === 'client') showClientLoginCreatedModal(user, invite);
       else showKeyModal(user, newKey, 'created');
     } catch (err) {
       toast(err.message, 'error');
@@ -1791,16 +1865,45 @@ function showKeyModal(user, plaintextKey, verb) {
   openModal(verb === 'created' ? 'Member created' : 'New key generated', body, { wide: true });
 }
 
-// After creating a client login: what to send them. There is no key to show —
-// they connect by signing in.
-function showClientLoginCreatedModal(user) {
+// After creating a client login: either confirm the invitation went out, or
+// say what to send them by hand. There is no key to show — they connect by
+// signing in — and when the server emailed a password, it is not shown either.
+function showClientLoginCreatedModal(user, invite) {
   const url = serverUrl?.connectorUrl || `${window.location.origin}/mcp`;
   const company = user.clients.map((c) => c.clientName).join(', ');
   const body = document.createElement('div');
+  const footer = `
+    <div class="modal-footer">
+      <button type="button" class="btn btn-primary" data-action="close-modal">Done</button>
+    </div>`;
+
+  if (invite?.sent) {
+    body.innerHTML = `
+      <p class="field-hint" style="font-size:12.5px;margin-bottom:14px">${escapeHtml(user.name)} can now connect an AI assistant to ${
+        company ? `<strong>${escapeHtml(company)}</strong>` : 'their company'
+      }, read-only.</p>
+      <div class="callout-ok">
+        <div class="callout-title">Invitation sent to ${escapeHtml(invite.to)}</div>
+        <div class="callout-body">Two emails are on their way: one with the connector address, their username, and setup steps for Claude and ChatGPT; a second with their password. There is nothing else you need to send.</div>
+      </div>
+      <p class="field-hint" style="margin-top:14px">Their activity will show on this page once they connect. To send a fresh invitation later, use <strong>Send a new invitation</strong> on their login.</p>
+      ${footer}`;
+    openModal('Client login created', body, { wide: true });
+    return;
+  }
+
+  const failed = invite && !invite.sent;
   body.innerHTML = `
-    <p class="field-hint" style="font-size:12.5px;margin-bottom:14px">${escapeHtml(user.name)} can now connect an AI assistant to ${
-      company ? `<strong>${escapeHtml(company)}</strong>` : 'their company (none assigned yet — add one under Edit assignments)'
-    }, read-only. Send them these two things, and the password separately.</p>
+    ${
+      failed
+        ? `<div class="callout-warning" style="margin-bottom:14px">
+            <div class="callout-title">The login was created, but the invitation was not delivered</div>
+            <div class="callout-body">${escapeHtml(invite.error || 'The email could not be sent.')} Once that is sorted out, use <strong>Send invitation</strong> on their login — it emails a new password, so nothing is lost.</div>
+          </div>`
+        : `<p class="field-hint" style="font-size:12.5px;margin-bottom:14px">${escapeHtml(user.name)} can now connect an AI assistant to ${
+            company ? `<strong>${escapeHtml(company)}</strong>` : 'their company (none assigned yet — add one under Edit assignments)'
+          }, read-only. Send them these two things, and the password separately.</p>`
+    }
     <div class="field">
       <span class="field-label">Connector address</span>
       <div class="connector-url-row">
@@ -1812,13 +1915,30 @@ function showClientLoginCreatedModal(user) {
       <span class="field-label">Username</span>
       <div class="key-row"><code class="key-display">${escapeHtml(user.username || 'not set — use “Set up sign-in” before sending')}</code></div>
     </div>
-    <p class="field-hint" style="margin-top:14px">A ready-to-send handout with setup steps is in <code>docs/CLIENT-CONNECTOR-SETUP.md</code>. Their activity will show on this page once they connect.</p>
-    <div class="modal-footer">
-      <button type="button" class="btn btn-primary" data-action="close-modal">Done</button>
-    </div>
-  `;
+    ${failed ? '' : '<p class="field-hint" style="margin-top:14px">A ready-to-send handout with setup steps is in <code>docs/CLIENT-CONNECTOR-SETUP.md</code>. Their activity will show on this page once they connect.</p>'}
+    ${footer}`;
   body.querySelector('[data-copy-url]').addEventListener('click', () => copyText(url, 'Connector address copied'));
   openModal('Client login created', body, { wide: true });
+}
+
+// Email a client login a fresh invitation and a NEW password. The server only
+// swaps the password in once both emails are accepted, so a failure here
+// leaves the login exactly as it was.
+function sendClientInvite(user) {
+  const again = Boolean(user.inviteSentAt) || user.hasPassword;
+  confirmModal(
+    again ? 'Send a new invitation' : 'Send invitation',
+    `Email ${user.email} an invitation and a new password for “${user.name}”?${
+      again ? ' Their current password stops working, and any AI assistant they have connected is signed out until they sign in with the new one.' : ''
+    }`,
+    'Send invitation',
+    async () => {
+      const { invite } = await api(`/api/users/${user.id}/invite`, { method: 'POST' });
+      await loadUsers();
+      toast(`Invitation and password sent to ${invite.to}`);
+    },
+    { variant: 'primary' }
+  );
 }
 
 function rotateUserKey(user) {
@@ -2079,7 +2199,7 @@ document.addEventListener('DOMContentLoaded', () => {
   document.addEventListener('change', (event) => {
     const modal = $('modal-body');
     if (!modal || !modal.contains(event.target)) return;
-    if (event.target.matches('.access-row input[type="checkbox"], input[name="accessLevel"], input[name="accountType"]')) {
+    if (event.target.matches('.access-row input[type="checkbox"], input[name="accessLevel"], input[name="accountType"], input[name="sendInvite"]')) {
       syncAccessRows(modal);
     }
   });
@@ -2134,6 +2254,7 @@ document.addEventListener('DOMContentLoaded', () => {
     else if (action === 'edit-assignments' && user) showAssignmentsModal(user);
     else if (action === 'set-password' && user) showSetPasswordModal(user);
     else if (action === 'rotate-key' && user) rotateUserKey(user);
+    else if (action === 'send-invite' && user) sendClientInvite(user);
     else if (action === 'toggle-status' && user) toggleUserStatus(user);
     else if (action === 'delete-user' && user) deleteUser(user);
   });

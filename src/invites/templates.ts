@@ -45,8 +45,9 @@ function escapeHtml(value: string): string {
     .replace(/'/g, '&#39;');
 }
 
+// These strings are dropped into style="…" attributes: no double quotes inside.
 const STYLE = {
-  body: 'margin:0;padding:24px;background:#f0f4f8;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;color:#102a43;',
+  body: 'margin:0;padding:24px;background:#f0f4f8;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Helvetica,Arial,sans-serif;color:#102a43;',
   card: 'max-width:600px;margin:0 auto;background:#ffffff;border:1px solid #d9e2ec;border-radius:10px;padding:28px 32px;',
   h1: 'margin:0 0 14px;font-size:20px;font-weight:600;line-height:1.3;color:#102a43;',
   h2: 'margin:24px 0 10px;font-size:15px;font-weight:600;line-height:1.3;color:#102a43;',

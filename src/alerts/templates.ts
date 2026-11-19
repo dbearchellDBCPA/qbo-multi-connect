@@ -42,7 +42,7 @@ function reasonText(item: BrokenConnection, now: Date): string {
 }
 
 const STYLE = {
-  body: 'margin:0;padding:24px;background:#f4f4f2;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;color:#1f1f1d;',
+  body: 'margin:0;padding:24px;background:#f4f4f2;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Helvetica,Arial,sans-serif;color:#1f1f1d;',
   card: 'max-width:600px;margin:0 auto;background:#ffffff;border:1px solid #e3e2dd;border-radius:10px;padding:28px 32px;',
   h1: 'margin:0 0 14px;font-size:20px;font-weight:600;line-height:1.3;',
   p: 'margin:0 0 14px;font-size:14.5px;line-height:1.55;',

@@ -135,6 +135,19 @@ describe('invitation and password emails', () => {
     expect(secret.html).not.toContain('<b>x</b>');
   });
 
+  it('keeps every inline style intact — no quote inside a style attribute', async () => {
+    // A double quote in a font name ends style="…" early and silently drops
+    // the rest (font stack, text colour); mail clients then fall back to Times.
+    const { renderTestEmail } = await import('../../src/alerts/templates.js');
+    const alert = renderTestEmail({ dashboardUrl: 'https://qbo.example-cpa.com', recipients: ['a@example.com'], now: new Date() });
+    for (const html of [invitation.html, password.html, alert.html]) {
+      const bodyStyle = html.match(/<body style="([^"]*)"/)![1];
+      expect(bodyStyle).toContain('sans-serif');
+      expect(bodyStyle).toMatch(/color:#[0-9a-f]{6};$/);
+      for (const [, style] of html.matchAll(/style="([^"]*)"/g)) expect(style.trim().endsWith(';')).toBe(true);
+    }
+  });
+
   it('names several companies readably, and copes with none', () => {
     const many = renderClientInvitationEmail({ ...INVITATION, companyNames: ['Acme', 'Beta', 'Gamma'] });
     expect(many.text).toContain('Acme, Beta and Gamma');

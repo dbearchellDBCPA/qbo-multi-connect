@@ -589,6 +589,8 @@ button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
 .rail-row.selected:hover .row-name { font-weight: 650; color: var(--rail-accent); }
 
 .row-meta { font-size: 10.5px; color: var(--rail-muted); flex-shrink: 0; }
+/* A company name as the meta (client logins) gives way to the person's name. */
+.row-meta.row-meta-long { flex-shrink: 1; min-width: 0; max-width: 46%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row-meta.mono { font-family: var(--font-mono); }
 .row-meta.bang { color: var(--rail-warn); font-weight: 700; }
 .row-meta.bad { color: var(--rail-danger); font-weight: 700; }
@@ -996,6 +998,9 @@ button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
 .checkbox-item input:focus-visible,
 .radio-row input:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 .checkbox-item input { accent-color: var(--brand); }
+/* A single checkbox that is a field of its own, not a row in a list. */
+.checkbox-solo { padding: 0; font-weight: 600; }
+.checkbox-solo:hover { background: none; }
 
 .checkbox-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; margin-bottom: 8px; }
 .toolbar-sep { color: var(--muted-2); font-size: 12px; }
@@ -1050,6 +1055,15 @@ button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
   border-radius: 10px;
   padding: 14px 16px;
 }
+/* Confirmation, in the brand accent: something was done and nothing is owed. */
+.callout-ok {
+  background: var(--brand-soft);
+  border: 1px solid var(--brand-soft-border);
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+.callout-ok .callout-title { color: var(--brand-strong); }
+.callout-ok .callout-body { color: var(--text); }
 .callout-title { font-size: 13px; font-weight: 700; color: var(--callout-title); margin-bottom: 3px; }
 .callout-body { font-size: 12.5px; color: var(--callout-body); }
 
