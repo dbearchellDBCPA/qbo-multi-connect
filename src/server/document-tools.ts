@@ -85,7 +85,7 @@ export function registerDocumentTools(
 
   tool(
     'send_transaction_email',
-    'Email a QBO transaction PDF to the customer (or send_to) via POST /v3/company/{realmId}/{type}/{id}/send. Defaults to a dry run that shows the recipient and does not send. A live send requires confirm_send=true; the tool refuses otherwise. Supported types: Invoice, Estimate, CreditMemo, SalesReceipt, Payment, PurchaseOrder, RefundReceipt, wherever Intuit supports send for that type.',
+    'Email a QBO transaction PDF to the customer (or send_to) via POST /v3/company/{realmId}/{type}/{id}/send. Defaults to a dry run that shows the recipient and does not send. A live send requires confirm_send=true; the tool refuses otherwise. The transaction must already have BillEmail.Address — this tool will not set it. For invoices, call update_invoice with bill_email first, then retry. Supported types: Invoice, Estimate, CreditMemo, SalesReceipt, Payment, PurchaseOrder, RefundReceipt, wherever Intuit supports send for that type.',
     {
       client_name: z.string().describe('The name of the client company'),
       type: z.enum(types).describe('QBO transaction type'),
@@ -108,6 +108,8 @@ export function registerDocumentTools(
         const raw = await qboManager.documents.getEntity(realmId, type, id);
         const onFile = billEmailAddress(type, raw);
         const recipient = send_to ?? onFile;
+        const missingBillEmailMessage =
+          'Transaction has no BillEmail; set it first with update_invoice bill_email=... then retry';
         const preview = {
           dry_run: confirm_send !== true,
           entity_type: type,
@@ -118,28 +120,37 @@ export function registerDocumentTools(
         };
 
         if (confirm_send !== true) {
+          let message: string;
+          if (!onFile) {
+            message = send_to
+              ? `Dry run — this ${type} has no BillEmail.Address. A live send will be refused even with send_to (QBO /send can NullPointerException when BillEmail is missing). ${missingBillEmailMessage}`
+              : `Dry run — no send_to and no BillEmail.Address on this ${type}. ${missingBillEmailMessage}`;
+          } else {
+            message = `Dry run — would email this ${type} to ${recipient}. Re-run with confirm_send=true to send.`;
+          }
           return {
             content: [{
               type: 'text',
               text: JSON.stringify({
                 ...preview,
                 sent: false,
-                message: recipient
-                  ? `Dry run — would email this ${type} to ${recipient}. Re-run with confirm_send=true to send.`
-                  : `Dry run — no send_to and no BillEmail.Address on this ${type}. A live send will likely fail. Pass send_to or add an email on the transaction, then re-run with confirm_send=true.`,
+                message,
               }, null, 2),
             }],
           };
         }
 
-        if (!recipient) {
+        // Do not silently write BillEmail before /send — Multi-Connect is a
+        // native API wrapper. QBO's /send can NPE when BillEmail is missing,
+        // even if sendTo is provided, so refuse with an actionable error.
+        if (!onFile) {
           return {
             content: [{
               type: 'text',
               text: JSON.stringify({
                 ...preview,
                 sent: false,
-                message: `Refusing to send: no send_to and no BillEmail.Address on this ${type}.`,
+                message: missingBillEmailMessage,
               }, null, 2),
             }],
             isError: true,

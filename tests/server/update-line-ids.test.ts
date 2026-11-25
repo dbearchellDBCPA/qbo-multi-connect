@@ -393,6 +393,46 @@ describe('update_invoice — Line.Ids carried', () => {
     expect(p.Line).toBe(fetched.Line);
     expect('sparse' in p).toBe(false);
   });
+
+  it('bill_email-only update is sparse (Id + SyncToken + email fields only)', () => {
+    const fetched = clone(INVOICE);
+    const p = buildInvoiceUpdatePayload(fetched, {
+      bill_email: 'ap@example.org',
+      bill_email_cc: 'cc@example.org',
+      bill_email_bcc: 'bcc@example.org',
+    });
+    expect(p).toEqual({
+      Id: fetched.Id,
+      SyncToken: fetched.SyncToken,
+      sparse: true,
+      BillEmail: { Address: 'ap@example.org' },
+      BillEmailCc: { Address: 'cc@example.org' },
+      BillEmailBcc: { Address: 'bcc@example.org' },
+    });
+    expect(p.Line).toBeUndefined();
+    expect(p.TotalAmt).toBeUndefined();
+  });
+
+  it('bill_email plus a header field stays sparse and does not rewrite lines', () => {
+    const fetched = clone(INVOICE);
+    const p = buildInvoiceUpdatePayload(fetched, { bill_email: 'ap@example.org', due_date: '2026-10-31' });
+    expect(p.sparse).toBe(true);
+    expect(p.DueDate).toBe('2026-10-31');
+    expect(p.BillEmail).toEqual({ Address: 'ap@example.org' });
+    expect(p.Line).toBeUndefined();
+    expect(p.Id).toBe(fetched.Id);
+    expect(p.SyncToken).toBe(fetched.SyncToken);
+  });
+
+  it('bill_email with lines still does a full line replacement (sparse false)', () => {
+    const p = buildInvoiceUpdatePayload(clone(INVOICE), {
+      bill_email: 'ap@example.org',
+      lines: [{ amount: 300, item_id: '5' }],
+    });
+    expect(p.sparse).toBe(false);
+    expect(p.BillEmail).toEqual({ Address: 'ap@example.org' });
+    expect(ids(p.Line)).toEqual(['1']);
+  });
 });
 
 // ── update_sales_receipt ─────────────────────────────────────────────────────
