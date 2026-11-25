@@ -64,9 +64,15 @@ export class DocumentsAPI {
     return this.client.getBinary(realmId, documentPath(type, id, 'pdf'), 'application/pdf');
   }
 
+  /**
+   * POST /{entity}/{id}/send[?sendTo=]. Intuit requires Content-Type
+   * application/octet-stream and an empty body. sendTo is URL-encoded.
+   */
   async sendEmail(realmId: string, type: DocumentType, id: string, sendTo?: string): Promise<unknown> {
     const path = documentPath(type, id, 'send');
     const endpoint = sendTo ? `${path}?sendTo=${encodeURIComponent(sendTo)}` : path;
-    return this.client.post(realmId, endpoint, undefined);
+    return this.client.post(realmId, endpoint, undefined, {
+      headers: { 'Content-Type': 'application/octet-stream' },
+    });
   }
 }

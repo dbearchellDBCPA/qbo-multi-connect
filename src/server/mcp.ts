@@ -70,6 +70,7 @@ import {
   buildSalesLines,
   buildInvoiceUpdatePayload,
   buildSalesReceiptUpdatePayload,
+  applyBillEmailFields,
   LINE_ID_PARAM_DESCRIPTION,
   REPLACEMENT_LINES_BEHAVIOUR,
 } from './update-payloads.js';
@@ -1787,6 +1788,9 @@ export async function registerMcpRoutes(
         department_id: z.string().optional().describe('Header DepartmentRef.value'),
         sales_term_id: z.string().optional().describe('Header SalesTermRef.value. QBO computes DueDate from TxnDate + term unless due_date is also set.'),
         doc_number: z.string().optional().describe(`Invoice no. — ${DOC_NUMBER_PARAM_DESCRIPTION} Omit to let QBO auto-number (if custom transaction numbers are off).`),
+        bill_email: z.string().email().optional().describe('Invoice BillEmail.Address (To). QBO requires this on the invoice before send_transaction_email will POST /send.'),
+        bill_email_cc: z.string().email().optional().describe('Invoice BillEmailCc.Address'),
+        bill_email_bcc: z.string().email().optional().describe('Invoice BillEmailBcc.Address'),
         lines: z.array(z.object({
           description: z.string().optional().describe('Line item description'),
           amount: z.number().describe('Line amount'),
@@ -1797,7 +1801,7 @@ export async function registerMcpRoutes(
           unit_price: z.number().optional().describe('Unit price'),
         })).describe('Invoice line items'),
       },
-      async ({ client_name, customer_id, customer_name, txn_date, due_date, private_note, department_id, sales_term_id, doc_number, lines }) => {
+      async ({ client_name, customer_id, customer_name, txn_date, due_date, private_note, department_id, sales_term_id, doc_number, bill_email, bill_email_cc, bill_email_bcc, lines }) => {
         const docErr = docNumberError(doc_number);
         if (docErr) return { content: [{ type: 'text', text: docErr }] };
         const realmId = await findRealmId(qboManager, client_name);
@@ -1818,6 +1822,7 @@ export async function registerMcpRoutes(
           if (due_date) payload.DueDate = due_date;
           if (private_note) payload.PrivateNote = private_note;
           applyDocNumberOnCreate(payload, doc_number);
+          applyBillEmailFields(payload, { bill_email, bill_email_cc, bill_email_bcc });
 
           const result = await qboManager.transactions.createInvoice(realmId, payload);
           const inv = (result as any)?.Invoice;
@@ -1845,6 +1850,9 @@ export async function registerMcpRoutes(
         private_note: z.string().optional().describe('New private note'),
         department_id: z.string().optional().describe('New header DepartmentRef.value'),
         sales_term_id: z.string().optional().describe('New header SalesTermRef.value'),
+        bill_email: z.string().email().optional().describe('Invoice BillEmail.Address (To). Set this before send_transaction_email; the send tool will not write it for you.'),
+        bill_email_cc: z.string().email().optional().describe('Invoice BillEmailCc.Address'),
+        bill_email_bcc: z.string().email().optional().describe('Invoice BillEmailBcc.Address'),
         lines: z.array(z.object({
           line_id: z.string().optional().describe(LINE_ID_PARAM_DESCRIPTION),
           description: z.string().optional(),
@@ -1859,7 +1867,7 @@ export async function registerMcpRoutes(
         })).optional().describe('Replacement line items — the complete new line set (omitted existing lines are removed). Pass the lines from get_invoice (with line_id) to edit in place; without line_id, Ids are matched by position.'),
         custom_fields: customFieldsArg,
       },
-      async ({ client_name, invoice_id, doc_number, customer_id, txn_date, due_date, private_note, department_id, sales_term_id, lines, custom_fields }) => {
+      async ({ client_name, invoice_id, doc_number, customer_id, txn_date, due_date, private_note, department_id, sales_term_id, bill_email, bill_email_cc, bill_email_bcc, lines, custom_fields }) => {
         const docErr = docNumberError(doc_number);
         if (docErr) return { content: [{ type: 'text', text: docErr }] };
         const realmId = await findRealmId(qboManager, client_name);
@@ -1877,7 +1885,8 @@ export async function registerMcpRoutes(
           // Read-modify-write. Replacement lines carry existing Ids (line_id
           // or positional) + sparse:false; no lines → fetched Line untouched.
           const payload = buildInvoiceUpdatePayload(inv, {
-            customer_id, txn_date, due_date, private_note, department_id, sales_term_id, doc_number, lines,
+            customer_id, txn_date, due_date, private_note, department_id, sales_term_id, doc_number,
+            bill_email, bill_email_cc, bill_email_bcc, lines,
           });
 
           applyCustomFields(payload, custom_fields);

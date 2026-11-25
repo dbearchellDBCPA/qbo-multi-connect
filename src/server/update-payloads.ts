@@ -203,20 +203,34 @@ export function buildSalesLines(lines: SalesLineInput[]): any[] {
   });
 }
 
-export function buildInvoiceUpdatePayload(
-  existing: any,
-  args: {
-    customer_id?: string;
-    txn_date?: string;
-    due_date?: string;
-    private_note?: string;
-    department_id?: string;
-    sales_term_id?: string;
-    doc_number?: string;
-    lines?: SalesLineInput[];
-  }
-): any {
-  const payload: any = { ...existing };
+export interface BillEmailFields {
+  bill_email?: string;
+  bill_email_cc?: string;
+  bill_email_bcc?: string;
+}
+
+/** Map tool args to QBO BillEmail / BillEmailCc / BillEmailBcc.Address. */
+export function applyBillEmailFields(payload: any, args: BillEmailFields): void {
+  if (args.bill_email !== undefined) payload.BillEmail = { Address: args.bill_email };
+  if (args.bill_email_cc !== undefined) payload.BillEmailCc = { Address: args.bill_email_cc };
+  if (args.bill_email_bcc !== undefined) payload.BillEmailBcc = { Address: args.bill_email_bcc };
+}
+
+export function hasBillEmailFields(args: BillEmailFields): boolean {
+  return args.bill_email !== undefined || args.bill_email_cc !== undefined || args.bill_email_bcc !== undefined;
+}
+
+interface InvoiceHeaderArgs extends BillEmailFields {
+  customer_id?: string;
+  txn_date?: string;
+  due_date?: string;
+  private_note?: string;
+  department_id?: string;
+  sales_term_id?: string;
+  doc_number?: string;
+}
+
+function applyInvoiceHeaderFields(payload: any, args: InvoiceHeaderArgs): void {
   if (args.customer_id) payload.CustomerRef = { value: args.customer_id };
   if (args.txn_date) payload.TxnDate = args.txn_date;
   if (args.department_id) payload.DepartmentRef = { value: args.department_id };
@@ -224,6 +238,23 @@ export function buildInvoiceUpdatePayload(
   if (args.due_date) payload.DueDate = args.due_date;
   if (args.private_note !== undefined) payload.PrivateNote = args.private_note;
   applyDocNumberOnUpdate(payload, args.doc_number);
+  applyBillEmailFields(payload, args);
+}
+
+export function buildInvoiceUpdatePayload(
+  existing: any,
+  args: InvoiceHeaderArgs & { lines?: SalesLineInput[] }
+): any {
+  // Email (and any other header fields in the same call) with no line replacement:
+  // a true sparse update so we don't rewrite the rest of the invoice.
+  if (!args.lines && hasBillEmailFields(args)) {
+    const payload: any = { Id: existing.Id, SyncToken: existing.SyncToken, sparse: true };
+    applyInvoiceHeaderFields(payload, args);
+    return payload;
+  }
+
+  const payload: any = { ...existing };
+  applyInvoiceHeaderFields(payload, args);
   if (args.lines) {
     payload.Line = replaceLinesWithIds(existing?.Line, buildSalesLines(args.lines), args.lines, salesLineKind, 'invoice');
     payload.sparse = false;

@@ -261,10 +261,17 @@ export class QBOClient {
   }
 
   /**
-   * POST request
+   * POST request. Pass headers to override defaults (e.g. Content-Type
+   * application/octet-stream for QBO's /{entity}/{id}/send, which NPEs
+   * if the usual application/json content type is sent).
    */
-  async post<T>(realmId: string, endpoint: string, body: unknown): Promise<T> {
-    return this.request<T>('POST', realmId, endpoint, { body });
+  async post<T>(
+    realmId: string,
+    endpoint: string,
+    body: unknown,
+    options?: { headers?: Record<string, string> },
+  ): Promise<T> {
+    return this.request<T>('POST', realmId, endpoint, { body, ...options });
   }
 
   /**

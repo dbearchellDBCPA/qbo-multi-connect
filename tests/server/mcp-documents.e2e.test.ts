@@ -171,10 +171,32 @@ describe('MCP transaction PDF and email send (mocked QBO only)', () => {
     expect(body.dry_run).toBe(false);
     expect(body.sent).toBe(true);
     expect(body.recipient).toBe('other@example.org');
-    expect(postSpy).toHaveBeenCalledWith(REALM, 'invoice/20/send?sendTo=other%40example.org', undefined);
+    expect(postSpy).toHaveBeenCalledWith(
+      REALM,
+      'invoice/20/send?sendTo=other%40example.org',
+      undefined,
+      { headers: { 'Content-Type': 'application/octet-stream' } },
+    );
   });
 
-  it('send_transaction_email with confirm_send=true refuses when no recipient exists', async () => {
+  it('send_transaction_email with confirm_send=true refuses when no BillEmail exists, even with send_to', async () => {
+    const { texts, isError } = await callTool('send_transaction_email', {
+      client_name: CLIENT,
+      type: 'Invoice',
+      id: '21',
+      send_to: 'other@example.org',
+      confirm_send: true,
+    });
+    expect(isError).toBe(true);
+    const body = lastJson(texts);
+    expect(body.sent).toBe(false);
+    expect(body.bill_email).toBeNull();
+    expect(body.send_to).toBe('other@example.org');
+    expect(body.message).toBe('Transaction has no BillEmail; set it first with update_invoice bill_email=... then retry');
+    expect(postSpy).not.toHaveBeenCalled();
+  });
+
+  it('send_transaction_email with confirm_send=true refuses when no recipient and no BillEmail exist', async () => {
     const { texts, isError } = await callTool('send_transaction_email', {
       client_name: CLIENT,
       type: 'Invoice',
@@ -184,7 +206,23 @@ describe('MCP transaction PDF and email send (mocked QBO only)', () => {
     expect(isError).toBe(true);
     const body = lastJson(texts);
     expect(body.sent).toBe(false);
-    expect(body.message).toMatch(/no send_to and no BillEmail/);
+    expect(body.message).toBe('Transaction has no BillEmail; set it first with update_invoice bill_email=... then retry');
+    expect(postSpy).not.toHaveBeenCalled();
+  });
+
+  it('send_transaction_email dry run warns when BillEmail is missing even if send_to is set', async () => {
+    const { texts, isError } = await callTool('send_transaction_email', {
+      client_name: CLIENT,
+      type: 'Invoice',
+      id: '21',
+      send_to: 'other@example.org',
+    });
+    expect(isError).toBe(false);
+    const body = lastJson(texts);
+    expect(body.dry_run).toBe(true);
+    expect(body.sent).toBe(false);
+    expect(body.message).toMatch(/no BillEmail/);
+    expect(body.message).toMatch(/update_invoice bill_email=/);
     expect(postSpy).not.toHaveBeenCalled();
   });
 });
