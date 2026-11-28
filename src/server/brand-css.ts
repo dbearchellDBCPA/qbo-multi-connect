@@ -7,10 +7,11 @@
  * here means the David Bearchell CPA palette is defined once for the server
  * pages instead of drifting between two hand-maintained blocks.
  *
- * The two brand scales — a desaturated navy for structure and text, a teal
- * accent for calls to action — are the whole palette. The accent contrast rule
- * holds here as it does in the dashboard: accent-600/700 carry text on light
- * surfaces, accent-300/400 carry text on navy ones.
+ * The palette matches dbcpallc.com — white paper, near-black ink, Mets blue as
+ * the one accent. Two scales carry it: a neutral ink scale for structure and
+ * text, a blue accent for calls to action. The accent contrast rule holds here
+ * as it does in the dashboard: accent-600/700 carry text on light surfaces,
+ * accent-300/400 carry text on ink ones.
  */
 
 /** Self-hosted Inter + Fraunces, served from the static `public/fonts` dir. */
@@ -40,34 +41,37 @@ export const BRAND_FONT_FACES = `
 /** Brand scales plus the semantic aliases both server pages draw on. */
 export const BRAND_TOKENS = `
   :root {
-    --navy-50:#f0f4f8; --navy-100:#d9e2ec; --navy-200:#bcccdc; --navy-300:#9fb3c8;
-    --navy-400:#829ab1; --navy-500:#627d98; --navy-600:#486581; --navy-700:#334e68;
-    --navy-800:#243b53; --navy-900:#102a43; --navy-950:#0a1929;
-    --accent-300:#7edce2; --accent-400:#4fd1c5; --accent-500:#38b2ac;
-    --accent-600:#117c75; --accent-700:#0e6f68; --accent-800:#115e59;
+    --ink-50:#f6f6f7; --ink-100:#ececee; --ink-200:#d6d7db; --ink-300:#b4b6bd;
+    --ink-400:#8a8d96; --ink-500:#6b7280; --ink-600:#5b606b; --ink-700:#3f434b;
+    --ink-800:#26282d; --ink-900:#17181b; --ink-950:#0b0b0c;
+    --accent-300:#a9c4f7; --accent-400:#7ea6f2; --accent-500:#2a5db8;
+    --accent-600:#002d72; --accent-700:#001f52; --accent-800:#00163b;
 
-    --bg:#ffffff; --surface:#ffffff; --surface-2:var(--navy-50);
-    --border:var(--navy-100); --border-input:var(--navy-500); --border-control:var(--navy-300);
-    --text:var(--navy-900); --text-secondary:var(--navy-700); --text-faint:var(--navy-500);
+    --bg:#ffffff; --surface:#ffffff; --surface-2:var(--ink-50);
+    --border:var(--ink-100); --border-input:var(--ink-500); --border-control:var(--ink-300);
+    --text:var(--ink-900); --text-secondary:var(--ink-700); --text-faint:var(--ink-500);
     --primary:var(--accent-600); --primary-hover:var(--accent-700); --on-primary:#ffffff;
-    --primary-soft:rgba(17,124,117,0.1);
-    --ok:var(--accent-600); --ok-soft:rgba(17,124,117,0.1);
+    --primary-soft:rgba(0,45,114,0.1);
+    --ok:var(--accent-600); --ok-soft:rgba(0,45,114,0.1);
     --err:#991b1b; --err-strong:#b91c1c; --err-soft:#fef2f2; --err-border:#fecaca;
-    --shadow:0 4px 16px rgba(16,42,67,.08);
+    --shadow:0 4px 16px rgba(11,11,12,.08);
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg:var(--navy-950); --surface:var(--navy-900); --surface-2:var(--navy-800);
-      --border:var(--navy-800); --border-input:var(--navy-600); --border-control:var(--navy-600);
-      --text:#ffffff; --text-secondary:var(--navy-200); --text-faint:var(--navy-300);
-      --primary:var(--accent-400); --primary-hover:var(--accent-300); --on-primary:var(--navy-950);
-      --primary-soft:rgba(79,209,197,0.14);
-      --ok:var(--accent-400); --ok-soft:rgba(79,209,197,0.14);
+      --bg:var(--ink-950); --surface:var(--ink-900); --surface-2:var(--ink-800);
+      --border:var(--ink-800); --border-input:var(--ink-600); --border-control:var(--ink-600);
+      --text:#ffffff; --text-secondary:var(--ink-200); --text-faint:var(--ink-300);
+      --primary:var(--accent-400); --primary-hover:var(--accent-300); --on-primary:var(--ink-950);
+      --primary-soft:rgba(126,166,242,0.14);
+      --ok:var(--accent-400); --ok-soft:rgba(126,166,242,0.14);
       --err:#fca5a5; --err-strong:#f87171; --err-soft:#3f1d1d; --err-border:#7f3535;
       --shadow:0 4px 16px rgba(0,0,0,.5);
     }
   }
 `;
+
+/** Favicon for every server-rendered page: the bar graphic from the DBCPA logo, black on white. */
+export const BRAND_FAVICON = '<link rel="icon" type="image/svg+xml" href="/favicon.svg">\n<link rel="icon" type="image/png" href="/favicon.png">\n<link rel="apple-touch-icon" href="/apple-touch-icon.png">';
 
 /**
  * Base rules both pages share: the type stack (Inter for UI, Fraunces for the
@@ -90,16 +94,17 @@ export const BRAND_BASE = `
     outline:2px solid var(--primary); outline-offset:2px;
   }
   .brand { display:flex; align-items:center; gap:10px; }
-  /* The mark from the favicon: navy tile, three rising accent bars. */
+  /* The app's mark: three rising bars, black and white. It follows the page:
+     a black tile with white bars on a light page, the reverse on a dark one. */
   .brand-logo {
-    width:34px; height:34px; border-radius:9px; background:var(--navy-900);
+    width:34px; height:34px; border-radius:9px; background:var(--text);
     display:inline-flex; align-items:flex-end; justify-content:center; gap:2.5px; padding:8px 0 9px;
     flex-shrink:0;
   }
-  .brand-logo i { display:block; width:4px; border-radius:1.5px; }
-  .brand-logo i:nth-child(1) { height:7px; background:var(--accent-500); }
-  .brand-logo i:nth-child(2) { height:12px; background:var(--accent-400); }
-  .brand-logo i:nth-child(3) { height:17px; background:#ffffff; }
+  .brand-logo i { display:block; width:4px; border-radius:1.5px; background:var(--bg); }
+  .brand-logo i:nth-child(1) { height:7px; }
+  .brand-logo i:nth-child(2) { height:12px; }
+  .brand-logo i:nth-child(3) { height:17px; }
   .brand-name { font-weight:650; font-size:15px; color:var(--text); }
   /* A firm's own logo, in place of the mark. On a dark page it sits on a
      white plate, since most logos are drawn for a light background. */

@@ -1,4 +1,4 @@
-import { BRAND_BASE, BRAND_FONT_FACES, BRAND_MARK, BRAND_TOKENS } from './brand-css.js';
+import { BRAND_BASE, BRAND_FAVICON, BRAND_FONT_FACES, BRAND_MARK, BRAND_TOKENS } from './brand-css.js';
 
 export function escapeHtml(value: unknown): string {
   return String(value ?? '')
@@ -54,6 +54,7 @@ export function renderCallbackPage(opts: CallbackPageOptions): string {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>${escapeHtml(opts.heading)} — QBO Multi-Connect</title>
+${BRAND_FAVICON}
 <style>
 ${BRAND_FONT_FACES}
 ${BRAND_TOKENS}

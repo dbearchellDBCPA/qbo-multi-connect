@@ -51,21 +51,21 @@ export interface InvitationDetails {
 
 // These strings are dropped into style="…" attributes: no double quotes inside.
 const STYLE = {
-  body: 'margin:0;padding:24px;background:#f0f4f8;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Helvetica,Arial,sans-serif;color:#102a43;',
-  card: 'max-width:600px;margin:0 auto;background:#ffffff;border:1px solid #d9e2ec;border-radius:10px;padding:28px 32px;',
-  h1: 'margin:0 0 14px;font-size:20px;font-weight:600;line-height:1.3;color:#102a43;',
-  h2: 'margin:26px 0 10px;font-size:15px;font-weight:600;line-height:1.3;color:#102a43;',
-  p: 'margin:0 0 14px;font-size:14.5px;line-height:1.55;color:#243b53;',
-  li: 'margin:0 0 8px;font-size:14.5px;line-height:1.55;color:#243b53;',
+  body: 'margin:0;padding:24px;background:#f6f6f7;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Helvetica,Arial,sans-serif;color:#0b0b0c;',
+  card: 'max-width:600px;margin:0 auto;background:#ffffff;border:1px solid #ececee;border-radius:10px;padding:28px 32px;',
+  h1: 'margin:0 0 14px;font-size:20px;font-weight:600;line-height:1.3;color:#0b0b0c;',
+  h2: 'margin:26px 0 10px;font-size:15px;font-weight:600;line-height:1.3;color:#0b0b0c;',
+  p: 'margin:0 0 14px;font-size:14.5px;line-height:1.55;color:#26282d;',
+  li: 'margin:0 0 8px;font-size:14.5px;line-height:1.55;color:#26282d;',
   list: 'padding-left:20px;margin:0 0 14px;',
   table: 'border-collapse:collapse;margin:0 0 16px;width:100%;',
-  th: 'text-align:left;vertical-align:top;padding:6px 14px 6px 0;font-size:13px;font-weight:600;color:#486581;white-space:nowrap;',
-  td: 'padding:6px 0;font-size:14.5px;color:#102a43;word-break:break-all;',
-  code: 'font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13.5px;background:#f0f4f8;padding:2px 6px;border-radius:4px;color:#0e6f68;',
+  th: 'text-align:left;vertical-align:top;padding:6px 14px 6px 0;font-size:13px;font-weight:600;color:#5b606b;white-space:nowrap;',
+  td: 'padding:6px 0;font-size:14.5px;color:#0b0b0c;word-break:break-all;',
+  code: 'font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13.5px;background:#f6f6f7;padding:2px 6px;border-radius:4px;color:#001f52;',
   button:
-    'display:inline-block;padding:12px 22px;border-radius:8px;background:#117c75;color:#ffffff !important;text-decoration:none;font-size:15px;font-weight:600;',
-  small: 'margin:0 0 14px;font-size:12.5px;line-height:1.5;color:#627d98;word-break:break-all;',
-  muted: 'margin:22px 0 0;font-size:12px;line-height:1.5;color:#627d98;',
+    'display:inline-block;padding:12px 22px;border-radius:8px;background:#002d72;color:#ffffff !important;text-decoration:none;font-size:15px;font-weight:600;',
+  small: 'margin:0 0 14px;font-size:12.5px;line-height:1.5;color:#6b7280;word-break:break-all;',
+  muted: 'margin:22px 0 0;font-size:12px;line-height:1.5;color:#6b7280;',
 };
 
 function formatDay(date: Date): string {
@@ -143,7 +143,7 @@ ${logo}<h1 style="${STYLE.h1}">Connect your AI assistant to your QuickBooks data
 <p style="${STYLE.p}">${escapeHtml(linkNote)}</p>
 <h2 style="${STYLE.h2}">Step 2 — Connect your assistant</h2>
 <p style="${STYLE.p}">${escapeHtml(stepTwoIntro)}</p>
-${videoUrl ? `<p style="${STYLE.p}">${escapeHtml(videoLine)} <a href="${escapeHtml(videoUrl)}" style="color:#117c75;font-weight:600;">Watch the walkthrough</a></p>` : ''}
+${videoUrl ? `<p style="${STYLE.p}">${escapeHtml(videoLine)} <a href="${escapeHtml(videoUrl)}" style="color:#002d72;font-weight:600;">Watch the walkthrough</a></p>` : ''}
 <table style="${STYLE.table}">
 <tr><th style="${STYLE.th}">Connector address</th><td style="${STYLE.td}"><span style="${STYLE.code}">${escapeHtml(connectorUrl)}</span></td></tr>
 <tr><th style="${STYLE.th}">Your username</th><td style="${STYLE.td}"><span style="${STYLE.code}">${escapeHtml(username)}</span></td></tr>
@@ -158,7 +158,7 @@ ${ol(CHATGPT_STEPS)}
 ${ul(TRY_ASKING)}
 <h2 style="${STYLE.h2}">Good to know</h2>
 ${ul(GOOD_TO_KNOW)}
-${securityUrl ? `<p style="${STYLE.p}">${escapeHtml(securityLine)} <a href="${escapeHtml(securityUrl)}" style="color:#117c75;font-weight:600;">Security and what to keep in mind</a></p>` : ''}
+${securityUrl ? `<p style="${STYLE.p}">${escapeHtml(securityLine)} <a href="${escapeHtml(securityUrl)}" style="color:#002d72;font-weight:600;">Security and what to keep in mind</a></p>` : ''}
 <p style="${STYLE.muted}">${escapeHtml(contact)} ${escapeHtml(unexpected)} Sent by ${escapeHtml(firmName)}.</p>
 </div></body></html>`;
 

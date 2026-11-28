@@ -27,14 +27,14 @@ function formatWhen(date: Date): string {
 
 // Dropped into style="…" attributes: no double quotes inside.
 const STYLE = {
-  body: 'margin:0;padding:24px;background:#f0f3f7;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Helvetica,Arial,sans-serif;color:#0f2a43;',
-  card: 'max-width:600px;margin:0 auto;background:#ffffff;border:1px solid #d5dde6;border-radius:10px;padding:28px 32px;',
+  body: 'margin:0;padding:24px;background:#f6f6f7;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Helvetica,Arial,sans-serif;color:#0b0b0c;',
+  card: 'max-width:600px;margin:0 auto;background:#ffffff;border:1px solid #d6d7db;border-radius:10px;padding:28px 32px;',
   h1: 'margin:0 0 14px;font-size:20px;font-weight:600;line-height:1.3;',
   p: 'margin:0 0 14px;font-size:14.5px;line-height:1.55;',
-  item: 'margin:0 0 12px;padding:12px 14px;border:1px solid #d5dde6;border-radius:8px;font-size:14px;line-height:1.55;',
+  item: 'margin:0 0 12px;padding:12px 14px;border:1px solid #d6d7db;border-radius:8px;font-size:14px;line-height:1.55;',
   button:
-    'display:inline-block;padding:10px 18px;border-radius:7px;background:#117c75;color:#ffffff !important;text-decoration:none;font-size:14px;font-weight:600;',
-  muted: 'margin:18px 0 0;font-size:12px;line-height:1.5;color:#5b6b7c;',
+    'display:inline-block;padding:10px 18px;border-radius:7px;background:#002d72;color:#ffffff !important;text-decoration:none;font-size:14px;font-weight:600;',
+  muted: 'margin:18px 0 0;font-size:12px;line-height:1.5;color:#5b606b;',
 };
 
 export function renderAccessRequestNotice(
@@ -80,7 +80,7 @@ ${items
   .map(
     (item) => `<div style="${STYLE.item}"><strong>${escapeHtml(item.name)}</strong> — ${escapeHtml(item.email)}<br>
 Business: ${escapeHtml(item.company)}<br>
-<span style="color:#5b6b7c;">Asked ${escapeHtml(formatWhen(item.createdAt))}</span></div>`
+<span style="color:#5b606b;">Asked ${escapeHtml(formatWhen(item.createdAt))}</span></div>`
   )
   .join('\n')}
 <p style="${STYLE.p}">${escapeHtml(where)}</p>

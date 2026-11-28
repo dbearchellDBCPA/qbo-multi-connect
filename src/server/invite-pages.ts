@@ -8,7 +8,7 @@
  * shown once that link has been used up, may embed the firm's walkthrough
  * video.
  */
-import { BRAND_BASE, BRAND_FONT_FACES, BRAND_TOKENS, brandLine } from './brand-css.js';
+import { BRAND_BASE, BRAND_FAVICON, BRAND_FONT_FACES, BRAND_TOKENS, brandLine } from './brand-css.js';
 import { APP_NAME, type FirmBrand, type SetupVideo } from '../branding.js';
 import { CLIENT_TERMS_CONSENT, CLIENT_TERMS_POINTS, SECURITY_PAGE_PATH } from '../client-terms.js';
 import {
@@ -138,6 +138,7 @@ export function clientPage(title: string, body: string, firm: FirmBrand): string
 <meta name="robots" content="noindex, nofollow">
 <meta name="referrer" content="no-referrer">
 <title>${escapeHtml(title)} — ${escapeHtml(firm.displayName)}</title>
+${BRAND_FAVICON}
 <style>${STYLES}</style>
 </head>
 <body>

@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import fastifyFormbody from '@fastify/formbody';
 import type { QBOManager } from '../../index.js';
 import { escapeHtml } from '../callback-page.js';
-import { BRAND_BASE, BRAND_FONT_FACES, BRAND_TOKENS, brandLine } from '../brand-css.js';
+import { BRAND_BASE, BRAND_FAVICON, BRAND_FONT_FACES, BRAND_TOKENS, brandLine } from '../brand-css.js';
 
 /**
  * OAuth 2.1 authorization server endpoints for the MCP connector.
@@ -100,6 +100,7 @@ function signInPage(opts: {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Sign in — ${escapeHtml(opts.firm.displayName)}</title>
+${BRAND_FAVICON}
 <style>${SIGN_IN_STYLES}</style>
 </head>
 <body>
@@ -406,7 +407,7 @@ export async function oauthRoutes(fastify: FastifyInstance, qboManager: QBOManag
 function errorPage(message: string, firm: FirmBrand): string {
   return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Sign-in error — ${escapeHtml(firm.displayName)}</title><style>${SIGN_IN_STYLES}</style></head>
+<title>Sign-in error — ${escapeHtml(firm.displayName)}</title>${BRAND_FAVICON}<style>${SIGN_IN_STYLES}</style></head>
 <body><div class="card">
   <div class="brand">${brandLine(firm)}</div>
   <h1>Can't complete sign-in</h1>

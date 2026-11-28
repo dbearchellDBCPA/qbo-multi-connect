@@ -44,70 +44,71 @@
 }
 
 /* ── Brand scales ───────────────────────────────────────────────────────────
-   David Bearchell CPA runs on two scales: a desaturated navy for structure,
-   text and dark chrome, and a teal accent for calls to action, links and
-   highlights. These are the only brand hues — every semantic token below is an
-   alias onto them, so the palette is changed in one place. Red (and a toned
-   amber) stay on as status colours only.
+   Same palette as dbcpallc.com: white paper, near-black ink, and Mets blue
+   (#002d72) as the one accent. Two scales carry it: a neutral ink scale for
+   structure, text and dark chrome, and a blue accent scale for calls to
+   action, links and highlights. These are the only brand hues — every
+   semantic token below is an alias onto them, so the palette is changed in
+   one place. Red (and a toned amber) stay on as status colours only.
 
    Contrast rule, and it is not negotiable: on light surfaces only accent-600
    and darker may carry text, icons or button fills; accent-500 and lighter are
-   decoration. On navy surfaces it inverts — accent-300/400 carry, accent-600 is
+   decoration. On ink surfaces it inverts — accent-300/400 carry, accent-600 is
    too dark to read. The semantic aliases below already encode that, which is
    why the rail has its own token block. */
 :root {
-  --color-navy-50: #f0f4f8;
-  --color-navy-100: #d9e2ec;
-  --color-navy-200: #bcccdc;
-  --color-navy-300: #9fb3c8;
-  --color-navy-400: #829ab1;
-  --color-navy-500: #627d98;
-  --color-navy-600: #486581;
-  --color-navy-700: #334e68;
-  --color-navy-800: #243b53;
-  --color-navy-900: #102a43;
-  --color-navy-950: #0a1929;
+  --color-ink-50: #f6f6f7;
+  --color-ink-100: #ececee;
+  --color-ink-200: #d6d7db;
+  --color-ink-300: #b4b6bd;
+  --color-ink-400: #8a8d96;
+  --color-ink-500: #6b7280;
+  --color-ink-600: #5b606b;
+  --color-ink-700: #3f434b;
+  --color-ink-800: #26282d;
+  --color-ink-900: #17181b;
+  --color-ink-950: #0b0b0c;
 
-  --color-accent-300: #7edce2;
-  --color-accent-400: #4fd1c5;
-  --color-accent-500: #38b2ac;
-  --color-accent-600: #117c75;
-  --color-accent-700: #0e6f68;
-  --color-accent-800: #115e59;
+  --color-accent-300: #a9c4f7;
+  --color-accent-400: #7ea6f2;
+  --color-accent-500: #2a5db8;
+  --color-accent-600: #002d72;
+  --color-accent-700: #001f52;
+  --color-accent-800: #00163b;
 }
 
 /* ── Semantic tokens: light ─────────────────────────────────────────────────
-   White page, navy ink, teal accent. The theme toggle sets data-theme on
+   White page, black ink, Mets blue accent. The theme toggle sets data-theme on
    <html>; without it the OS preference applies. */
 :root {
   color-scheme: light;
   /* surfaces */
   --bg: #ffffff;
   --surface: #ffffff;
-  --surface-2: var(--color-navy-50);
-  --panel: var(--color-navy-50);
+  --surface-2: var(--color-ink-50);
+  --panel: var(--color-ink-50);
   /* borders */
-  --border: var(--color-navy-100);
-  --border-subtle: var(--color-navy-100);
-  --border-input: var(--color-navy-500);
-  --border-control: var(--color-navy-300);
-  --border-dashed: var(--color-navy-300);
+  --border: var(--color-ink-100);
+  --border-subtle: var(--color-ink-100);
+  --border-input: var(--color-ink-500);
+  --border-control: var(--color-ink-300);
+  --border-dashed: var(--color-ink-300);
   /* text */
-  --text: var(--color-navy-900);
-  --text-2: var(--color-navy-700);
-  --text-3: var(--color-navy-600);
-  --muted: var(--color-navy-600);
-  /* The brand offers navy-500/400 for muted copy, but both fall short of AA on
+  --text: var(--color-ink-900);
+  --text-2: var(--color-ink-700);
+  --text-3: var(--color-ink-600);
+  --muted: var(--color-ink-600);
+  /* The brand offers ink-500/400 for muted copy, but both fall short of AA on
      white (4.28:1 and 2.90:1) and every --muted-2 use is small meta text.
-     navy-600 is the lightest step that clears 4.5:1 on white and on navy-50. */
-  --muted-2: var(--color-navy-600);
-  --ghost-text: var(--color-navy-700);
+     ink-600 is the lightest step that clears 4.5:1 on white and on ink-50. */
+  --muted-2: var(--color-ink-600);
+  --ghost-text: var(--color-ink-700);
   /* brand */
   --brand: var(--color-accent-600);
   --brand-hover: var(--color-accent-700);
   --on-brand: #ffffff;
-  --brand-soft: rgba(17, 124, 117, 0.1);
-  --brand-soft-border: rgba(17, 124, 117, 0.22);
+  --brand-soft: rgba(0, 45, 114, 0.1);
+  --brand-soft-border: rgba(0, 45, 114, 0.22);
   --brand-strong: var(--color-accent-700);
   /* status — the accent doubles as "healthy"; amber and red stay semantic */
   --ok: var(--color-accent-600);
@@ -122,20 +123,20 @@
   --danger-strong: #b91c1c;
   --danger-bg: #fef2f2;
   /* neutral + quiet badges (roles, disabled accounts) */
-  --badge-bg: var(--color-navy-100);
-  --badge-text: var(--color-navy-800);
-  --badge-muted-bg: var(--color-navy-50);
-  --badge-muted-text: var(--color-navy-600);
+  --badge-bg: var(--color-ink-100);
+  --badge-text: var(--color-ink-800);
+  --badge-muted-bg: var(--color-ink-50);
+  --badge-muted-text: var(--color-ink-600);
   /* components */
-  --bar-track: var(--color-navy-100);
+  --bar-track: var(--color-ink-100);
   --callout-bg: var(--warn-bg);
   --callout-border: var(--warn-border);
   --callout-title: var(--warn-text);
   --callout-body: #8a6a41;
-  --backdrop: rgba(10, 25, 41, 0.55);
-  --shadow-sm: 0 1px 2px rgba(16, 42, 67, 0.06);
-  --shadow-md: 0 4px 12px rgba(16, 42, 67, 0.1);
-  --seg-shadow: 0 1px 2px rgba(10, 25, 41, 0.35);
+  --backdrop: rgba(11, 11, 12, 0.55);
+  --shadow-sm: 0 1px 2px rgba(11, 11, 12, 0.06);
+  --shadow-md: 0 4px 12px rgba(11, 11, 12, 0.1);
+  --seg-shadow: 0 1px 2px rgba(11, 11, 12, 0.35);
   /* type */
   --font-ui: 'Inter Variable', Inter, system-ui, -apple-system, sans-serif;
   --font-display: 'Fraunces Variable', Fraunces, Georgia, 'Times New Roman', serif;
@@ -143,56 +144,56 @@
 }
 
 /* ── Dark chrome ────────────────────────────────────────────────────────────
-   The client rail is a navy band in both themes, so its tokens are declared
-   once and never overridden. Everything here is picked to read on navy-900:
-   accent-400/300 for anything interactive, navy-200/300 for supporting copy,
+   The client rail is a near-black band in both themes, so its tokens are declared
+   once and never overridden. Everything here is picked to read on ink-900:
+   accent-400/300 for anything interactive, ink-200/300 for supporting copy,
    lifted amber and red for the two status tones. */
 :root {
-  --rail-bg: var(--color-navy-900);
+  --rail-bg: var(--color-ink-900);
   --rail-text: #ffffff;
-  --rail-text-2: var(--color-navy-200);
-  --rail-muted: var(--color-navy-300);
-  --rail-border: var(--color-navy-800);
-  --rail-hover: var(--color-navy-800);
+  --rail-text-2: var(--color-ink-200);
+  --rail-muted: var(--color-ink-300);
+  --rail-border: var(--color-ink-800);
+  --rail-hover: var(--color-ink-800);
   --rail-accent: var(--color-accent-400);
   --rail-accent-hover: var(--color-accent-300);
-  --rail-field-bg: var(--color-navy-800);
-  --rail-field-border: var(--color-navy-700);
-  --rail-sel-bg: var(--color-navy-800);
-  --rail-sel-border: var(--color-navy-700);
-  --rail-seg-bg: var(--color-navy-800);
-  --rail-seg-active: var(--color-navy-700);
+  --rail-field-bg: var(--color-ink-800);
+  --rail-field-border: var(--color-ink-700);
+  --rail-sel-bg: var(--color-ink-800);
+  --rail-sel-border: var(--color-ink-700);
+  --rail-seg-bg: var(--color-ink-800);
+  --rail-seg-active: var(--color-ink-700);
   --rail-warn: #e6b271;
   --rail-danger: #f4a3a3;
 }
 
 /* ── Semantic tokens: dark ──────────────────────────────────────────────────
-   Same two scales, inverted: navy-950 page, navy-900 cards, accent-400 as the
+   Same two scales, inverted: ink-950 page, ink-900 cards, accent-400 as the
    interactive colour (accent-600 is unreadable here). Kept in a custom property
    block so the light and dark definitions stay line-for-line comparable. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) {
     color-scheme: dark;
-    --bg: var(--color-navy-950);
-    --surface: var(--color-navy-900);
-    --surface-2: var(--color-navy-800);
-    --panel: var(--color-navy-900);
-    --border: var(--color-navy-800);
-    --border-subtle: var(--color-navy-800);
-    --border-input: var(--color-navy-600);
-    --border-control: var(--color-navy-600);
-    --border-dashed: var(--color-navy-600);
+    --bg: var(--color-ink-950);
+    --surface: var(--color-ink-900);
+    --surface-2: var(--color-ink-800);
+    --panel: var(--color-ink-900);
+    --border: var(--color-ink-800);
+    --border-subtle: var(--color-ink-800);
+    --border-input: var(--color-ink-600);
+    --border-control: var(--color-ink-600);
+    --border-dashed: var(--color-ink-600);
     --text: #ffffff;
-    --text-2: var(--color-navy-200);
-    --text-3: var(--color-navy-200);
-    --muted: var(--color-navy-300);
-    --muted-2: var(--color-navy-300);
-    --ghost-text: var(--color-navy-100);
+    --text-2: var(--color-ink-200);
+    --text-3: var(--color-ink-200);
+    --muted: var(--color-ink-300);
+    --muted-2: var(--color-ink-300);
+    --ghost-text: var(--color-ink-100);
     --brand: var(--color-accent-400);
     --brand-hover: var(--color-accent-300);
-    --on-brand: var(--color-navy-950);
-    --brand-soft: rgba(79, 209, 197, 0.14);
-    --brand-soft-border: rgba(79, 209, 197, 0.3);
+    --on-brand: var(--color-ink-950);
+    --brand-soft: rgba(126, 166, 242, 0.14);
+    --brand-soft-border: rgba(126, 166, 242, 0.3);
     --brand-strong: var(--color-accent-300);
     --ok: var(--color-accent-400);
     --pill-ok-bg: var(--brand-soft);
@@ -205,16 +206,16 @@
     --danger-border: #7f3535;
     --danger-strong: #f87171;
     --danger-bg: #3f1d1d;
-    --badge-bg: var(--color-navy-800);
-    --badge-text: var(--color-navy-100);
-    --badge-muted-bg: var(--color-navy-800);
-    --badge-muted-text: var(--color-navy-300);
-    --bar-track: var(--color-navy-800);
+    --badge-bg: var(--color-ink-800);
+    --badge-text: var(--color-ink-100);
+    --badge-muted-bg: var(--color-ink-800);
+    --badge-muted-text: var(--color-ink-300);
+    --bar-track: var(--color-ink-800);
     --callout-bg: var(--warn-bg);
     --callout-border: var(--warn-border);
     --callout-title: var(--warn-text);
     --callout-body: #d3b385;
-    --backdrop: rgba(3, 10, 18, 0.7);
+    --backdrop: rgba(0, 0, 0, 0.7);
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
     --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.5);
     --seg-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
@@ -223,26 +224,26 @@
 
 :root[data-theme='dark'] {
   color-scheme: dark;
-  --bg: var(--color-navy-950);
-  --surface: var(--color-navy-900);
-  --surface-2: var(--color-navy-800);
-  --panel: var(--color-navy-900);
-  --border: var(--color-navy-800);
-  --border-subtle: var(--color-navy-800);
-  --border-input: var(--color-navy-600);
-  --border-control: var(--color-navy-600);
-  --border-dashed: var(--color-navy-600);
+  --bg: var(--color-ink-950);
+  --surface: var(--color-ink-900);
+  --surface-2: var(--color-ink-800);
+  --panel: var(--color-ink-900);
+  --border: var(--color-ink-800);
+  --border-subtle: var(--color-ink-800);
+  --border-input: var(--color-ink-600);
+  --border-control: var(--color-ink-600);
+  --border-dashed: var(--color-ink-600);
   --text: #ffffff;
-  --text-2: var(--color-navy-200);
-  --text-3: var(--color-navy-200);
-  --muted: var(--color-navy-300);
-  --muted-2: var(--color-navy-300);
-  --ghost-text: var(--color-navy-100);
+  --text-2: var(--color-ink-200);
+  --text-3: var(--color-ink-200);
+  --muted: var(--color-ink-300);
+  --muted-2: var(--color-ink-300);
+  --ghost-text: var(--color-ink-100);
   --brand: var(--color-accent-400);
   --brand-hover: var(--color-accent-300);
-  --on-brand: var(--color-navy-950);
-  --brand-soft: rgba(79, 209, 197, 0.14);
-  --brand-soft-border: rgba(79, 209, 197, 0.3);
+  --on-brand: var(--color-ink-950);
+  --brand-soft: rgba(126, 166, 242, 0.14);
+  --brand-soft-border: rgba(126, 166, 242, 0.3);
   --brand-strong: var(--color-accent-300);
   --ok: var(--color-accent-400);
   --pill-ok-bg: var(--brand-soft);
@@ -255,16 +256,16 @@
   --danger-border: #7f3535;
   --danger-strong: #f87171;
   --danger-bg: #3f1d1d;
-  --badge-bg: var(--color-navy-800);
-  --badge-text: var(--color-navy-100);
-  --badge-muted-bg: var(--color-navy-800);
-  --badge-muted-text: var(--color-navy-300);
-  --bar-track: var(--color-navy-800);
+  --badge-bg: var(--color-ink-800);
+  --badge-text: var(--color-ink-100);
+  --badge-muted-bg: var(--color-ink-800);
+  --badge-muted-text: var(--color-ink-300);
+  --bar-track: var(--color-ink-800);
   --callout-bg: var(--warn-bg);
   --callout-border: var(--warn-border);
   --callout-title: var(--warn-text);
   --callout-body: #d3b385;
-  --backdrop: rgba(3, 10, 18, 0.7);
+  --backdrop: rgba(0, 0, 0, 0.7);
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.5);
   --seg-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
@@ -446,8 +447,8 @@ button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
 }
 
 /* ── Left rail ──────────────────────────────────────────────────────────── */
-/* The client rail is the app's dark chrome: navy band, white primary text,
-   navy-200/300 supporting copy, accent-400 for anything interactive. The faint
+/* The client rail is the app's dark chrome: near-black band, white primary text,
+   ink-200/300 supporting copy, accent-400 for anything interactive. The faint
    three-bar mark anchored bottom-right is the brand's decorative motif. */
 .rail {
   background: var(--rail-bg);
@@ -456,7 +457,7 @@ button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='96' viewBox='0 0 120 96'%3E%3Cg fill='%234fd1c5' fill-opacity='0.05'%3E%3Crect x='4' y='56' width='28' height='36' rx='6'/%3E%3Crect x='44' y='32' width='28' height='60' rx='6'/%3E%3Crect x='84' y='8' width='28' height='84' rx='6'/%3E%3C/g%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='96' viewBox='0 0 120 96'%3E%3Cg fill='%237ea6f2' fill-opacity='0.05'%3E%3Crect x='4' y='56' width='28' height='36' rx='6'/%3E%3Crect x='44' y='32' width='28' height='60' rx='6'/%3E%3Crect x='84' y='8' width='28' height='84' rx='6'/%3E%3C/g%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 14px bottom 60px;
 }
@@ -475,7 +476,7 @@ button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
   height: 28px;
   border-radius: 8px;
   background: var(--rail-accent);
-  color: var(--color-navy-950);
+  color: var(--color-ink-950);
   font-weight: 700;
   font-size: 11px;
   display: flex;
@@ -611,7 +612,7 @@ button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
   justify-content: space-between;
   margin: 14px 10px 6px;
   padding-top: 12px;
-  border-top: 1px solid var(--color-navy-700);
+  border-top: 1px solid var(--color-ink-700);
   font-size: 10.5px;
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -629,7 +630,7 @@ button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
 
 .rail-add {
   margin: auto 14px 16px;
-  border: 1.5px dashed var(--color-navy-600);
+  border: 1.5px dashed var(--color-ink-600);
   border-radius: 9px;
   background: transparent;
   color: var(--rail-text-2);
@@ -657,8 +658,8 @@ button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
   flex-shrink: 0;
 }
 
-/* Icon buttons sit on the navy band, so they take the dark-chrome variants. */
-.rail .icon-btn { border-color: var(--color-navy-600); color: var(--rail-muted); }
+/* Icon buttons sit on the dark band, so they take the dark-chrome variants. */
+.rail .icon-btn { border-color: var(--color-ink-600); color: var(--rail-muted); }
 .rail .icon-btn:hover { background: var(--rail-hover); color: var(--rail-accent); }
 
 .whoami {
@@ -804,9 +805,9 @@ button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
 .avatar-admin { background: var(--badge-bg); color: var(--badge-text); }
 .avatar-disabled { background: var(--badge-muted-bg); color: var(--badge-muted-text); }
 
-.rail .avatar-member { background: var(--color-navy-700); color: var(--rail-accent); }
-.rail .avatar-admin { background: var(--color-navy-100); color: var(--color-navy-800); }
-.rail .avatar-disabled { background: var(--color-navy-800); color: var(--rail-muted); }
+.rail .avatar-member { background: var(--color-ink-700); color: var(--rail-accent); }
+.rail .avatar-admin { background: var(--color-ink-100); color: var(--color-ink-800); }
+.rail .avatar-disabled { background: var(--color-ink-800); color: var(--rail-muted); }
 
 /* Assigned-client chips */
 .chips { display: flex; flex-wrap: wrap; gap: 7px; }
@@ -831,7 +832,7 @@ button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
 
 /* ── MCP connector card ─────────────────────────────────────────────────── */
 /* Uses the standard .card shell so it follows the active theme like every
-   other card; the mono URL keeps the teal accent in both palettes. */
+   other card; the mono URL keeps the blue accent in both palettes. */
 .connector-url-row {
   display: flex;
   align-items: center;
@@ -942,7 +943,7 @@ button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
 
 .act-dot { width: 7px; height: 7px; border-radius: 50%; margin-top: 5px; flex-shrink: 0; }
 .act-dot.ok { background: var(--brand); }
-.act-dot.info { background: var(--color-navy-500); }
+.act-dot.info { background: var(--color-ink-500); }
 .act-dot.warn { background: var(--warn); }
 
 .act-title { font-size: 12.5px; font-weight: 600; overflow-wrap: anywhere; }
@@ -1243,7 +1244,7 @@ pre.json-view {
 /* ── Requests for access ─────────────────────────────────────────────────── */
 .seg-badge {
   display: inline-block; min-width: 17px; padding: 0 5px; margin-left: 4px; border-radius: 9px;
-  background: var(--rail-warn); color: var(--color-navy-950, #0b1e30); font-size: 10.5px; font-weight: 700; line-height: 17px; text-align: center;
+  background: var(--rail-warn); color: var(--color-ink-950, #0b0b0c); font-size: 10.5px; font-weight: 700; line-height: 17px; text-align: center;
 }
 .avatar-requests { background: var(--rail-sel-bg); color: var(--rail-accent); border: 1px solid var(--rail-sel-border); font-size: 11px; }
 .request-card-label { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
